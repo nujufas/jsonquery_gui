@@ -27,19 +27,28 @@ pub enum Event {
     Loading,
     Loaded(Arc<Document>),
     LoadError(String),
-    QueryItem { gen: u64, value: serde_json::Value },
-    QueryItemError { gen: u64, error: String },
-    QueryDone { gen: u64, cancelled: bool, elapsed: Duration },
-    QueryError { gen: u64, error: String },
+    QueryItem {
+        gen: u64,
+        value: serde_json::Value,
+    },
+    QueryItemError {
+        gen: u64,
+        error: String,
+    },
+    QueryDone {
+        gen: u64,
+        cancelled: bool,
+        elapsed: Duration,
+    },
+    QueryError {
+        gen: u64,
+        error: String,
+    },
 }
 
 /// Spawn the worker thread. `wake` is called after every event is sent so
 /// the (otherwise idle, redraw-on-demand) egui context repaints promptly.
-pub fn spawn(
-    cmd_rx: Receiver<Command>,
-    evt_tx: Sender<Event>,
-    wake: impl Fn() + Send + 'static,
-) {
+pub fn spawn(cmd_rx: Receiver<Command>, evt_tx: Sender<Event>, wake: impl Fn() + Send + 'static) {
     std::thread::spawn(move || {
         for cmd in cmd_rx {
             match cmd {
@@ -53,7 +62,12 @@ pub fn spawn(
                     let result = jsonquery_core::load_text(&text).map(Arc::new);
                     send_load_result(&evt_tx, result, &wake);
                 }
-                Command::Query { doc, text, gen, cancel } => {
+                Command::Query {
+                    doc,
+                    text,
+                    gen,
+                    cancel,
+                } => {
                     run_query(&evt_tx, &doc, &text, gen, &cancel, &wake);
                 }
             }
@@ -83,9 +97,7 @@ fn run_query(
     let start = Instant::now();
     let result = jsonquery_query::run_query(&doc.root, text, cancel, |event| match event {
         QueryEvent::Item(value) => send(evt_tx, Event::QueryItem { gen, value }, wake),
-        QueryEvent::ItemError(error) => {
-            send(evt_tx, Event::QueryItemError { gen, error }, wake)
-        }
+        QueryEvent::ItemError(error) => send(evt_tx, Event::QueryItemError { gen, error }, wake),
     });
 
     match result {
@@ -98,7 +110,14 @@ fn run_query(
             },
             wake,
         ),
-        Err(e) => send(evt_tx, Event::QueryError { gen, error: e.to_string() }, wake),
+        Err(e) => send(
+            evt_tx,
+            Event::QueryError {
+                gen,
+                error: e.to_string(),
+            },
+            wake,
+        ),
     }
 }
 

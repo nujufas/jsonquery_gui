@@ -9,7 +9,9 @@
 //! viewport height, not by document size.
 
 use eframe::egui;
-use jsonquery_core::{flatten_visible, new_expanded_at_root, ExpandState, NodePath, PathSegment, RowInfo, ValueKind};
+use jsonquery_core::{
+    flatten_visible, new_expanded_at_root, ExpandState, NodePath, PathSegment, RowInfo, ValueKind,
+};
 use serde_json::Value;
 
 pub struct TreeView {
@@ -77,7 +79,9 @@ impl TreeView {
             .auto_shrink([false, false])
             .show_rows(ui, row_height, total_rows, |ui, range| {
                 for i in range {
-                    let Some(row) = self.rows.get(i) else { continue };
+                    let Some(row) = self.rows.get(i) else {
+                        continue;
+                    };
                     if draw_row(ui, row) {
                         toggled = Some(row.path.clone());
                     }
@@ -121,12 +125,30 @@ fn draw_row(ui: &mut egui::Ui, row: &RowInfo) -> bool {
         }
 
         let (value_text, color) = match row.kind {
-            ValueKind::Object => (format!("{{\u{2026}}} ({} keys)", row.child_count), ui.visuals().weak_text_color()),
-            ValueKind::Array => (format!("[\u{2026}] ({} items)", row.child_count), ui.visuals().weak_text_color()),
-            ValueKind::String => (row.scalar_preview.clone().unwrap_or_default(), string_color(ui)),
-            ValueKind::Number => (row.scalar_preview.clone().unwrap_or_default(), number_color(ui)),
-            ValueKind::Bool => (row.scalar_preview.clone().unwrap_or_default(), bool_color(ui)),
-            ValueKind::Null => (row.scalar_preview.clone().unwrap_or_default(), ui.visuals().weak_text_color()),
+            ValueKind::Object => (
+                format!("{{\u{2026}}} ({} keys)", row.child_count),
+                ui.visuals().weak_text_color(),
+            ),
+            ValueKind::Array => (
+                format!("[\u{2026}] ({} items)", row.child_count),
+                ui.visuals().weak_text_color(),
+            ),
+            ValueKind::String => (
+                row.scalar_preview.clone().unwrap_or_default(),
+                string_color(ui),
+            ),
+            ValueKind::Number => (
+                row.scalar_preview.clone().unwrap_or_default(),
+                number_color(ui),
+            ),
+            ValueKind::Bool => (
+                row.scalar_preview.clone().unwrap_or_default(),
+                bool_color(ui),
+            ),
+            ValueKind::Null => (
+                row.scalar_preview.clone().unwrap_or_default(),
+                ui.visuals().weak_text_color(),
+            ),
         };
         let label = ui.label(egui::RichText::new(value_text).monospace().color(color));
         if row.kind.is_container() && label.double_clicked() {

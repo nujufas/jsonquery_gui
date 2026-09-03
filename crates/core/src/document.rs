@@ -43,8 +43,7 @@ pub struct Document {
 /// directly into an owned `serde_json::Value` tree.
 pub fn load(path: impl AsRef<Path>) -> Result<Document> {
     let path = path.as_ref();
-    let file = std::fs::File::open(path)
-        .with_context(|| format!("opening {}", path.display()))?;
+    let file = std::fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
     let byte_len = file
         .metadata()
         .with_context(|| format!("reading metadata for {}", path.display()))?

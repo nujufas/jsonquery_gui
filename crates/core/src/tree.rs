@@ -129,14 +129,28 @@ fn push_node(
         Value::Array(items) => {
             for (i, child) in items.iter().enumerate() {
                 path.push(PathSegment::Index(i));
-                push_node(child, Some(PathSegment::Index(i)), path, depth + 1, expand, out);
+                push_node(
+                    child,
+                    Some(PathSegment::Index(i)),
+                    path,
+                    depth + 1,
+                    expand,
+                    out,
+                );
                 path.pop();
             }
         }
         Value::Object(map) => {
             for (k, child) in map.iter() {
                 path.push(PathSegment::Key(k.clone()));
-                push_node(child, Some(PathSegment::Key(k.clone())), path, depth + 1, expand, out);
+                push_node(
+                    child,
+                    Some(PathSegment::Key(k.clone())),
+                    path,
+                    depth + 1,
+                    expand,
+                    out,
+                );
                 path.pop();
             }
         }
@@ -201,7 +215,10 @@ mod tests {
         let rows = flatten_visible(&v, &expand);
         // root, a, a[0], a[1], b  (b's child "c" stays collapsed)
         assert_eq!(rows.len(), 5);
-        assert_eq!(rows[2].path, vec![PathSegment::Key("a".into()), PathSegment::Index(0)]);
+        assert_eq!(
+            rows[2].path,
+            vec![PathSegment::Key("a".into()), PathSegment::Index(0)]
+        );
     }
 
     #[test]

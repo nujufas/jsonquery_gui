@@ -135,7 +135,11 @@ impl App {
                     self.results_item_errors += 1;
                     self.last_item_error = Some(error);
                 }
-                Event::QueryDone { gen, cancelled, elapsed } => {
+                Event::QueryDone {
+                    gen,
+                    cancelled,
+                    elapsed,
+                } => {
                     if gen != self.query_gen {
                         continue;
                     }
@@ -256,14 +260,16 @@ impl App {
             .default_size([520.0, 380.0])
             .show(ctx, |ui| {
                 ui.label("Paste raw JSON (or NDJSON — one value per line) below:");
-                egui::ScrollArea::vertical().max_height(280.0).show(ui, |ui| {
-                    ui.add(
-                        egui::TextEdit::multiline(&mut self.paste_text)
-                            .desired_rows(14)
-                            .desired_width(f32::INFINITY)
-                            .code_editor(),
-                    );
-                });
+                egui::ScrollArea::vertical()
+                    .max_height(280.0)
+                    .show(ui, |ui| {
+                        ui.add(
+                            egui::TextEdit::multiline(&mut self.paste_text)
+                                .desired_rows(14)
+                                .desired_width(f32::INFINITY)
+                                .code_editor(),
+                        );
+                    });
                 ui.horizontal(|ui| {
                     let enabled = !self.paste_text.trim().is_empty();
                     if ui.add_enabled(enabled, egui::Button::new("Load")).clicked() {
@@ -321,7 +327,10 @@ impl App {
                 ui.separator();
             }
             if let Some(err) = &self.load_error {
-                ui.colored_label(egui::Color32::from_rgb(220, 80, 80), format!("Load error: {err}"));
+                ui.colored_label(
+                    egui::Color32::from_rgb(220, 80, 80),
+                    format!("Load error: {err}"),
+                );
                 ui.separator();
             }
 
@@ -334,7 +343,9 @@ impl App {
                     elapsed, self.results_count_so_far
                 );
                 if self.results_truncated {
-                    s.push_str(&format!(", {shown} shown (live preview capped at {LIVE_PREVIEW_CAP})"));
+                    s.push_str(&format!(
+                        ", {shown} shown (live preview capped at {LIVE_PREVIEW_CAP})"
+                    ));
                 }
                 if self.last_query_cancelled {
                     s.push_str(" — cancelled");
@@ -352,7 +363,10 @@ impl App {
             }
             if let Some(err) = &self.query_error {
                 ui.separator();
-                ui.colored_label(egui::Color32::from_rgb(220, 80, 80), format!("Query error: {err}"));
+                ui.colored_label(
+                    egui::Color32::from_rgb(220, 80, 80),
+                    format!("Query error: {err}"),
+                );
             }
         });
     }
