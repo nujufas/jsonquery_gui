@@ -1,0 +1,262 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Architecture — jsonquery</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<input type="checkbox" id="nav-toggle">
+<label for="nav-toggle" class="nav-toggle-label">
+  <svg width="18" height="18" viewBox="0 0 18 18" fill="none"><path d="M2 4.5H16M2 9H16M2 13.5H16" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+  jsonquery docs
+</label>
+
+<div class="shell">
+  <nav class="sidebar">
+    <div class="brand">
+      <div class="brand-mark">JQ</div>
+      <div class="brand-text">
+        <div class="name">jsonquery</div>
+        <div class="sub">architecture docs</div>
+      </div>
+    </div>
+
+    <div class="nav-group">
+      <a class="nav-link" href="index.html"><span class="n">1</span>Overview</a>
+
+      <a class="nav-link active" href="architecture.html"><span class="n">2</span>Architecture</a>
+      <ul class="subnav">
+        <li><a href="#pipeline">Pipeline overview</a></li>
+        <li><a href="#ingest">1. File ingest</a></li>
+        <li><a href="#indexing">2. Indexing layer</a></li>
+        <li><a href="#query-engine">3. Query engine</a></li>
+        <li><a href="#concurrency">4. Concurrency model</a></li>
+        <li><a href="#gui-layer">5. GUI &amp; virtualized tree</a></li>
+        <li><a href="#results">6. Results handling</a></li>
+        <li><a href="#crates">7. Crate map</a></li>
+        <li><a href="#layout">8. Workspace layout</a></li>
+      </ul>
+
+      <a class="nav-link" href="decisions.html"><span class="n">3</span>Decisions &amp; Roadmap</a>
+    </div>
+
+    <div class="sidebar-foot">Draft · 2026-09-03<br>For review — nothing implemented yet.</div>
+  </nav>
+
+  <div class="main-wrap">
+    <main>
+      <p class="eyebrow">System design</p>
+      <h1 class="page-title">Architecture</h1>
+      <p class="lede">How data flows from a dropped file to a rendered, queryable tree — and how it stays smooth at gigabyte scale.</p>
+
+      <section class="doc-section" id="pipeline">
+        <h2><span class="num">01</span>Pipeline overview</h2>
+        <p class="section-dek">Four stages, one thread boundary, one channel. Sections below zoom into each box.</p>
+
+        <div class="diagram">
+          <div class="d-group">
+            <span class="d-label">worker thread</span>
+            <div class="d-row">
+              <div class="d-box">File<span class="sub">path from drag-drop / picker</span></div>
+              <div class="d-arrow">→</div>
+              <div class="d-box">Ingest<span class="sub">memmap2</span></div>
+              <div class="d-arrow">→</div>
+              <div class="d-box">Index<span class="sub">sonic-rs + checkpoints</span></div>
+              <div class="d-arrow">→</div>
+              <div class="d-box accent">Query exec<span class="sub">jaq</span></div>
+            </div>
+          </div>
+          <div class="d-col" style="margin: 12px 0">
+            <div class="d-vline"></div>
+            <div style="font-size:11px;color:var(--text-faint)">crossbeam-channel · progress + results, cancellable via generation counter</div>
+            <div class="d-vline"></div>
+          </div>
+          <div class="d-group">
+            <span class="d-label">UI thread</span>
+            <div class="d-row">
+              <div class="d-box accent2">Query bar</div>
+              <div class="d-box accent2">Source tree<span class="sub">virtualized</span></div>
+              <div class="d-box accent2">Results tree<span class="sub">virtualized</span></div>
+              <div class="d-box accent2">Status bar</div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="doc-section" id="ingest">
+        <h2><span class="num">02</span>File ingest &amp; memory-mapping</h2>
+        <p>The file is opened with <code>memmap2</code> rather than read into a <code>Vec&lt;u8&gt;</code>. That gives three things for free: opening a 5&nbsp;GB file is instant (no upfront copy), the OS page cache does the paging work we'd otherwise hand-roll, and unused pages never occupy heap memory. The mapped bytes (<code>&amp;[u8]</code>) are the single source of truth for the rest of the pipeline — the index and the query engine both read <em>into</em> this slice rather than copying out of it wherever possible.</p>
+        <div class="callout info">
+          <span class="ic">ℹ</span>
+          <div><strong class="lbl">Small-file fallback</strong>Below a size threshold (see <a href="decisions.html#d3-scale">Decision 3</a>), the same mmap path is used, but the indexing stage below is skipped in favor of a direct in-memory parse — see the Phase&nbsp;1 note under <a href="decisions.html#roadmap">Roadmap</a>.</div>
+        </div>
+      </section>
+
+      <section class="doc-section" id="indexing">
+        <h2><span class="num">03</span>Indexing layer — checkpoints over a lazy reader</h2>
+        <p>This is the piece that makes huge files feel small, and it's the part of the original draft that changed the most under research. The original plan was to hand-roll a full per-node "tape" scanner. That's no longer necessary: <a href="https://github.com/cloudwego/sonic-rs" target="_blank" rel="noopener">sonic-rs</a>, a SIMD-accelerated JSON library, already provides exactly the low-level primitive this layer needs — for free, and battle-tested.</p>
+
+        <div class="callout good">
+          <span class="ic">✓</span>
+          <div><strong class="lbl">Research finding</strong>sonic-rs's <code>get()</code>/<code>get_unchecked()</code> return a <code>LazyValue</code> — a wrapper around a raw, <em>unparsed</em> JSON slice, located by SIMD-accelerated skipping. Critically, these APIs take a plain immutable <code>&amp;str</code>/<code>&amp;[u8]</code> — no mutable copy required — so they work directly against bytes borrowed from a memory-mapped file. It also exposes <code>to_array_iter()</code> / <code>to_object_iter_unchecked()</code> for sequential lazy iteration without materializing values. Apache-2.0 licensed.</div>
+        </div>
+
+        <p>What sonic-rs does <em>not</em> give us is guaranteed O(1) random access into an arbitrary child — <code>get()</code> skips forward from the start of a container using SIMD, which is very fast per byte but still О(k) in the number of preceding elements. For a 50-million-element array, jumping straight to element #40,000,000 (e.g. dragging the results scrollbar) would re-skip 40 million elements every time unless something remembers where things are.</p>
+
+        <h3>The design: a sparse checkpoint table, not a full tape</h3>
+        <p>So the indexing layer isn't a parser — it's a thin bookkeeping pass on top of sonic-rs's reader. One lightweight forward pass over each container records a byte offset every <em>N</em> children (tunable, e.g. every 4,096th array element or object key) instead of every single one:</p>
+
+        <div class="diagram">
+          <div class="d-row" style="gap:10px">
+            <div class="d-box" style="min-width:170px">Checkpoint table<span class="sub">array of len 50,000,000</span><span class="sub">offset[0], offset[4096], offset[8192], …</span></div>
+            <div class="d-arrow">→</div>
+            <div class="d-box accent" style="min-width:170px">Resolve child #4,213,000<span class="sub">1. checkpoint = 4,213,000 / 4096 → O(1)</span><span class="sub">2. sonic-rs skip remainder (≤4096) → fast</span></div>
+          </div>
+          <p class="d-caption">Memory cost is ~1/4096th of a full per-node tape; worst-case lookup cost is bounded by the checkpoint interval, not by document size.</p>
+        </div>
+
+        <p>This cleanly splits by access pattern:</p>
+        <ul>
+          <li><strong>Indexed access</strong> — <code>.key</code>, <code>.[i]</code>, <code>.[a:b]</code>, and the tree widget resolving a visible row — use the checkpoint table for bounded-cost point/slice lookup.</li>
+          <li><strong>Sequential access</strong> — <code>.[]</code>, <code>keys</code>, <code>to_entries</code>, and any full-scan filter — use sonic-rs's lazy iterators directly. These are inherently O(n) <em>by nature of visiting every child</em>, not a limitation of our design, and they still never materialize more than one child at a time.</li>
+        </ul>
+
+        <h3>NDJSON and concatenated JSON</h3>
+        <p>A lot of real "large JSON files" are actually newline-delimited JSON — one value per line, common for log exports and data dumps — rather than a single giant document. The indexer treats the file as <em>one or more</em> top-level values from the start (each gets its own checkpoint-indexed pass) instead of assuming exactly one root, so an NDJSON file works the same day as a single huge document, with no separate "format" to support. Confirm this matches your use case — see <a href="decisions.html#d3-scale">Decision 3</a>.</p>
+
+        <h3>Parallel first pass (optional, later)</h3>
+        <p>For the common "one giant top-level array of records" shape, the checkpoint-building pass can be chunked across threads with <code>rayon</code>: cheaply find approximate element boundaries, checkpoint each chunk in parallel, then merge. A Phase&nbsp;2 optimization, not required for correctness.</p>
+
+        <div class="callout warn">
+          <span class="ic">⚠</span>
+          <div><strong class="lbl">Build/portability note</strong>sonic-rs's fast paths target x86_64 and aarch64 and lean on SIMD feature flags; other architectures fall back to a slower path automatically. Distributed binaries should target a safe explicit feature baseline (or runtime CPU-feature dispatch) rather than <code>target-cpu=native</code>, which only helps builds compiled on the exact machine that runs them. Tracked in <a href="decisions.html#risks">Open risks</a>.</div>
+        </div>
+      </section>
+
+      <section class="doc-section" id="query-engine">
+        <h2><span class="num">04</span>Query engine — embedding jaq</h2>
+        <p><a href="https://github.com/01mf02/jaq" target="_blank" rel="noopener">jaq</a> is a jq clone written in Rust and usable as a library, not just a CLI. Embedding it means the query language, its parser, and its evaluator arrive largely for free and match syntax users already know — see <a href="decisions.html#d2-query-lang">Decision 2</a> for the full comparison against the alternatives.</p>
+
+        <h3>The integration point: <code>ValT</code></h3>
+        <p>jaq-core is generic over the value type via a trait, <a href="https://docs.rs/jaq-core/latest/jaq_core/val/trait.ValT.html" target="_blank" rel="noopener"><code>ValT</code></a> — implement it for a custom type and jaq's evaluator runs over that type instead of a built-in <code>Value</code>. Reading the trait closely changes the earlier "unvalidated" risk into a concrete design:</p>
+        <ul>
+          <li>Structural methods like <code>key_values(self) -&gt; BoxIter&lt;'static, …&gt;</code> and <code>values(self) -&gt; Box&lt;dyn Iterator&lt;…&gt;&gt;</code> carry a <code>'static</code> bound — but that only forbids <em>borrowing</em> a stack lifetime. An <strong>owned</strong> handle carrying a cheap <code>Arc&lt;Mmap&gt;</code> clone satisfies <code>'static</code> just fine, and <code>Box&lt;dyn Iterator&gt;</code> is a real pull-based lazy iterator regardless of boxing — it doesn't force eager collection.</li>
+          <li>So the natural shape is: <code>enum Val { Lazy { mmap: Arc&lt;Mmap&gt;, range: ByteRange, checkpoints: Arc&lt;Index&gt; }, Owned(serde_json::Value) }</code>. A <code>Lazy</code> value's <code>index</code>/<code>range</code>/<code>key_values</code>/<code>values</code> resolve children via the checkpoint table from §3 and wrap each child as another cheap <code>Lazy</code> handle — no recursive parsing until a leaf is actually read (<code>as_bool</code>, <code>into_string</code>, arithmetic, …).</li>
+          <li><code>from_map</code>/<code>from_num</code> and anything a query <em>constructs</em> (object/array literals, arithmetic results, string interpolation) naturally falls back to the <code>Owned</code> variant — those values were never backed by source bytes in the first place, so there's nothing to keep lazy.</li>
+        </ul>
+        <p>This is still a design sketch, not a proven implementation — see the spike in <a href="decisions.html#risks">Open risks</a> — but it's now a "confirm it performs" question rather than a "figure out if it's possible" question.</p>
+
+        <h3>Two free wins that came out of this research</h3>
+        <div class="option-grid">
+          <div class="option-card is-rec">
+            <div class="top-row"><h4>Exact number round-tripping</h4></div>
+            <p>jq's identity filter is required (since jq&nbsp;1.7) to preserve a number's original literal text when it isn't arithmetically touched — jaq satisfies this via <code>serde_json</code>'s <code>arbitrary_precision</code> feature. A 64-bit snowflake-style ID or a Postgres bigint survives a <code>select(...)</code> or <code>.foo</code> query byte-for-byte, instead of silently rounding through an f64 the way naive JSON tooling does. This falls out of the architecture already, at no extra cost.</p>
+          </div>
+          <div class="option-card is-rec">
+            <div class="top-row"><h4>Short-circuiting queries</h4></div>
+            <p>jaq's evaluator is generator-based, like jq itself: every filter yields a lazy stream of outputs. <code>first(...)</code>, <code>limit(n; …)</code>, and slicing stop pulling as soon as they have enough — jaq's own changelog specifically tracks correctness fixes to this exact behavior. Combined with §7 below, "give me the first 20 matches" against a 50-million-element array can genuinely stop early rather than quietly running to completion in the background.</p>
+          </div>
+        </div>
+      </section>
+
+      <section class="doc-section" id="concurrency">
+        <h2><span class="num">05</span>Concurrency model</h2>
+        <p>The UI thread never touches the file, the index, or the query engine directly — it sends commands and receives messages over a <code>crossbeam-channel</code> pair.</p>
+
+        <div class="diagram">
+          <div class="d-row">
+            <div class="d-box accent2">UI thread<span class="sub">egui/eframe</span></div>
+            <div class="d-col" style="min-width:140px">
+              <div style="font-size:11px;color:var(--text-faint)">Open(path) / Query(text, gen) / Cancel</div>
+              <div style="font-size:16px;color:var(--text-faint)">→</div>
+              <div style="font-size:16px;color:var(--text-faint)">←</div>
+              <div style="font-size:11px;color:var(--text-faint)">Progress / Indexed / Rows(gen) / Error</div>
+            </div>
+            <div class="d-box accent">Worker thread<span class="sub">ingest · index · query</span></div>
+          </div>
+        </div>
+
+        <p>Two things fall out of this cleanly:</p>
+        <ul>
+          <li><strong>The window never freezes.</strong> Loading a 5&nbsp;GB file or running an expensive query happens entirely off-thread; the UI keeps redrawing (a spinner, byte-scanned progress) using the last message received.</li>
+          <li><strong>Stale work is cheap to discard.</strong> Every query carries a monotonically increasing generation number. If the user edits the query field and re-submits before the previous run finishes, the worker is told to abort (checked at safe points during indexing/evaluation), and the UI ignores any late results tagged with an old generation.</li>
+        </ul>
+      </section>
+
+      <section class="doc-section" id="gui-layer">
+        <h2><span class="num">06</span>GUI layer &amp; the virtualized tree widget</h2>
+        <p>Built on <code>egui</code>/<code>eframe</code> (see <a href="decisions.html#d1-gui">Decision 1</a> for why). The window is three panels: a multiline query bar pinned to the top, and two instances of the same custom widget below it — the <strong>source tree</strong> (the loaded document) and the <strong>results tree</strong> (the last query's output).</p>
+        <h3>How the virtualization actually works</h3>
+        <p>Expand/collapse state is <em>not</em> stored on the tree itself — it lives in a side map keyed by node path (<code>HashMap&lt;NodePath, bool&gt;</code>). Every frame, the widget:</p>
+        <ol>
+          <li>Reads the current scroll offset and viewport height from egui.</li>
+          <li>Computes which <em>row indices</em> are visible, given a fixed row height (<code>visible_start = offset / row_height</code>, etc.) — an arithmetic step, not a walk.</li>
+          <li>Resolves <em>only those rows</em> against the index — following expand state to skip collapsed subtrees — and draws them.</li>
+          <li>Reserves the correct total scroll height up front (row count × row height) so the scrollbar is accurate without ever visiting off-screen rows.</li>
+        </ol>
+        <p>The cost of one frame is therefore bounded by <em>viewport height</em>, not <em>document size</em> — scrolling a 50-row window feels identical whether the document has 500 nodes or 500 million.</p>
+        <div class="callout warn">
+          <span class="ic">⚠</span>
+          <div><strong class="lbl">Second spike</strong>This is a standard technique, but it needs to be prototyped against a real multi-GB synthetic file (both "deeply nested" and "one huge flat array" shapes) before the rest of the GUI is built on top of it. See <a href="decisions.html#risks">Open risks</a>.</div>
+        </div>
+      </section>
+
+      <section class="doc-section" id="results">
+        <h2><span class="num">07</span>Results handling</h2>
+        <p>Query results need the same care as the source document — <code>.[] | select(...)</code> over a large array can itself produce millions of rows. The results tree reuses the exact virtualized widget from above, but the data behind it is populated differently:</p>
+        <ul>
+          <li><strong>Streamed, not collected.</strong> The query executor pushes result items to the UI incrementally as jaq produces them, rather than collecting the full output before returning anything — the results pane starts filling in immediately. This is a direct consequence of jaq's generator-based evaluation (§4) — there's no "wait for the whole result set" step to bypass.</li>
+          <li><strong>Bounded live preview.</strong> The in-memory/rendered preview caps at a configurable count (e.g. the first 50k items); the status bar shows "50,000+ shown, query still running / N total" rather than trying to hold an unbounded result set in memory.</li>
+          <li><strong>Full export bypasses the cap.</strong> "Save results to file" re-runs the query in a streaming write mode straight to disk, so exporting 10 million matched rows never requires materializing them all at once in RAM.</li>
+        </ul>
+      </section>
+
+      <section class="doc-section" id="crates">
+        <h2><span class="num">08</span>Crate map</h2>
+        <div class="tbl-wrap">
+        <table>
+          <thead><tr><th>Crate</th><th>Role</th></tr></thead>
+          <tbody>
+            <tr><td><code>eframe</code> / <code>egui</code></td><td>Native GUI shell and immediate-mode widget rendering.</td></tr>
+            <tr><td><code>egui_extras</code></td><td>Reference implementation for row virtualization patterns; may be used directly for simpler lists.</td></tr>
+            <tr><td><code>memmap2</code></td><td>Memory-map the input file for zero-copy, lazy-paged access. Actively maintained fork of the original (unmaintained) <code>memmap</code> crate; MIT/Apache-2.0.</td></tr>
+            <tr><td><code>serde_json</code></td><td>DOM parsing for the Phase&nbsp;1 in-memory path, and the <code>Owned</code> arm of the jaq <code>Val</code> adapter (§4) — with <code>arbitrary_precision</code> enabled for exact number round-tripping.</td></tr>
+            <tr><td><code>sonic-rs</code> <span class="badge rec" style="vertical-align:1px">Phase 2</span></td><td>Foundation of the Phase&nbsp;2 indexing layer (§3) — SIMD-accelerated lazy field access and iteration directly over borrowed, immutable bytes. No mutable-copy requirement, unlike simd-json below, which is what makes it fit an mmap-backed design.</td></tr>
+            <tr><td><code>simd-json</code> <span class="badge later">maybe</span></td><td>Faster alternative parser for the Phase&nbsp;1 in-memory path only — it parses in-place and destructively, which <strong>requires a mutable buffer</strong>, so it doesn't fit directly against a read-only mmap without an extra copy. Worth a profiling pass against plain <code>serde_json</code> before adding it.</td></tr>
+            <tr><td><code>jaq-core</code> / <code>jaq-std</code> / <code>jaq-json</code></td><td>Embedded jq-compatible query language and evaluator — see §4 for the <code>ValT</code> integration design.</td></tr>
+            <tr><td><code>rayon</code></td><td>Parallel chunked checkpoint-building for large top-level arrays (Phase&nbsp;2 optimization).</td></tr>
+            <tr><td><code>crossbeam-channel</code></td><td>UI ⇄ worker-thread messaging.</td></tr>
+            <tr><td><code>rfd</code></td><td>Native "Open File" dialog, alongside OS-level drag-and-drop (handled directly by egui/winit).</td></tr>
+            <tr><td><code>anyhow</code> / <code>thiserror</code></td><td>Error handling — typed errors at API boundaries, contextual errors in the app layer.</td></tr>
+            <tr><td><code>tracing</code></td><td>Structured logging and span timing, used while profiling the ingest/index/query hot paths.</td></tr>
+          </tbody>
+        </table>
+        </div>
+      </section>
+
+      <section class="doc-section" id="layout">
+        <h2><span class="num">09</span>Proposed workspace layout</h2>
+        <p>A Cargo workspace with the lazy-index logic, the query adapter, and the GUI kept as separate crates — mainly so the index/query core can be unit-tested and benchmarked (via <code>criterion</code>) without pulling in a GUI toolkit.</p>
+        <pre><code>jsonquery/
+├── Cargo.toml                # workspace
+├── crates/
+│   ├── core/                 # mmap ingest, sonic-rs-backed checkpoint index
+│   ├── query/                # jaq ValT integration — Lazy/Owned Val adapter
+│   └── app/                  # eframe app: panels, virtualized tree widget, worker thread
+├── docs/                     # this site
+└── benches/                  # criterion benchmarks against synthetic large files
+</code></pre>
+      </section>
+
+      <div class="page-nav">
+        <a href="index.html"><span class="lbl">Previous</span>← Overview</a>
+        <a class="to-next" href="decisions.html"><span class="lbl">Next</span>Decisions &amp; Roadmap →</a>
+      </div>
+    </main>
+  </div>
+</div>
+</body>
+</html>

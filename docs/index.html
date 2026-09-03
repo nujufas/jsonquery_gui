@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>jsonquery — architecture proposal</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<input type="checkbox" id="nav-toggle">
+<label for="nav-toggle" class="nav-toggle-label">
+  <svg width="18" height="18" viewBox="0 0 18 18" fill="none"><path d="M2 4.5H16M2 9H16M2 13.5H16" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+  jsonquery docs
+</label>
+
+<div class="shell">
+  <nav class="sidebar">
+    <div class="brand">
+      <div class="brand-mark">JQ</div>
+      <div class="brand-text">
+        <div class="name">jsonquery</div>
+        <div class="sub">architecture docs</div>
+      </div>
+    </div>
+
+    <div class="nav-group">
+      <a class="nav-link active" href="index.html"><span class="n">1</span>Overview</a>
+      <ul class="subnav">
+        <li><a href="#problem">The problem</a></li>
+        <li><a href="#goals">Goals</a></li>
+        <li><a href="#non-goals">Non-goals (v1)</a></li>
+        <li><a href="#principles">Guiding principles</a></li>
+        <li><a href="#shape">High-level shape</a></li>
+      </ul>
+
+      <a class="nav-link" href="architecture.html"><span class="n">2</span>Architecture</a>
+      <a class="nav-link" href="decisions.html"><span class="n">3</span>Decisions &amp; Roadmap</a>
+    </div>
+
+    <div class="sidebar-foot">Draft · 2026-09-03<br>For review — nothing implemented yet.</div>
+  </nav>
+
+  <div class="main-wrap">
+    <main>
+      <p class="eyebrow">Architecture proposal · Draft</p>
+      <h1 class="page-title">jsonquery</h1>
+      <p class="lede">A native desktop tool for querying and browsing large JSON files — fast to open, fast to scroll, fast to query. This is the architecture proposal: read it, then use the <a href="decisions.html">Decisions</a> page to lock in the choices that shape everything else.</p>
+
+      <section class="doc-section" id="problem">
+        <h2><span class="num">01</span>The problem</h2>
+        <p>Poking at a large JSON file today means picking one of three bad trade-offs: the <code>jq</code> CLI is fast and expressive but has no visual browser, so you're re-running commands blind; a browser-based JSON viewer looks great on a 2&nbsp;MB file and then locks the tab on a 2&nbsp;GB one; and general editors like VS&nbsp;Code will open large files but treat them as text, not structure — no collapsible tree, no query.</p>
+        <p>There isn't a tool that combines <em>"open anything, however large, instantly"</em> with <em>"query it like jq, and see the result as a tree you can actually scroll."</em> That's the gap this project fills.</p>
+      </section>
+
+      <section class="doc-section" id="goals">
+        <h2><span class="num">02</span>Goals</h2>
+        <ul>
+          <li><strong>Open large files without flinching.</strong> Drag-and-drop or file-picker, targeting files from a few KB up to multiple GB, without freezing the UI while it loads.</li>
+          <li><strong>Query like jq.</strong> A multiline query field at the top of the window, running a jq-compatible query language against the loaded document.</li>
+          <li><strong>Scroll like it's a text file, not a spreadsheet of doom.</strong> Both the source tree and the results pane stay smooth — constant frame time — regardless of how many nodes exist off-screen.</li>
+          <li><strong>Stay responsive.</strong> Loading, indexing, and querying happen off the UI thread; a slow query can be cancelled by simply starting a new one.</li>
+          <li><strong>Ship as one binary.</strong> No runtime install, no bundled browser engine — a native window that opens fast.</li>
+        </ul>
+      </section>
+
+      <section class="doc-section" id="non-goals">
+        <h2><span class="num">03</span>Non-goals <span class="badge later" style="margin-left:2px">v1</span></h2>
+        <p>Explicitly out of scope for the first version, to keep the initial build tight:</p>
+        <ul>
+          <li>Editing JSON in place (this is a viewer + query tool, not an editor).</li>
+          <li>Schema validation / linting.</li>
+          <li>Multiple files open at once, tabs, or session management.</li>
+          <li>Remote or cloud-hosted files — local files only.</li>
+          <li>Other formats (YAML, CSV) — pure JSON in. NDJSON (one JSON value per line) is treated as a shape of JSON input, not a separate format — see <a href="architecture.html#indexing">Architecture §3</a> — and NDJSON <em>export</em> of results may show up later too.</li>
+        </ul>
+      </section>
+
+      <section class="doc-section" id="principles">
+        <h2><span class="num">04</span>Guiding principles</h2>
+        <ul>
+          <li><strong>Never block the UI thread.</strong> File I/O, parsing/indexing, and query execution all happen on a worker thread; the GUI only ever reads results handed back over a channel.</li>
+          <li><strong>Never materialize what you don't need to render.</strong> If a row isn't visible, its value shouldn't be fully parsed, copied, or allocated yet.</li>
+          <li><strong>Reuse a real query engine, don't invent one.</strong> jq syntax is already muscle memory for the target user — see <a href="decisions.html#d2-query-lang">Decision 2</a>.</li>
+          <li><strong>Prove the risky parts early.</strong> The two things most likely to blow up the plan — lazy querying and virtualized scrolling at real scale — get prototyped before the rest is built around them. See <a href="decisions.html#risks">Open risks</a>.</li>
+        </ul>
+      </section>
+
+      <section class="doc-section" id="shape">
+        <h2><span class="num">05</span>High-level shape</h2>
+        <p class="section-dek">One direction for data, one thread boundary. Everything else in the architecture doc is a zoom-in on one of these boxes.</p>
+
+        <div class="diagram">
+          <div class="d-group">
+            <span class="d-label">background worker thread</span>
+            <div class="d-row">
+              <div class="d-box">Dropped / opened file <span class="sub">path or bytes</span></div>
+              <div class="d-arrow">→</div>
+              <div class="d-box">Ingest <span class="sub">mmap</span></div>
+              <div class="d-arrow">→</div>
+              <div class="d-box">Index / parse <span class="sub">sparse checkpoint table</span></div>
+              <div class="d-arrow">→</div>
+              <div class="d-box accent">Query engine <span class="sub">jaq (jq-compatible)</span></div>
+            </div>
+          </div>
+          <div class="d-col" style="margin-top:10px">
+            <div class="d-vline"></div>
+            <div style="font-size:11px;color:var(--text-faint)">commands down, results streamed up — via channel</div>
+            <div class="d-vline"></div>
+          </div>
+          <div class="d-row" style="margin-top:6px">
+            <div class="d-box accent2" style="min-width:260px">GUI panels — query bar · source tree · results tree <span class="sub">UI thread, egui/eframe</span></div>
+          </div>
+          <p class="d-caption">Full detail, including the virtualized tree widget and cancellation model, is in <a href="architecture.html">Architecture</a>.</p>
+        </div>
+      </section>
+
+      <hr class="rule">
+
+      <section class="doc-section" id="next" style="margin-top:0">
+        <h2 style="margin-bottom:14px"><span class="num">→</span>Where to go next</h2>
+        <div class="option-grid">
+          <a class="option-card" href="architecture.html" style="text-decoration:none;color:inherit">
+            <div class="top-row"><h4>Architecture</h4><span class="badge alt">Read</span></div>
+            <p>The components, the lazy-index design, the concurrency model, the virtualized tree widget, and the proposed crate/workspace layout.</p>
+          </a>
+          <a class="option-card" href="decisions.html" style="text-decoration:none;color:inherit">
+            <div class="top-row"><h4>Decisions &amp; Roadmap</h4><span class="badge rec">Decide</span></div>
+            <p>Five choices that shape the build — GUI framework, query language, scale target, editing, export — each with a recommendation, plus the phased roadmap.</p>
+          </a>
+        </div>
+      </section>
+
+      <div class="page-nav">
+        <span></span>
+        <a class="to-next" href="architecture.html"><span class="lbl">Next</span>Architecture →</a>
+      </div>
+    </main>
+  </div>
+</div>
+</body>
+</html>

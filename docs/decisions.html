@@ -1,0 +1,334 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Decisions &amp; Roadmap — jsonquery</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<input type="checkbox" id="nav-toggle">
+<label for="nav-toggle" class="nav-toggle-label">
+  <svg width="18" height="18" viewBox="0 0 18 18" fill="none"><path d="M2 4.5H16M2 9H16M2 13.5H16" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+  jsonquery docs
+</label>
+
+<div class="shell">
+  <nav class="sidebar">
+    <div class="brand">
+      <div class="brand-mark">JQ</div>
+      <div class="brand-text">
+        <div class="name">jsonquery</div>
+        <div class="sub">architecture docs</div>
+      </div>
+    </div>
+
+    <div class="nav-group">
+      <a class="nav-link" href="index.html"><span class="n">1</span>Overview</a>
+      <a class="nav-link" href="architecture.html"><span class="n">2</span>Architecture</a>
+
+      <a class="nav-link active" href="decisions.html"><span class="n">3</span>Decisions &amp; Roadmap</a>
+      <ul class="subnav">
+        <li><a href="#d1-gui">1. GUI framework</a></li>
+        <li><a href="#d2-query-lang">2. Query language</a></li>
+        <li><a href="#d3-scale">3. Scale target</a></li>
+        <li><a href="#d4-editing">4. Editing</a></li>
+        <li><a href="#d5-export">5. Export</a></li>
+        <li><a href="#risks">Open risks</a></li>
+        <li><a href="#roadmap">Roadmap</a></li>
+      </ul>
+    </div>
+
+    <div class="sidebar-foot">Draft · 2026-09-03<br>For review — nothing implemented yet.</div>
+  </nav>
+
+  <div class="main-wrap">
+    <main>
+      <p class="eyebrow">Open questions</p>
+      <h1 class="page-title">Decisions &amp; Roadmap</h1>
+      <p class="lede">Five choices shape the rest of the build. Each one below has a recommendation baked in — read the trade-offs, then either confirm the recommendation or swap it for something else before any code gets written.</p>
+
+      <section class="doc-section" id="how-to-use" style="margin-top:30px">
+        <div class="callout info">
+          <span class="ic">ℹ</span>
+          <div>Every decision defaults to its <span class="badge rec" style="vertical-align:1px">recommended</span> option in the roadmap at the bottom of this page. If you don't override anything, that's the plan that gets built.</div>
+        </div>
+      </section>
+
+      <section class="doc-section" id="d1-gui">
+        <div class="decision">
+          <div class="d-head"><h3>1. GUI framework</h3></div>
+          <p class="d-question">What draws the window, the panels, and — critically — the virtualized tree?</p>
+
+          <div class="option-grid">
+            <div class="option-card is-rec">
+              <div class="top-row"><h4>egui / eframe</h4><span class="badge rec">Recommended</span></div>
+              <p>Pure-Rust immediate-mode GUI, single native binary.</p>
+              <div class="micro-lbl">Pros</div>
+              <ul class="pros">
+                <li>No webview or extra runtime — one binary, fast startup</li>
+                <li>Immediate mode makes custom row virtualization direct to implement</li>
+                <li>Native drag-and-drop + file dialogs with little glue</li>
+              </ul>
+              <div class="micro-lbl">Cons</div>
+              <ul class="cons">
+                <li>Default styling is utilitarian; polish takes manual work</li>
+                <li>Rich text / text editing widgets are less mature than a browser's</li>
+              </ul>
+            </div>
+
+            <div class="option-card">
+              <div class="top-row"><h4>Tauri</h4><span class="badge alt">Alternative</span></div>
+              <p>Rust backend, HTML/CSS/JS frontend in a system webview.</p>
+              <div class="micro-lbl">Pros</div>
+              <ul class="pros">
+                <li>Mature virtualized-list libraries (e.g. TanStack Virtual) for free</li>
+                <li>CSS styling gives the fastest path to a polished look</li>
+              </ul>
+              <div class="micro-lbl">Cons</div>
+              <ul class="cons">
+                <li>Webview dependency (WebView2 / WebKitGTK) — not a single self-contained binary</li>
+                <li>Rust ⇄ JS IPC boundary — large result sets must be paginated across it</li>
+                <li>Two languages/toolchains instead of one</li>
+              </ul>
+            </div>
+
+            <div class="option-card">
+              <div class="top-row"><h4>iced</h4><span class="badge alt">Alternative</span></div>
+              <p>Pure-Rust, Elm-architecture retained-mode GUI.</p>
+              <div class="micro-lbl">Pros</div>
+              <ul class="pros">
+                <li>Explicit state/update model, predictable for complex forms</li>
+                <li>Also a single native binary</li>
+              </ul>
+              <div class="micro-lbl">Cons</div>
+              <ul class="cons">
+                <li>Lazy/virtualized-list support less proven for this scale of data</li>
+                <li>More boilerplate to build a fully custom widget</li>
+              </ul>
+            </div>
+
+            <div class="option-card">
+              <div class="top-row"><h4>gpui</h4><span class="badge risk">Higher risk</span></div>
+              <p>Zed's GPU-accelerated UI framework.</p>
+              <div class="micro-lbl">Pros</div>
+              <ul class="pros">
+                <li>Proven at huge-file scale — it's what Zed's editor runs on</li>
+                <li>GPU-accelerated rendering, very fast</li>
+              </ul>
+              <div class="micro-lbl">Cons</div>
+              <ul class="cons">
+                <li>Young outside Zed itself, thinner docs and community</li>
+                <li>Steepest learning curve of the four</li>
+              </ul>
+            </div>
+          </div>
+
+          <div class="verdict"><strong>Recommendation:</strong> egui/eframe. It's the only option that's both a single dependency-free binary <em>and</em> gives direct control over the virtualization strategy the whole app depends on — no fighting a framework's built-in list widget to get there.</div>
+        </div>
+      </section>
+
+      <section class="doc-section" id="d2-query-lang">
+        <div class="decision">
+          <div class="d-head"><h3>2. Query language</h3></div>
+          <p class="d-question">What goes in the multiline query field, and what runs it?</p>
+
+          <div class="tbl-wrap">
+          <table>
+            <thead><tr><th>Option</th><th>Pros</th><th>Cons</th></tr></thead>
+            <tbody>
+              <tr>
+                <td><strong>Embed jaq</strong> <span class="badge rec">Recommended</span><br><span style="color:var(--text-dim);font-size:12.5px">jq-compatible, pure Rust</span></td>
+                <td>Users likely already know jq syntax; filters, pipes, and functions arrive without designing a language. Generator-based evaluation short-circuits <code>first</code>/<code>limit</code>; preserves exact number literals via <code>serde_json</code>'s <code>arbitrary_precision</code> — see Architecture <a href="architecture.html#query-engine">§4</a>.</td>
+                <td>jq's grammar is genuinely large — needs an explicit "supported subset" for v1; the lazy <code>ValT</code> adapter has a credible design (Architecture §4) but is still unproven at scale.</td>
+              </tr>
+              <tr>
+                <td><strong>jq-rs</strong> (FFI)<br><span style="color:var(--text-dim);font-size:12.5px">binds the real libjq C library</span></td>
+                <td>Perfect behavioral compatibility with actual jq — zero language-subset risk, since it <em>is</em> jq.</td>
+                <td>Requires linking libjq (and its oniguruma dependency) at build time — directly conflicts with Decision&nbsp;1's "single self-contained Rust binary" goal, and complicates cross-compilation/packaging. Unsafe FFI surface to maintain.</td>
+              </tr>
+              <tr>
+                <td><strong>serde_json_path</strong><br><span style="color:var(--text-dim);font-size:12.5px">JSONPath, RFC&nbsp;9535</span></td>
+                <td>Implements the actual IETF JSONPath standard, actively maintained, MIT-licensed, smallest integration surface of any option here.</td>
+                <td>Still a path-selector language — no pipelines, transforms, or aggregation. Doesn't serve the "useful for the future" goal as well as a real query language.</td>
+              </tr>
+              <tr>
+                <td><strong>Custom DSL</strong></td>
+                <td>Full control — can be designed exactly around the lazy index.</td>
+                <td>Reinvents a query language from scratch; ongoing design/doc burden; zero user familiarity on day one.</td>
+              </tr>
+            </tbody>
+          </table>
+          </div>
+
+          <div class="verdict"><strong>Recommendation:</strong> embed <a href="https://github.com/01mf02/jaq" target="_blank" rel="noopener">jaq</a>. It's the highest-leverage option — a real, maintained jq implementation in Rust — and syntax familiarity means zero onboarding for anyone who's used <code>jq</code> before. jq-rs was seriously considered (it removes all language-compatibility risk) but rejected specifically because it breaks the single-binary goal from Decision&nbsp;1; jaq keeps everything in one dependency-free Rust binary. The lazy-integration question is real but scoped as an explicit early spike, not a blocker to deciding the language itself.</div>
+        </div>
+      </section>
+
+      <section class="doc-section" id="d3-scale">
+        <div class="decision">
+          <div class="d-head"><h3>3. Scale target</h3></div>
+          <p class="d-question">How large is "large," concretely? This determines how much of Architecture §2–3 is required for v1 versus deferred.</p>
+
+          <div class="tbl-wrap">
+          <table>
+            <thead><tr><th>Target</th><th>What it requires</th></tr></thead>
+            <tbody>
+              <tr><td>Up to ~200&nbsp;MB</td><td>Comfortable fully in-memory — Phase&nbsp;1 alone is sufficient, no checkpoint index needed.</td></tr>
+              <tr><td><strong>A few GB</strong> <span class="badge rec">Recommended</span></td><td>Needs the mmap + sonic-rs-backed checkpoint index from Architecture §3 — Phase&nbsp;2.</td></tr>
+              <tr><td>10&nbsp;GB+ / arbitrary</td><td>Needs streaming query <em>execution</em>, not just streaming parse — results themselves may not fit in RAM either. Bigger lift; not v1.</td></tr>
+            </tbody>
+          </table>
+          </div>
+
+          <div class="verdict"><strong>Recommendation:</strong> design for "a few GB" as the v1 ceiling (Phase&nbsp;2 of the roadmap below), while keeping the index/adapter layer generic enough to push further later. Phase&nbsp;1 ships the in-memory path first, on purpose — it validates the GUI and query integration on small files before the harder scale work begins.</div>
+
+          <div class="callout warn" style="margin-top:16px;margin-bottom:0">
+            <span class="ic">⚠</span>
+            <div><strong class="lbl">Also confirm: input shape</strong>A lot of real-world "large JSON" is actually NDJSON — one JSON value per line, common for log exports and data dumps — rather than a single giant document. Architecture <a href="architecture.html#indexing">§3</a> now treats the file as one-or-more top-level values from the start so NDJSON works day one, not as a deferred format. Flag if this doesn't match what you'll actually be opening.</div>
+          </div>
+        </div>
+      </section>
+
+      <section class="doc-section" id="d4-editing">
+        <div class="decision">
+          <div class="d-head"><h3>4. Editing capability</h3></div>
+          <p class="d-question">Viewer + query tool, or also an in-place JSON editor?</p>
+          <div class="option-grid">
+            <div class="option-card is-rec">
+              <div class="top-row"><h4>Read-only</h4><span class="badge rec">Recommended</span></div>
+              <p>View and query only — matches every goal on the Overview page.</p>
+            </div>
+            <div class="option-card">
+              <div class="top-row"><h4>Editable</h4><span class="badge alt">Later</span></div>
+              <p>Adds structural editing, undo/redo, and safe write-back to a memory-mapped file — a different, larger project.</p>
+            </div>
+          </div>
+          <div class="verdict"><strong>Recommendation:</strong> read-only for v1 (already reflected in <a href="index.html#non-goals">Non-goals</a>). Editing is orthogonal to "query large files fast" and would pull in an entirely separate set of hard problems (safe writes to a mmap'd file, undo history). Revisit only after the core tool is solid.</div>
+        </div>
+      </section>
+
+      <section class="doc-section" id="d5-export">
+        <div class="decision">
+          <div class="d-head"><h3>5. Result export</h3></div>
+          <p class="d-question">Once a query has run, how does the output leave the app?</p>
+          <div class="option-grid">
+            <div class="option-card">
+              <div class="top-row"><h4>Clipboard only</h4><span class="badge alt">Minimal</span></div>
+              <p>Copy selected node or copy-all (bounded by the live preview cap).</p>
+            </div>
+            <div class="option-card is-rec">
+              <div class="top-row"><h4>Copy + save to file</h4><span class="badge rec">Recommended</span></div>
+              <p>Adds "save full results to file," streamed straight to disk via a re-run of the query — never limited by the live preview cap.</p>
+            </div>
+            <div class="option-card">
+              <div class="top-row"><h4>+ CSV / NDJSON</h4><span class="badge later">Phase 3</span></div>
+              <p>Format conversion on export — genuinely useful, but not required to validate the core tool.</p>
+            </div>
+          </div>
+          <div class="verdict"><strong>Recommendation:</strong> ship "copy + save to file" in v1 (see Architecture <a href="architecture.html#results">§7 Results handling</a> for how streamed export avoids materializing huge result sets in memory); defer format conversion to Phase&nbsp;3.</div>
+        </div>
+      </section>
+
+      <hr class="rule">
+
+      <section class="doc-section" id="risks">
+        <h2><span class="num">⚠</span>Open risks &amp; early spikes</h2>
+        <p class="section-dek">Assumptions the architecture leans on. The two most load-bearing now have a concrete design behind them (see Architecture §3–4), but "designed" isn't "proven" — each still gets a throwaway prototype before the real build depends on it.</p>
+        <ul class="checklist">
+          <li><span class="box"></span><div><strong>jaq's <code>ValT</code> × the Lazy/Owned <code>Val</code> design.</strong> Architecture <a href="architecture.html#query-engine">§4</a> now has a concrete adapter sketch (an <code>Arc&lt;Mmap&gt;</code>-backed lazy handle satisfying <code>ValT</code>'s <code>'static</code> bound). The remaining question is narrower than before: does it actually compile cleanly against the trait, and does it perform — confirm on a synthetic multi-GB array before the rest of the query path assumes it works.</div></li>
+          <li><span class="box"></span><div><strong>egui virtualized scrolling at real scale.</strong> Prototype scrolling a synthetic 5–10&nbsp;GB file in both shapes that matter — deeply nested, and one enormous flat array — and measure frame time before the rest of the GUI is built on the assumption it holds up.</div></li>
+          <li><span class="box"></span><div><strong>Checkpoint interval tuning.</strong> A single array with tens of millions of elements stresses the checkpoint table from Architecture <a href="architecture.html#indexing">§3</a> — confirm a checkpoint interval (e.g. every 4,096th element) gives acceptably bounded lookup cost in practice, and that memory overhead stays a small fraction of file size.</div></li>
+          <li><span class="box"></span><div><strong>SIMD build portability.</strong> If sonic-rs anchors the indexing layer, decide the build strategy — safe explicit target-features vs. runtime CPU dispatch — so a distributed binary doesn't crash on an older or non-x86_64/aarch64 machine. See Architecture <a href="architecture.html#indexing">§3</a>.</div></li>
+          <li><span class="box"></span><div><strong>Malformed / truncated input.</strong> Decide how much recovery the indexer attempts versus failing fast with a precise byte offset in the error.</div></li>
+        </ul>
+      </section>
+
+      <section class="doc-section" id="roadmap">
+        <h2><span class="num">→</span>Roadmap</h2>
+        <p class="section-dek">Three phases. Each one ships something usable — Phase 1 alone is already a working tool for small-to-medium files.</p>
+
+        <div class="phase">
+          <div class="marker"><div class="dot">1</div><div class="line"></div></div>
+          <div class="p-body">
+            <div class="p-meta">Phase 1 · MVP</div>
+            <h4>In-memory, small-to-medium files</h4>
+            <p class="p-desc">Prove the GUI shell and the query integration before taking on scale.</p>
+            <ul>
+              <li>Full in-memory parse (<code>serde_json</code>, swap for <code>simd-json</code> if profiling justifies it)</li>
+              <li>jaq embedded directly against owned <code>Value</code>s — no adapter needed yet</li>
+              <li>egui app shell: multiline query bar, two virtualized tree panels wired to the in-memory value</li>
+              <li>Drag-and-drop and file-picker open</li>
+              <li>Status bar: parse time, query time, node/result counts</li>
+              <li>Cancellation for slow queries via the generation-counter pattern</li>
+            </ul>
+          </div>
+        </div>
+
+        <div class="phase">
+          <div class="marker"><div class="dot">2</div><div class="line"></div></div>
+          <div class="p-body">
+            <div class="p-meta">Phase 2 · Scale</div>
+            <h4>Multi-GB files without freezing</h4>
+            <p class="p-desc">Everything in Architecture §2–3, built on whatever the spikes in <a href="#risks">Open risks</a> actually confirm.</p>
+            <ul>
+              <li>mmap ingest replaces full-file reads</li>
+              <li>sonic-rs-backed sparse checkpoint index (Architecture §3) with lazy scalar resolution</li>
+              <li>Ship the <code>Lazy</code>/<code>Owned</code> <code>ValT</code> adapter for jaq (Architecture §4), confirmed by its spike</li>
+              <li>Background indexing with progress reporting</li>
+              <li>Streamed/incremental result materialization with the bounded live-preview cap</li>
+              <li>Cancellation wired through indexing <em>and</em> query execution, not just query</li>
+            </ul>
+          </div>
+        </div>
+
+        <div class="phase">
+          <div class="marker"><div class="dot">3</div></div>
+          <div class="p-body">
+            <div class="p-meta">Phase 3 · Polish</div>
+            <h4>Everyday-tool ergonomics</h4>
+            <p class="p-desc">Includes one differentiator that falls directly out of the indexing design: because the checkpoint index already knows every key and array shape without materializing values, path/key autocomplete in the query field is nearly free — most jq tools can't offer this without a full parse.</p>
+            <ul>
+              <li>Query history and saved queries</li>
+              <li>Syntax highlighting in the query field</li>
+              <li>Schema-aware autocomplete — suggest keys/paths as you type, sourced straight from the checkpoint index</li>
+              <li>CSV / NDJSON export alongside raw save-to-file</li>
+              <li>Recent files list</li>
+              <li>Light/dark theme</li>
+              <li>Keyboard-driven tree navigation</li>
+            </ul>
+          </div>
+        </div>
+      </section>
+
+      <hr class="rule">
+
+      <section class="doc-section" id="next-steps" style="margin-top:0">
+        <div class="callout good">
+          <span class="ic">✓</span>
+          <div><strong class="lbl">Next steps</strong>Confirm or override each of the five decisions above. Once they're locked in, the Phase&nbsp;1 Cargo workspace (Architecture <a href="architecture.html#layout">§9</a>) can be scaffolded straight from this doc.</div>
+        </div>
+
+        <h3 style="margin-top:34px">Research notes &amp; sources</h3>
+        <p style="color:var(--text-dim);font-size:13px;margin-bottom:14px">Primary sources behind the crate-level claims on this page and in Architecture §3–4, checked 2026-09-03. Crate APIs move — re-verify against current docs before implementation.</p>
+        <ul style="font-size:12.8px;color:var(--text-dim);padding-left:18px">
+          <li><a href="https://github.com/cloudwego/sonic-rs" target="_blank" rel="noopener">cloudwego/sonic-rs</a> — <code>LazyValue</code>, <code>get()</code>/<code>get_unchecked()</code> over immutable input, lazy iterators, Apache-2.0 license, SIMD/architecture notes.</li>
+          <li><a href="https://docs.rs/jaq-core/latest/jaq_core/val/trait.ValT.html" target="_blank" rel="noopener">jaq_core::val::ValT</a> (docs.rs) — the trait signature behind the Lazy/Owned <code>Val</code> design in Architecture §4.</li>
+          <li><a href="https://github.com/01mf02/jaq" target="_blank" rel="noopener">01mf02/jaq</a> — jq-compatibility scope, generator-based evaluation, benchmark claims vs. jq/gojq.</li>
+          <li><a href="https://crates.io/crates/serde_json_path" target="_blank" rel="noopener">serde_json_path</a> (crates.io) — RFC&nbsp;9535 conformance, license, maintenance activity.</li>
+          <li><a href="https://crates.io/crates/jq-rs" target="_blank" rel="noopener">jq-rs</a> (crates.io) — libjq FFI binding, build/bundling requirements.</li>
+          <li><a href="https://crates.io/crates/memmap2" target="_blank" rel="noopener">memmap2</a> (crates.io) — maintenance status, license, download volume.</li>
+          <li><a href="https://github.com/jqlang/jq/issues/1120" target="_blank" rel="noopener">jqlang/jq#1120</a> — background on jq's large-number literal preservation, which jaq also satisfies via <code>serde_json</code>'s <code>arbitrary_precision</code>.</li>
+        </ul>
+      </section>
+
+      <div class="page-nav">
+        <a href="architecture.html"><span class="lbl">Previous</span>← Architecture</a>
+        <a class="to-next" href="index.html"><span class="lbl">Back to start</span>Overview →</a>
+      </div>
+    </main>
+  </div>
+</div>
+</body>
+</html>
