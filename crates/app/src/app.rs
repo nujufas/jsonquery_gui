@@ -246,14 +246,20 @@ impl App {
                 }
             }
             ui.separator();
-            theme_toggle_button(ui);
-            ui.separator();
+
             if let Some(doc) = &self.doc {
-                ui.label(format!(
-                    "{}  ·  {}",
-                    doc.source.label(),
-                    human_bytes(doc.byte_len)
-                ));
+                // `&str` is an immutable `TextBuffer` impl, so this behaves as
+                // a read-only field: selectable and copyable with the mouse,
+                // but typing into it has no effect and nothing is written
+                // back to `doc`.
+                let label = doc.source.label();
+                let mut label_ref = label.as_str();
+                ui.add(
+                    egui::TextEdit::singleline(&mut label_ref)
+                        .desired_width(320.0)
+                        .font(egui::TextStyle::Monospace),
+                );
+                ui.weak(human_bytes(doc.byte_len));
                 if doc.top_level_values > 1 {
                     ui.weak(format!("({} NDJSON records)", doc.top_level_values));
                 }
@@ -265,6 +271,15 @@ impl App {
                     "No document loaded — drag & drop a JSON file anywhere, use Open File, or paste JSON on the left.",
                 );
             }
+
+            // Claims whatever width is left after everything above, so the
+            // theme toggle sits pinned at the top-right corner regardless of
+            // how long the path/status text is.
+            ui.allocate_ui_with_layout(
+                egui::vec2(ui.available_width(), ui.spacing().interact_size.y),
+                egui::Layout::right_to_left(egui::Align::Center),
+                |ui| theme_toggle_button(ui),
+            );
         });
     }
 
@@ -282,10 +297,12 @@ impl App {
         ui.weak("Paste JSON below, drag & drop a file anywhere, or use Open File.");
         ui.add_space(4.0);
 
-        let resp = ui.add(
+        // Fill whatever space is left in the panel rather than a fixed row
+        // count, so the box grows/shrinks with the window instead of leaving
+        // dead space below it.
+        let resp = ui.add_sized(
+            ui.available_size(),
             egui::TextEdit::multiline(&mut self.paste_text)
-                .desired_rows(24)
-                .desired_width(f32::INFINITY)
                 .code_editor()
                 .hint_text("Paste JSON here…"),
         );
