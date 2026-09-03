@@ -115,6 +115,19 @@ and benchmarked without pulling in a GUI toolkit:
 - **`crates/query`** — the embedded jaq query engine and its `serde_json::Value ⇄ jaq_json::Val` conversion.
 - **`crates/app`** — the eframe/egui application itself.
 
+### Test data
+
+[`scripts/gen_test_data.py`](scripts/gen_test_data.py) generates a large
+synthetic JSON (or NDJSON) file for exercising the app — nested objects,
+unicode, and 19-digit integer ids that exceed `f64`'s exact-integer range, to
+exercise the number round-tripping:
+
+```sh
+scripts/gen_test_data.py                                    # ~200k records to test-data/large.json
+scripts/gen_test_data.py --target-size 1GB -o test-data/big.json
+scripts/gen_test_data.py --format ndjson -n 1000000 -o test-data/events.ndjson
+```
+
 ## Architecture
 
 The design — pipeline, indexing strategy, concurrency model, crate layout —
