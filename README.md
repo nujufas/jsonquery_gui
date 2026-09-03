@@ -109,6 +109,17 @@ container that already has the mingw-w64 toolchain, so nothing is installed
 on the host. `build/appimage.sh` downloads `appimagetool` on first use
 (cached in `build/`) and needs FUSE to run it.
 
+On an actual Windows machine, skip the cross-compile and build natively
+instead:
+
+```bat
+build\windows.bat   # native release build -> .zip
+```
+
+Same output layout as the other scripts (`dist\jsonquery_gui-<version>-windows-x86_64.zip`).
+Just needs a Rust toolchain and PowerShell (bundled since Windows 10 /
+Server 2016) to create the zip.
+
 The AppImage is desktop-pinnable out of the box: on first launch it registers
 a `.desktop` entry and icon under `~/.local/share` (no `appimaged` /
 AppImageLauncher required), and the window's app ID matches
