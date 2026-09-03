@@ -4,6 +4,7 @@ set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 
 ./linux.sh
+./appimage.sh
 ./windows.sh
 
 echo

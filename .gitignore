@@ -1,2 +1,4 @@
 /target/
 /dist/
+/build/AppDir/
+/build/appimagetool-*.AppImage
