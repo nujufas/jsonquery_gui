@@ -1,0 +1,21 @@
+[package]
+name = "jsonquery"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "jsonquery"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0.104"
+crossbeam-channel = "0.5.16"
+eframe = "0.36.1"
+egui = "0.36.1"
+egui_extras = "0.36.1"
+jsonquery-core = { path = "../core" }
+jsonquery-query = { path = "../query" }
+rfd = "0.17.2"
+serde_json = { version = "1.0.151", features = ["arbitrary_precision", "preserve_order"] }
+thiserror = "2.0.20"
