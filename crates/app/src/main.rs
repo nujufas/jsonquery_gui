@@ -1,3 +1,8 @@
+// Suppress the console window that would otherwise appear behind the GUI on
+// a release Windows build; debug builds keep it so `println!`/panics are
+// visible.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod app;
 mod tree_view;
 mod worker;

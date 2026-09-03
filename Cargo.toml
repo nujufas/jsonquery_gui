@@ -15,6 +15,7 @@ license = "MIT"
 opt-level = 3
 lto = true
 codegen-units = 1
+strip = "symbols"
 
 [profile.dev.package."*"]
 opt-level = 2
