@@ -36,7 +36,9 @@ the full roadmap and the reasoning behind what's built vs. deferred.
 - **Exact number round-tripping** — big integers (snowflake IDs, Postgres bigints) survive a query byte-for-byte instead of quietly rounding through an `f64`.
 - **NDJSON support** — a file with one JSON value per line is treated as a single queryable document, no separate "format" to pick.
 - **Cancellable queries** — start a new query and the previous one is aborted, not queued behind it.
-- **Drag-and-drop, file picker, or paste** — three ways to get JSON in.
+- **Drag-and-drop, file picker, or paste** — drop a file anywhere in the window, use **Open File…**, or just paste JSON into the text area and it loads immediately.
+- **Tree or raw text results** — toggle the results panel between the virtualized tree and plain pretty-printed text you can select and copy with the mouse.
+- **Light and dark themes** — switchable from the toolbar.
 
 ## Getting started
 
@@ -58,14 +60,16 @@ cargo run --release -p jsonquery
 
 ## Usage
 
-1. Open a file (drag-and-drop, the **Open File…** button, or paste raw JSON
-   via **Paste JSON…**).
+1. Get JSON in: drag a file onto the window, use **Open File…**, or paste
+   JSON straight into the text area on the left — it loads as soon as you
+   paste, no extra step.
 2. Write a query in the bar at the top — plain jq syntax, e.g.:
    ```
    .users[] | select(.active) | {name, roles}
    ```
-3. Press **Run** (or `Ctrl+Enter`). Results stream into the right-hand panel
-   as a tree, same as the source document on the left.
+3. Press **Run** (or `Ctrl+Enter`). Results stream into the right-hand panel.
+   Switch it between **Tree** (virtualized, expand/collapse) and **Text**
+   (plain, selectable/copyable pretty-printed JSON) with the toggle above it.
 
 ## Building
 
@@ -76,18 +80,26 @@ cargo build --release -p jsonquery
 # binary at target/release/jsonquery
 ```
 
-Cross-platform packaged builds (tar.gz for Linux, zip for Windows) live in
-[`build/`](build/):
+Cross-platform packaged builds live in [`build/`](build/), output to `dist/`:
 
 ```sh
-build/linux.sh     # native release build, packaged
-build/windows.sh   # cross-compiled via `cross`/Docker, packaged
-build/all.sh        # both, plus a listing of dist/
+build/linux.sh      # native release build -> .tar.gz
+build/appimage.sh   # native release build -> self-integrating .AppImage
+build/windows.sh    # cross-compiled via `cross`/Docker -> .zip
+build/all.sh         # all three, plus a listing of dist/
 ```
 
 `build/windows.sh` needs a working Docker daemon — it cross-compiles inside a
 container that already has the mingw-w64 toolchain, so nothing is installed
-on the host.
+on the host. `build/appimage.sh` downloads `appimagetool` on first use
+(cached in `build/`) and needs FUSE to run it.
+
+The AppImage is desktop-pinnable out of the box: on first launch it registers
+a `.desktop` entry and icon under `~/.local/share` (no `appimaged` /
+AppImageLauncher required), and the window's app ID matches
+`StartupWMClass` in that entry, so window managers correctly associate the
+running window with the launcher icon — right-click it in the
+taskbar/dock and "Pin" works as expected.
 
 ## Development
 
