@@ -8,7 +8,7 @@ source ./common.sh
 TARGET="x86_64-unknown-linux-gnu"
 
 echo "==> Building $APP_NAME $VERSION for $TARGET"
-cargo build --release --target "$TARGET" -p jsonquery
+cargo build --release --target "$TARGET" -p jsonquery_gui
 
 package \
     "$ROOT_DIR/target/$TARGET/release/$APP_NAME" \

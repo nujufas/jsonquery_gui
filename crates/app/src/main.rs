@@ -7,10 +7,11 @@ mod app;
 mod tree_view;
 mod worker;
 
-/// Must match the AppImage's `.desktop` file (`StartupWMClass=jsonquery`, see
-/// `build/appimage.sh`) so window managers associate the running window with
-/// the launcher icon — otherwise "pin to taskbar" after launch doesn't stick.
-const APP_ID: &str = "jsonquery";
+/// Must match the AppImage's `.desktop` file (`StartupWMClass=jsonquery_gui`,
+/// see `build/appimage.sh`) so window managers associate the running window
+/// with the launcher icon — otherwise "pin to taskbar" after launch doesn't
+/// stick.
+const APP_ID: &str = "jsonquery_gui";
 
 fn main() -> eframe::Result {
     let icon = eframe::icon_data::from_png_bytes(include_bytes!("../../../assets/icon.png"))
@@ -27,7 +28,7 @@ fn main() -> eframe::Result {
     };
 
     eframe::run_native(
-        "jsonquery",
+        "jsonquery_gui",
         native_options,
         Box::new(|cc| Ok(Box::new(app::App::new(cc)))),
     )

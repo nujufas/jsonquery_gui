@@ -28,6 +28,21 @@ Multi-gigabyte files need Phase 2 (a memory-mapped, lazily-resolved index),
 which isn't built yet. See [`docs/decisions.html`](docs/decisions.html) for
 the full roadmap and the reasoning behind what's built vs. deferred.
 
+## Known limitations
+
+- **Drag-and-drop doesn't work on native Wayland.** This is a gap in
+  [`winit`](https://github.com/rust-windowing/winit) (the windowing library
+  `eframe` uses), which only implements OS-level file drop events on
+  Windows, macOS, and X11 —
+  [rust-windowing/winit#1881](https://github.com/rust-windowing/winit/issues/1881)
+  tracks it upstream. **Open File…** and pasting JSON directly both work
+  fine everywhere. As a workaround, run under XWayland instead of native
+  Wayland (if `DISPLAY` is set, XWayland is available) and drag-and-drop
+  starts working:
+  ```sh
+  WAYLAND_DISPLAY= cargo run --release -p jsonquery_gui
+  ```
+
 ## Features
 
 - **Open large-ish files fast** — memory-mapped, no upfront full-file copy.
@@ -55,7 +70,7 @@ Requires a [Rust toolchain](https://rustup.rs/) (stable).
 ```sh
 git clone <this repository's URL>
 cd jsonquery
-cargo run --release -p jsonquery
+cargo run --release -p jsonquery_gui
 ```
 
 ## Usage
@@ -76,8 +91,8 @@ cargo run --release -p jsonquery
 Native release build for the current platform:
 
 ```sh
-cargo build --release -p jsonquery
-# binary at target/release/jsonquery
+cargo build --release -p jsonquery_gui
+# binary at target/release/jsonquery_gui
 ```
 
 Cross-platform packaged builds live in [`build/`](build/), output to `dist/`:
@@ -127,6 +142,12 @@ scripts/gen_test_data.py                                    # ~200k records to t
 scripts/gen_test_data.py --target-size 1GB -o test-data/big.json
 scripts/gen_test_data.py --format ndjson -n 1000000 -o test-data/events.ndjson
 ```
+
+Each run also prints a handful of jq queries worth trying against the file it
+just generated (filtering, nested-field access, aggregation with
+`group_by`, and one that highlights the exact-integer round-tripping) —
+see `SAMPLE_QUERIES` in the script, kept next to the record shape it
+describes so the two can't drift apart.
 
 ## Architecture
 

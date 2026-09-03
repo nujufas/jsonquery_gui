@@ -23,7 +23,7 @@ if ! docker info >/dev/null 2>&1; then
 fi
 
 echo "==> Building $APP_NAME $VERSION for $TARGET (via cross + Docker)"
-cross build --release --target "$TARGET" -p jsonquery
+cross build --release --target "$TARGET" -p jsonquery_gui
 
 package \
     "$ROOT_DIR/target/$TARGET/release/$APP_NAME.exe" \

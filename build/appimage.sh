@@ -18,7 +18,7 @@ APPDIR="$ROOT_DIR/build/AppDir"
 OUTPUT="$DIST_DIR/$APP_NAME-$VERSION-$ARCH.AppImage"
 
 echo "==> Building $APP_NAME $VERSION for $TARGET"
-cargo build --release --target "$TARGET" -p jsonquery
+cargo build --release --target "$TARGET" -p jsonquery_gui
 
 echo "==> Assembling AppDir"
 rm -rf "$APPDIR"
@@ -86,7 +86,7 @@ Exec=$APP_NAME
 Icon=$APP_NAME
 Categories=Development;Utility;
 Terminal=false
-StartupWMClass=jsonquery
+StartupWMClass=jsonquery_gui
 X-AppImage-Version=$VERSION
 DESKTOP_EOF
 cp "$APPDIR/$APP_NAME.desktop" "$APPDIR/usr/share/applications/$APP_NAME.desktop"

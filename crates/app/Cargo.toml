@@ -1,11 +1,11 @@
 [package]
-name = "jsonquery"
+name = "jsonquery_gui"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [[bin]]
-name = "jsonquery"
+name = "jsonquery_gui"
 path = "src/main.rs"
 
 [dependencies]

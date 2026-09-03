@@ -1831,22 +1831,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "jsonquery"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "crossbeam-channel",
- "eframe",
- "egui",
- "egui_extras",
- "jsonquery-core",
- "jsonquery-query",
- "rfd",
- "serde_json",
- "thiserror 2.0.20",
-]
-
-[[package]]
 name = "jsonquery-core"
 version = "0.1.0"
 dependencies = [
@@ -1866,6 +1850,22 @@ dependencies = [
  "jaq-json",
  "jaq-std",
  "jsonquery-core",
+ "serde_json",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "jsonquery_gui"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "crossbeam-channel",
+ "eframe",
+ "egui",
+ "egui_extras",
+ "jsonquery-core",
+ "jsonquery-query",
+ "rfd",
  "serde_json",
  "thiserror 2.0.20",
 ]

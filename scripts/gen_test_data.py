@@ -92,6 +92,20 @@ def make_record(rng: random.Random, idx: int) -> dict:
     }
 
 
+# jq queries exercising the shape make_record() above produces — kept next
+# to it so the two stay in sync. Printed after generation (see main()) rather
+# than duplicated in README.md.
+SAMPLE_QUERIES = [
+    ("Active users' name + email", ".[] | select(.active) | {name: .user.name, email: .user.email}"),
+    ("Users with the admin role", '.[] | select(.user.roles | index("admin")) | .user.name'),
+    ("First 10 records", ".[0:10]"),
+    ("Records with more than 2 history events", ".[] | select(.history | length > 2)"),
+    ("Records tagged vip", '.[] | select(.tags | index("vip"))'),
+    ("Record count per country (null = no address)", "[.[] | .user.address.country] | group_by(.) | map({country: .[0], count: length})"),
+    ("Exact round-tripped 19-digit id (no f64 rounding)", ".[0].id"),
+]
+
+
 def parse_size(text: str) -> int:
     """Parse sizes like '500MB', '2GB', '1024' (bytes) into a byte count."""
     text = text.strip().upper()
@@ -198,6 +212,10 @@ def main() -> None:
     elapsed = time.monotonic() - start
     size = out_path.stat().st_size
     print(f"wrote {out_path} — {count:,} records, {human_bytes(size)}, {elapsed:.1f}s (seed={seed})")
+
+    print(f"\nSample queries to try in jsonquery against {out_path}:")
+    for desc, query in SAMPLE_QUERIES:
+        print(f"  # {desc}\n  {query}\n")
 
 
 if __name__ == "__main__":
