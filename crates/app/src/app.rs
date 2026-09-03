@@ -43,15 +43,29 @@ pub struct App {
 
     source_tree: TreeView,
     results_tree: TreeView,
+    results_view: ResultsView,
+    results_text_cache: String,
+    results_text_dirty: bool,
 
-    show_paste_window: bool,
+    /// Buffer for the inline "paste JSON" text area shown while no document
+    /// is loaded.
     paste_text: String,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ResultsView {
+    Tree,
+    Text,
 }
 
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let (cmd_tx, cmd_rx) = crossbeam_channel::unbounded();
         let (evt_tx, evt_rx) = crossbeam_channel::unbounded();
+
+        // Deterministic starting theme (rather than following the system,
+        // which would make the light/dark toggle's initial state a surprise).
+        cc.egui_ctx.set_theme(egui::ThemePreference::Dark);
 
         let ctx = cc.egui_ctx.clone();
         worker::spawn(cmd_rx, evt_tx, move || ctx.request_repaint());
@@ -76,7 +90,9 @@ impl App {
             last_query_cancelled: false,
             source_tree: TreeView::default(),
             results_tree: TreeView::default(),
-            show_paste_window: false,
+            results_view: ResultsView::Tree,
+            results_text_cache: String::new(),
+            results_text_dirty: true,
             paste_text: String::new(),
         }
     }
@@ -106,6 +122,7 @@ impl App {
                     self.results_truncated = false;
                     self.last_query_elapsed = None;
                     self.results_tree.reset();
+                    self.results_text_dirty = true;
 
                     self.doc = Some(doc);
                     self.source_tree.reset();
@@ -127,6 +144,7 @@ impl App {
                         }
                     }
                     self.results_tree.mark_dirty();
+                    self.results_text_dirty = true;
                 }
                 Event::QueryItemError { gen, error } => {
                     if gen != self.query_gen {
@@ -180,6 +198,7 @@ impl App {
 
         self.results = Value::Array(Vec::new());
         self.results_tree.reset();
+        self.results_text_dirty = true;
         self.results_item_errors = 0;
         self.last_item_error = None;
         self.results_count_so_far = 0;
@@ -226,10 +245,8 @@ impl App {
                     self.open_file(path);
                 }
             }
-            if ui.button("Paste JSON…").clicked() {
-                self.paste_text.clear();
-                self.show_paste_window = true;
-            }
+            ui.separator();
+            theme_toggle_button(ui);
             ui.separator();
             if let Some(doc) = &self.doc {
                 ui.label(format!(
@@ -244,50 +261,44 @@ impl App {
                 ui.spinner();
                 ui.label("Loading…");
             } else {
-                ui.weak("No document loaded — drag & drop a JSON file anywhere, or use Open File / Paste JSON.");
+                ui.weak(
+                    "No document loaded — drag & drop a JSON file anywhere, use Open File, or paste JSON on the left.",
+                );
             }
         });
     }
 
-    fn paste_window(&mut self, ctx: &egui::Context) {
-        if !self.show_paste_window {
+    /// The inline "paste JSON" panel shown in place of the source tree while
+    /// no document is loaded: paste, and it loads immediately — no button.
+    fn paste_area(&mut self, ui: &mut egui::Ui, hovering_drop: bool) {
+        if hovering_drop {
+            ui.vertical_centered(|ui| {
+                ui.add_space(40.0);
+                ui.heading("Drop to open");
+            });
             return;
         }
-        let mut open = true;
-        let mut load_clicked = false;
-        egui::Window::new("Paste JSON")
-            .open(&mut open)
-            .default_size([520.0, 380.0])
-            .show(ctx, |ui| {
-                ui.label("Paste raw JSON (or NDJSON — one value per line) below:");
-                egui::ScrollArea::vertical()
-                    .max_height(280.0)
-                    .show(ui, |ui| {
-                        ui.add(
-                            egui::TextEdit::multiline(&mut self.paste_text)
-                                .desired_rows(14)
-                                .desired_width(f32::INFINITY)
-                                .code_editor(),
-                        );
-                    });
-                ui.horizontal(|ui| {
-                    let enabled = !self.paste_text.trim().is_empty();
-                    if ui.add_enabled(enabled, egui::Button::new("Load")).clicked() {
-                        load_clicked = true;
-                    }
-                    if ui.button("Cancel").clicked() {
-                        self.show_paste_window = false;
-                    }
-                });
-            });
 
-        if load_clicked {
+        ui.weak("Paste JSON below, drag & drop a file anywhere, or use Open File.");
+        ui.add_space(4.0);
+
+        let resp = ui.add(
+            egui::TextEdit::multiline(&mut self.paste_text)
+                .desired_rows(24)
+                .desired_width(f32::INFINITY)
+                .code_editor()
+                .hint_text("Paste JSON here…"),
+        );
+
+        let pasted = resp.has_focus()
+            && ui
+                .ctx()
+                .input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Paste(_))));
+        let submit_shortcut = resp.has_focus()
+            && ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Enter));
+        if (pasted || submit_shortcut) && !self.paste_text.trim().is_empty() {
             let text = std::mem::take(&mut self.paste_text);
             self.open_text(text);
-            self.show_paste_window = false;
-        }
-        if !open {
-            self.show_paste_window = false;
         }
     }
 
@@ -370,6 +381,53 @@ impl App {
             }
         });
     }
+
+    fn results_panel(&mut self, ui: &mut egui::Ui) {
+        let rows = self.results_tree.row_count(&self.results);
+        ui.horizontal(|ui| {
+            ui.heading(format!("Results ({rows} row{})", plural(rows)));
+            ui.add_space(12.0);
+            ui.selectable_value(&mut self.results_view, ResultsView::Tree, "Tree");
+            ui.selectable_value(&mut self.results_view, ResultsView::Text, "Text");
+        });
+        ui.separator();
+        match self.results_view {
+            ResultsView::Tree => self.results_tree.ui(ui, "results_tree", &self.results),
+            ResultsView::Text => self.results_text_view(ui),
+        }
+    }
+
+    /// Plain, selectable/copyable pretty-printed JSON — an alternative to the
+    /// tree view for grabbing raw text with the mouse. Regenerated only when
+    /// the results actually change (`results_text_dirty`), not every frame.
+    fn results_text_view(&mut self, ui: &mut egui::Ui) {
+        if self.results_text_dirty {
+            self.results_text_cache = serde_json::to_string_pretty(&self.results)
+                .unwrap_or_else(|e| format!("<failed to render results as text: {e}>"));
+            self.results_text_dirty = false;
+        }
+        egui::ScrollArea::both()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.add(
+                    egui::Label::new(egui::RichText::new(&self.results_text_cache).monospace())
+                        .selectable(true)
+                        .wrap_mode(egui::TextWrapMode::Extend),
+                );
+            });
+    }
+}
+
+/// Small ☀/🌙 button that flips between light and dark theme.
+fn theme_toggle_button(ui: &mut egui::Ui) {
+    let (icon, tooltip, next) = if ui.ctx().theme() == egui::Theme::Dark {
+        ("☀", "Switch to light theme", egui::ThemePreference::Light)
+    } else {
+        ("🌙", "Switch to dark theme", egui::ThemePreference::Dark)
+    };
+    if ui.button(icon).on_hover_text(tooltip).clicked() {
+        ui.ctx().set_theme(next);
+    }
 }
 
 impl eframe::App for App {
@@ -380,8 +438,6 @@ impl eframe::App for App {
         egui::Panel::top("toolbar").show(ui, |ui| self.toolbar(ui));
         egui::Panel::top("query_bar").show(ui, |ui| self.query_bar(ui));
         egui::Panel::bottom("status_bar").show(ui, |ui| self.status_bar(ui));
-
-        self.paste_window(ui.ctx());
 
         egui::Panel::left("source_panel")
             .resizable(true)
@@ -396,29 +452,12 @@ impl eframe::App for App {
                 None => {
                     ui.heading("Source");
                     ui.separator();
-                    empty_state(ui, hovering_drop);
+                    self.paste_area(ui, hovering_drop);
                 }
             });
 
-        egui::CentralPanel::default().show(ui, |ui| {
-            let rows = self.results_tree.row_count(&self.results);
-            ui.heading(format!("Results ({rows} row{})", plural(rows)));
-            ui.separator();
-            self.results_tree.ui(ui, "results_tree", &self.results);
-        });
+        egui::CentralPanel::default().show(ui, |ui| self.results_panel(ui));
     }
-}
-
-fn empty_state(ui: &mut egui::Ui, hovering_drop: bool) {
-    ui.vertical_centered(|ui| {
-        ui.add_space(40.0);
-        if hovering_drop {
-            ui.heading("Drop to open");
-        } else {
-            ui.weak("Drag & drop a JSON file here,");
-            ui.weak("or use Open File / Paste JSON above.");
-        }
-    });
 }
 
 fn plural(n: usize) -> &'static str {
