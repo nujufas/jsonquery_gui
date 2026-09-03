@@ -35,4 +35,4 @@ jobs:
         run: cargo test --workspace
 
       - name: Build (release)
-        run: cargo build --release -p jsonquery
+        run: cargo build --release -p jsonquery_gui

@@ -43,7 +43,10 @@ pub struct App {
 
     source_tree: TreeView,
     results_tree: TreeView,
-    results_view: ResultsView,
+    source_view: ViewMode,
+    results_view: ViewMode,
+    source_text_cache: String,
+    source_text_dirty: bool,
     results_text_cache: String,
     results_text_dirty: bool,
 
@@ -53,7 +56,7 @@ pub struct App {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum ResultsView {
+enum ViewMode {
     Tree,
     Text,
 }
@@ -90,7 +93,10 @@ impl App {
             last_query_cancelled: false,
             source_tree: TreeView::default(),
             results_tree: TreeView::default(),
-            results_view: ResultsView::Tree,
+            source_view: ViewMode::Tree,
+            results_view: ViewMode::Tree,
+            source_text_cache: String::new(),
+            source_text_dirty: true,
             results_text_cache: String::new(),
             results_text_dirty: true,
             paste_text: String::new(),
@@ -126,6 +132,7 @@ impl App {
 
                     self.doc = Some(doc);
                     self.source_tree.reset();
+                    self.source_text_dirty = true;
                 }
                 Event::LoadError(e) => {
                     self.loading = false;
@@ -404,13 +411,13 @@ impl App {
         ui.horizontal(|ui| {
             ui.heading(format!("Results ({rows} row{})", plural(rows)));
             ui.add_space(12.0);
-            ui.selectable_value(&mut self.results_view, ResultsView::Tree, "Tree");
-            ui.selectable_value(&mut self.results_view, ResultsView::Text, "Text");
+            ui.selectable_value(&mut self.results_view, ViewMode::Tree, "Tree");
+            ui.selectable_value(&mut self.results_view, ViewMode::Text, "Text");
         });
         ui.separator();
         match self.results_view {
-            ResultsView::Tree => self.results_tree.ui(ui, "results_tree", &self.results),
-            ResultsView::Text => self.results_text_view(ui),
+            ViewMode::Tree => self.results_tree.ui(ui, "results_tree", &self.results),
+            ViewMode::Text => self.results_text_view(ui),
         }
     }
 
@@ -428,6 +435,26 @@ impl App {
             .show(ui, |ui| {
                 ui.add(
                     egui::Label::new(egui::RichText::new(&self.results_text_cache).monospace())
+                        .selectable(true)
+                        .wrap_mode(egui::TextWrapMode::Extend),
+                );
+            });
+    }
+
+    /// Plain, selectable/copyable pretty-printed JSON for the source
+    /// document — the same Tree/Text toggle as the results panel. Regenerated
+    /// only when the loaded document changes (`source_text_dirty`).
+    fn source_text_view(&mut self, ui: &mut egui::Ui, root: &Value) {
+        if self.source_text_dirty {
+            self.source_text_cache = serde_json::to_string_pretty(root)
+                .unwrap_or_else(|e| format!("<failed to render source as text: {e}>"));
+            self.source_text_dirty = false;
+        }
+        egui::ScrollArea::both()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.add(
+                    egui::Label::new(egui::RichText::new(&self.source_text_cache).monospace())
                         .selectable(true)
                         .wrap_mode(egui::TextWrapMode::Extend),
                 );
@@ -459,12 +486,20 @@ impl eframe::App for App {
         egui::Panel::left("source_panel")
             .resizable(true)
             .default_size(ui.available_width() * 0.5)
-            .show(ui, |ui| match &self.doc {
+            .show(ui, |ui| match self.doc.clone() {
                 Some(doc) => {
                     let rows = self.source_tree.row_count(&doc.root);
-                    ui.heading(format!("Source ({rows} row{})", plural(rows)));
+                    ui.horizontal(|ui| {
+                        ui.heading(format!("Source ({rows} row{})", plural(rows)));
+                        ui.add_space(12.0);
+                        ui.selectable_value(&mut self.source_view, ViewMode::Tree, "Tree");
+                        ui.selectable_value(&mut self.source_view, ViewMode::Text, "Text");
+                    });
                     ui.separator();
-                    self.source_tree.ui(ui, "source_tree", &doc.root);
+                    match self.source_view {
+                        ViewMode::Tree => self.source_tree.ui(ui, "source_tree", &doc.root),
+                        ViewMode::Text => self.source_text_view(ui, &doc.root),
+                    }
                 }
                 None => {
                     ui.heading("Source");
