@@ -3,18 +3,33 @@
 //! and receives [`Event`]s back over a `crossbeam-channel` pair, then wakes
 //! the egui context so a repaint picks up the new state.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use anyhow::Context;
 use crossbeam_channel::{Receiver, Sender};
-use jsonquery_core::Document;
+use jsonquery_core::{Document, DocumentSource};
 use jsonquery_query::QueryEvent;
+
+/// Cap on a URL download's response body, matching the "a few GB" v1 scale
+/// ceiling (Architecture §3) — protects against a malicious or misbehaving
+/// server exhausting disk/memory via an unbounded response.
+const MAX_DOWNLOAD_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 
 pub enum Command {
     OpenFile(PathBuf),
     OpenText(String),
+    OpenUrl(String),
+    SaveFile {
+        doc: Arc<Document>,
+        path: PathBuf,
+    },
+    SaveResults {
+        results: serde_json::Value,
+        path: PathBuf,
+    },
     Query {
         doc: Arc<Document>,
         text: String,
@@ -27,6 +42,8 @@ pub enum Event {
     Loading,
     Loaded(Arc<Document>),
     LoadError(String),
+    Saved(PathBuf),
+    SaveError(String),
     QueryItem {
         gen: u64,
         value: serde_json::Value,
@@ -62,6 +79,25 @@ pub fn spawn(cmd_rx: Receiver<Command>, evt_tx: Sender<Event>, wake: impl Fn() +
                     let result = jsonquery_core::load_text(&text).map(Arc::new);
                     send_load_result(&evt_tx, result, &wake);
                 }
+                Command::OpenUrl(url) => {
+                    send(&evt_tx, Event::Loading, &wake);
+                    let result = download_to_temp_file(&url).map(Arc::new);
+                    send_load_result(&evt_tx, result, &wake);
+                }
+                Command::SaveFile { doc, path } => {
+                    let result = save_json(&doc.root, &path);
+                    match result {
+                        Ok(()) => send(&evt_tx, Event::Saved(path), &wake),
+                        Err(e) => send(&evt_tx, Event::SaveError(format!("{e:#}")), &wake),
+                    }
+                }
+                Command::SaveResults { results, path } => {
+                    let result = save_json(&results, &path);
+                    match result {
+                        Ok(()) => send(&evt_tx, Event::Saved(path), &wake),
+                        Err(e) => send(&evt_tx, Event::SaveError(format!("{e:#}")), &wake),
+                    }
+                }
                 Command::Query {
                     doc,
                     text,
@@ -73,6 +109,63 @@ pub fn spawn(cmd_rx: Receiver<Command>, evt_tx: Sender<Event>, wake: impl Fn() +
             }
         }
     });
+}
+
+/// Download `url`'s body into a temporary file, then parse it with the same
+/// mmap-backed path a locally opened file would use (Architecture §1) —
+/// keeping URL downloads on the same footing as local files rather than
+/// materializing the whole response in RAM up front.
+fn download_to_temp_file(url: &str) -> anyhow::Result<Document> {
+    let mut response = ureq::get(url)
+        .call()
+        .with_context(|| format!("requesting {url}"))?;
+
+    let mut body = response
+        .body_mut()
+        .with_config()
+        .limit(MAX_DOWNLOAD_BYTES)
+        .reader();
+
+    let temp_path = temp_path_for_url(url);
+    let mut file = std::fs::File::create(&temp_path)
+        .with_context(|| format!("creating temporary file {}", temp_path.display()))?;
+    std::io::copy(&mut body, &mut file).with_context(|| format!("downloading {url}"))?;
+    drop(file);
+
+    let mut doc =
+        jsonquery_core::load(&temp_path).with_context(|| format!("parsing data from {url}"))?;
+    doc.source = DocumentSource::Url(url.to_string());
+    Ok(doc)
+}
+
+/// A temp-dir path derived from `url`'s last path segment, prefixed with the
+/// pid and a nanosecond timestamp for uniqueness. The prefix also neutralizes
+/// any path-traversal attempt in that segment (e.g. a URL ending in `/..`):
+/// whatever it contains becomes one literal filename component, never `/`.
+fn temp_path_for_url(url: &str) -> PathBuf {
+    let path_part = url.split(['?', '#']).next().unwrap_or(url);
+    let file_name = path_part
+        .rsplit('/')
+        .next()
+        .filter(|s| !s.is_empty())
+        .unwrap_or("download.json");
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    std::env::temp_dir().join(format!(
+        "jsonquery_gui-{}-{nanos}-{file_name}",
+        std::process::id()
+    ))
+}
+
+/// Write a value out as pretty-printed JSON — used by both "Save…" buttons,
+/// for the loaded source document and for the current query results.
+fn save_json(value: &serde_json::Value, path: &Path) -> anyhow::Result<()> {
+    let file =
+        std::fs::File::create(path).with_context(|| format!("creating {}", path.display()))?;
+    serde_json::to_writer_pretty(std::io::BufWriter::new(file), value)
+        .with_context(|| format!("writing {}", path.display()))
 }
 
 fn send_load_result(
