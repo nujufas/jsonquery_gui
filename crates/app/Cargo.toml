@@ -19,3 +19,4 @@ jsonquery-query = { path = "../query" }
 rfd = "0.17.2"
 serde_json = { version = "1.0.151", features = ["arbitrary_precision", "preserve_order"] }
 thiserror = "2.0.20"
+ureq = "3.3.0"

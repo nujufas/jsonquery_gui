@@ -53,11 +53,6 @@ impl TreeView {
         }
     }
 
-    pub fn row_count(&mut self, root: &Value) -> usize {
-        self.refresh(root);
-        self.rows.len()
-    }
-
     /// Draw the tree. `salt` must be unique per instance on screen (egui
     /// needs it to keep this scroll area's state distinct from the other
     /// tree).

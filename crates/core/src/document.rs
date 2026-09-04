@@ -10,6 +10,9 @@ pub enum DocumentSource {
     File(PathBuf),
     /// JSON typed or pasted directly into the app, rather than opened from disk.
     Pasted,
+    /// Downloaded from a URL into a temporary file, which backs the mmap the
+    /// same way an opened file would.
+    Url(String),
 }
 
 impl DocumentSource {
@@ -17,6 +20,7 @@ impl DocumentSource {
         match self {
             DocumentSource::File(p) => p.display().to_string(),
             DocumentSource::Pasted => "(pasted JSON)".to_string(),
+            DocumentSource::Url(url) => url.clone(),
         }
     }
 }

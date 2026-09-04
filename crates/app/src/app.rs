@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use crossbeam_channel::{Receiver, Sender};
 use eframe::egui;
-use jsonquery_core::Document;
+use jsonquery_core::{Document, DocumentSource};
 use serde_json::Value;
 
 use crate::tree_view::TreeView;
@@ -24,6 +24,8 @@ pub struct App {
     doc: Option<Arc<Document>>,
     loading: bool,
     load_error: Option<String>,
+    save_error: Option<String>,
+    last_saved: Option<PathBuf>,
 
     query_text: String,
     query_gen: u64,
@@ -53,6 +55,10 @@ pub struct App {
     /// Buffer for the inline "paste JSON" text area shown while no document
     /// is loaded.
     paste_text: String,
+
+    /// State for the "Open URL…" popup.
+    show_url_dialog: bool,
+    url_input: String,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -79,6 +85,8 @@ impl App {
             doc: None,
             loading: false,
             load_error: None,
+            save_error: None,
+            last_saved: None,
             query_text: String::new(),
             query_gen: 0,
             active_cancel: None,
@@ -100,6 +108,8 @@ impl App {
             results_text_cache: String::new(),
             results_text_dirty: true,
             paste_text: String::new(),
+            show_url_dialog: false,
+            url_input: String::new(),
         }
     }
 
@@ -113,6 +123,8 @@ impl App {
                 Event::Loaded(doc) => {
                     self.loading = false;
                     self.load_error = None;
+                    self.save_error = None;
+                    self.last_saved = None;
 
                     // A newly loaded document invalidates any query that was
                     // running against the previous one.
@@ -137,6 +149,14 @@ impl App {
                 Event::LoadError(e) => {
                     self.loading = false;
                     self.load_error = Some(e);
+                }
+                Event::Saved(path) => {
+                    self.save_error = None;
+                    self.last_saved = Some(path);
+                }
+                Event::SaveError(e) => {
+                    self.last_saved = None;
+                    self.save_error = Some(e);
                 }
                 Event::QueryItem { gen, value } => {
                     if gen != self.query_gen {
@@ -189,6 +209,89 @@ impl App {
 
     fn open_text(&mut self, text: String) {
         let _ = self.cmd_tx.send(Command::OpenText(text));
+    }
+
+    fn open_url(&mut self, url: String) {
+        let _ = self.cmd_tx.send(Command::OpenUrl(url));
+    }
+
+    /// Prompt for a destination and write the currently loaded source data
+    /// to it as pretty-printed JSON — how pasted, edited, or
+    /// URL-downloaded data (which otherwise only lives in memory or a temp
+    /// file) gets made permanent.
+    fn save_source(&mut self) {
+        let Some(doc) = self.doc.clone() else { return };
+        let default_name = match &doc.source {
+            DocumentSource::File(p) => p
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "data.json".to_string()),
+            DocumentSource::Pasted => "data.json".to_string(),
+            DocumentSource::Url(url) => url
+                .split(['?', '#'])
+                .next()
+                .unwrap_or(url)
+                .rsplit('/')
+                .next()
+                .filter(|s| !s.is_empty())
+                .unwrap_or("data.json")
+                .to_string(),
+        };
+        if let Some(path) = rfd::FileDialog::new()
+            .set_file_name(&default_name)
+            .add_filter("JSON", &["json"])
+            .save_file()
+        {
+            let _ = self.cmd_tx.send(Command::SaveFile { doc, path });
+        }
+    }
+
+    /// Prompt for a destination and write the current results (as currently
+    /// materialized — up to `LIVE_PREVIEW_CAP` items, same as what's shown)
+    /// to it as pretty-printed JSON.
+    fn save_results(&mut self) {
+        if let Some(path) = rfd::FileDialog::new()
+            .set_file_name("results.json")
+            .add_filter("JSON", &["json"])
+            .save_file()
+        {
+            let _ = self.cmd_tx.send(Command::SaveResults {
+                results: self.results.clone(),
+                path,
+            });
+        }
+    }
+
+    /// Reset all document-derived state back to "nothing loaded", so the app
+    /// can be pointed at a new source without restarting it.
+    fn clear_source(&mut self) {
+        if let Some(prev) = self.active_cancel.take() {
+            prev.store(true, Ordering::Relaxed);
+        }
+        self.query_gen += 1;
+        self.query_running = false;
+        self.query_error = None;
+
+        self.doc = None;
+        self.loading = false;
+        self.load_error = None;
+        self.save_error = None;
+        self.last_saved = None;
+
+        self.results = Value::Array(Vec::new());
+        self.results_item_errors = 0;
+        self.last_item_error = None;
+        self.results_count_so_far = 0;
+        self.results_truncated = false;
+        self.last_query_elapsed = None;
+        self.last_query_cancelled = false;
+        self.results_tree.reset();
+        self.results_text_dirty = true;
+
+        self.source_tree.reset();
+        self.source_text_cache.clear();
+        self.source_text_dirty = true;
+        self.paste_text.clear();
     }
 
     /// Start a new query run, cancelling whatever query was previously in
@@ -252,6 +355,18 @@ impl App {
                     self.open_file(path);
                 }
             }
+            if ui.button("Open URL…").clicked() {
+                self.show_url_dialog = true;
+            }
+            if ui
+                .add_enabled(
+                    self.doc.is_some() || self.loading || self.load_error.is_some(),
+                    egui::Button::new("Clear"),
+                )
+                .clicked()
+            {
+                self.clear_source();
+            }
             ui.separator();
 
             if let Some(doc) = &self.doc {
@@ -285,9 +400,50 @@ impl App {
             ui.allocate_ui_with_layout(
                 egui::vec2(ui.available_width(), ui.spacing().interact_size.y),
                 egui::Layout::right_to_left(egui::Align::Center),
-                |ui| theme_toggle_button(ui),
+                theme_toggle_button,
             );
         });
+    }
+
+    /// Popup prompting for a URL to download; shown when `show_url_dialog`
+    /// is set by the "Open URL…" toolbar button.
+    fn url_dialog(&mut self, ctx: &egui::Context) {
+        if !self.show_url_dialog {
+            return;
+        }
+
+        let mut open = true;
+        let mut submit = false;
+        let mut cancel = false;
+        egui::Window::new("Open URL")
+            .collapsible(false)
+            .resizable(false)
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.label("URL:");
+                let resp = ui.add(
+                    egui::TextEdit::singleline(&mut self.url_input)
+                        .desired_width(360.0)
+                        .hint_text("https://example.com/data.json"),
+                );
+                let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                ui.horizontal(|ui| {
+                    let load_clicked = ui
+                        .add_enabled(!self.url_input.trim().is_empty(), egui::Button::new("Load"))
+                        .clicked();
+                    submit = load_clicked || enter;
+                    cancel = ui.button("Cancel").clicked();
+                });
+            });
+
+        if cancel || !open {
+            self.show_url_dialog = false;
+            self.url_input.clear();
+        } else if submit && !self.url_input.trim().is_empty() {
+            let url = std::mem::take(&mut self.url_input);
+            self.show_url_dialog = false;
+            self.open_url(url);
+        }
     }
 
     /// The inline "paste JSON" panel shown in place of the source tree while
@@ -301,7 +457,7 @@ impl App {
             return;
         }
 
-        ui.weak("Paste JSON below, drag & drop a file anywhere, or use Open File.");
+        ui.weak("Drag & drop a file anywhere, or use Open File.");
         ui.add_space(4.0);
 
         // Fill whatever space is left in the panel rather than a fixed row
@@ -368,6 +524,16 @@ impl App {
                 );
                 ui.separator();
             }
+            if let Some(err) = &self.save_error {
+                ui.colored_label(
+                    egui::Color32::from_rgb(220, 80, 80),
+                    format!("Save error: {err}"),
+                );
+                ui.separator();
+            } else if let Some(path) = &self.last_saved {
+                ui.weak(format!("Saved to {}", path.display()));
+                ui.separator();
+            }
 
             if self.query_running {
                 ui.label("Query running…");
@@ -407,12 +573,27 @@ impl App {
     }
 
     fn results_panel(&mut self, ui: &mut egui::Ui) {
-        let rows = self.results_tree.row_count(&self.results);
+        let has_results = self.results.as_array().is_some_and(|a| !a.is_empty());
         ui.horizontal(|ui| {
-            ui.heading(format!("Results ({rows} row{})", plural(rows)));
+            ui.heading("Results");
             ui.add_space(12.0);
             ui.selectable_value(&mut self.results_view, ViewMode::Tree, "Tree");
             ui.selectable_value(&mut self.results_view, ViewMode::Text, "Text");
+
+            // Pinned to the right edge of the header, mirroring the Source
+            // panel's "Save…".
+            ui.allocate_ui_with_layout(
+                egui::vec2(ui.available_width(), ui.spacing().interact_size.y),
+                egui::Layout::right_to_left(egui::Align::Center),
+                |ui| {
+                    if ui
+                        .add_enabled(has_results, egui::Button::new("Save…"))
+                        .clicked()
+                    {
+                        self.save_results();
+                    }
+                },
+            );
         });
         ui.separator();
         match self.results_view {
@@ -441,24 +622,59 @@ impl App {
             });
     }
 
-    /// Plain, selectable/copyable pretty-printed JSON for the source
-    /// document — the same Tree/Text toggle as the results panel. Regenerated
-    /// only when the loaded document changes (`source_text_dirty`).
-    fn source_text_view(&mut self, ui: &mut egui::Ui, root: &Value) {
+    /// Pretty-printed JSON for the source document — the same Tree/Text
+    /// toggle as the results panel. Regenerated only when the loaded
+    /// document changes (`source_text_dirty`). For a *pasted* document the
+    /// text is directly editable; "Apply" (or Ctrl+Enter) re-parses the
+    /// edited buffer in place, so a typo doesn't mean re-pasting from
+    /// scratch. Opened files and URL downloads stay read-only, since editing
+    /// them wouldn't touch the file/URL they came from.
+    fn source_text_view(&mut self, ui: &mut egui::Ui, doc: &Document) {
         if self.source_text_dirty {
-            self.source_text_cache = serde_json::to_string_pretty(root)
+            self.source_text_cache = serde_json::to_string_pretty(&doc.root)
                 .unwrap_or_else(|e| format!("<failed to render source as text: {e}>"));
             self.source_text_dirty = false;
         }
-        egui::ScrollArea::both()
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                ui.add(
-                    egui::Label::new(egui::RichText::new(&self.source_text_cache).monospace())
-                        .selectable(true)
-                        .wrap_mode(egui::TextWrapMode::Extend),
-                );
+
+        if matches!(&doc.source, DocumentSource::Pasted) {
+            let mut apply = false;
+            ui.horizontal(|ui| {
+                ui.weak("Editable — change the JSON below, then apply.");
+                ui.add_space(8.0);
+                if ui
+                    .add_enabled(
+                        !self.source_text_cache.trim().is_empty(),
+                        egui::Button::new("Apply  (Ctrl+Enter)"),
+                    )
+                    .clicked()
+                {
+                    apply = true;
+                }
             });
+            let resp = ui.add_sized(
+                ui.available_size(),
+                egui::TextEdit::multiline(&mut self.source_text_cache).code_editor(),
+            );
+            if resp.has_focus()
+                && ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Enter))
+            {
+                apply = true;
+            }
+            if apply && !self.source_text_cache.trim().is_empty() {
+                let text = self.source_text_cache.clone();
+                self.open_text(text);
+            }
+        } else {
+            egui::ScrollArea::both()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    ui.add(
+                        egui::Label::new(egui::RichText::new(&self.source_text_cache).monospace())
+                            .selectable(true)
+                            .wrap_mode(egui::TextWrapMode::Extend),
+                    );
+                });
+        }
     }
 }
 
@@ -478,27 +694,47 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.drain_events();
         let hovering_drop = self.handle_drag_and_drop(ui);
+        self.url_dialog(ui.ctx());
 
         egui::Panel::top("toolbar").show(ui, |ui| self.toolbar(ui));
         egui::Panel::top("query_bar").show(ui, |ui| self.query_bar(ui));
         egui::Panel::bottom("status_bar").show(ui, |ui| self.status_bar(ui));
 
+        // Matches `CentralPanel`'s inner margin (`Frame::central_panel` uses
+        // `Margin::same(8)`) so the "Source" and "Results" headers — and
+        // everything below them — line up; `Panel`'s own default
+        // (`Margin::symmetric(8, 2)`) is 6px shorter on top/bottom.
+        let source_frame =
+            egui::Frame::side_top_panel(ui.style()).inner_margin(egui::Margin::same(8));
+
         egui::Panel::left("source_panel")
             .resizable(true)
             .default_size(ui.available_width() * 0.5)
+            .frame(source_frame)
             .show(ui, |ui| match self.doc.clone() {
                 Some(doc) => {
-                    let rows = self.source_tree.row_count(&doc.root);
                     ui.horizontal(|ui| {
-                        ui.heading(format!("Source ({rows} row{})", plural(rows)));
+                        ui.heading("Source");
                         ui.add_space(12.0);
                         ui.selectable_value(&mut self.source_view, ViewMode::Tree, "Tree");
                         ui.selectable_value(&mut self.source_view, ViewMode::Text, "Text");
+
+                        // Pinned to the right edge of the header, mirroring
+                        // the toolbar's theme toggle.
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(ui.available_width(), ui.spacing().interact_size.y),
+                            egui::Layout::right_to_left(egui::Align::Center),
+                            |ui| {
+                                if ui.button("Save…").clicked() {
+                                    self.save_source();
+                                }
+                            },
+                        );
                     });
                     ui.separator();
                     match self.source_view {
                         ViewMode::Tree => self.source_tree.ui(ui, "source_tree", &doc.root),
-                        ViewMode::Text => self.source_text_view(ui, &doc.root),
+                        ViewMode::Text => self.source_text_view(ui, &doc),
                     }
                 }
                 None => {
@@ -509,14 +745,6 @@ impl eframe::App for App {
             });
 
         egui::CentralPanel::default().show(ui, |ui| self.results_panel(ui));
-    }
-}
-
-fn plural(n: usize) -> &'static str {
-    if n == 1 {
-        ""
-    } else {
-        "s"
     }
 }
 
