@@ -11,7 +11,9 @@
 use std::collections::HashSet;
 
 use regex::Regex;
-use serde_json::Value;
+use serde_json::{Map, Value};
+
+use crate::view::ValueView;
 
 /// One step of a path into a JSON document: an object key or an array index.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -89,27 +91,23 @@ fn is_expanded(path: &NodePath, expand: &ExpandState) -> bool {
 
 /// Flatten `root` into the list of currently-visible rows, given `expand`.
 /// Collapsed subtrees are skipped entirely (not walked), not just hidden.
-pub fn flatten_visible(root: &Value, expand: &ExpandState) -> Vec<RowInfo> {
+pub fn flatten_visible<V: ValueView>(root: V, expand: &ExpandState) -> Vec<RowInfo> {
     let mut out = Vec::new();
     let mut path = Vec::new();
     push_node(root, None, &mut path, 0, expand, &mut out);
     out
 }
 
-fn push_node(
-    value: &Value,
+fn push_node<V: ValueView>(
+    value: V,
     key: Option<PathSegment>,
     path: &mut NodePath,
     depth: usize,
     expand: &ExpandState,
     out: &mut Vec<RowInfo>,
 ) {
-    let kind = ValueKind::of(value);
-    let child_count = match value {
-        Value::Array(a) => a.len(),
-        Value::Object(o) => o.len(),
-        _ => 0,
-    };
+    let kind = value.kind();
+    let child_count = value.child_count();
     let expanded = kind.is_container() && is_expanded(path, expand);
 
     out.push(RowInfo {
@@ -118,7 +116,7 @@ fn push_node(
         key: key.clone(),
         kind,
         child_count,
-        scalar_preview: (!kind.is_container()).then(|| scalar_preview(value)),
+        scalar_preview: value.scalar_preview(),
         expanded,
     });
 
@@ -126,57 +124,21 @@ fn push_node(
         return;
     }
 
-    match value {
-        Value::Array(items) => {
-            for (i, child) in items.iter().enumerate() {
-                path.push(PathSegment::Index(i));
-                push_node(
-                    child,
-                    Some(PathSegment::Index(i)),
-                    path,
-                    depth + 1,
-                    expand,
-                    out,
-                );
-                path.pop();
-            }
-        }
-        Value::Object(map) => {
-            for (k, child) in map.iter() {
-                path.push(PathSegment::Key(k.clone()));
-                push_node(
-                    child,
-                    Some(PathSegment::Key(k.clone())),
-                    path,
-                    depth + 1,
-                    expand,
-                    out,
-                );
-                path.pop();
-            }
-        }
-        _ => {}
-    }
-}
-
-fn scalar_preview(value: &Value) -> String {
-    match value {
-        Value::Null => "null".to_string(),
-        Value::Bool(b) => b.to_string(),
-        Value::Number(n) => n.to_string(),
-        Value::String(s) => format!("{s:?}"),
-        _ => unreachable!("scalar_preview called on a container value"),
+    for (child_key, child) in value.iter_children() {
+        let child_key = child_key.expect("iter_children yields a key/index for every child");
+        path.push(child_key.clone());
+        push_node(child, Some(child_key), path, depth + 1, expand, out);
+        path.pop();
     }
 }
 
 /// Resolve a node path back to its value, e.g. for a "copy value" action.
-pub fn resolve<'a>(root: &'a Value, path: &NodePath) -> Option<&'a Value> {
+pub fn resolve<V: ValueView>(root: V, path: &NodePath) -> Option<V> {
     let mut cur = root;
     for seg in path {
-        cur = match (seg, cur) {
-            (PathSegment::Key(k), Value::Object(o)) => o.get(k)?,
-            (PathSegment::Index(i), Value::Array(a)) => a.get(*i)?,
-            _ => return None,
+        cur = match seg {
+            PathSegment::Key(k) => cur.child_by_key(k)?,
+            PathSegment::Index(i) => cur.child_at(*i)?,
         };
     }
     Some(cur)
@@ -233,37 +195,53 @@ fn is_bare_ident(k: &str) -> bool {
 /// synthesized by a query (`add`, string interpolation, computed numbers,
 /// ...) generally won't be found — there's no single "source location" for
 /// those, so no match is a reasonable, honest outcome.
-pub fn find_path(root: &Value, target: &Value) -> Option<NodePath> {
+pub fn find_path<V: ValueView>(root: V, target: &Value) -> Option<NodePath> {
     let mut path = Vec::new();
     find_path_rec(root, target, &mut path).then_some(path)
 }
 
-fn find_path_rec(value: &Value, target: &Value, path: &mut NodePath) -> bool {
-    if value == target {
+fn find_path_rec<V: ValueView>(value: V, target: &Value, path: &mut NodePath) -> bool {
+    if structurally_equal(&value, target) {
         return true;
     }
-    match value {
-        Value::Array(items) => {
-            for (i, child) in items.iter().enumerate() {
-                path.push(PathSegment::Index(i));
-                if find_path_rec(child, target, path) {
-                    return true;
-                }
-                path.pop();
-            }
+    for (child_key, child) in value.iter_children() {
+        let child_key = child_key.expect("iter_children yields a key/index for every child");
+        path.push(child_key);
+        if find_path_rec(child, target, path) {
+            return true;
         }
-        Value::Object(map) => {
-            for (k, child) in map.iter() {
-                path.push(PathSegment::Key(k.clone()));
-                if find_path_rec(child, target, path) {
-                    return true;
-                }
-                path.pop();
-            }
-        }
-        _ => {}
+        path.pop();
     }
     false
+}
+
+/// Whether `value` and `target` describe the same JSON structure — the same
+/// equality `serde_json::Value`'s own `PartialEq` gives two owned `Value`s
+/// (arrays compare length and order; objects compare as a set of key/value
+/// pairs, order-independent), but computed one child at a time through
+/// [`ValueView`] instead of requiring `value` to already be a `Value`.
+fn structurally_equal<V: ValueView>(value: &V, target: &Value) -> bool {
+    match target {
+        Value::Array(items) => {
+            value.kind() == ValueKind::Array
+                && value.child_count() == items.len()
+                && items.iter().enumerate().all(|(i, item)| {
+                    value
+                        .child_at(i)
+                        .is_some_and(|c| structurally_equal(&c, item))
+                })
+        }
+        Value::Object(map) => {
+            value.kind() == ValueKind::Object
+                && value.child_count() == map.len()
+                && map.iter().all(|(k, v)| {
+                    value
+                        .child_by_key(k)
+                        .is_some_and(|c| structurally_equal(&c, v))
+                })
+        }
+        scalar => value.scalar_value().as_ref() == Some(scalar),
+    }
 }
 
 /// Cap on how many hits [`search`] collects, protecting memory and the
@@ -276,7 +254,11 @@ const MAX_SEARCH_MATCHES: usize = 5_000;
 /// expression, depth-first pre-order, capped at [`MAX_SEARCH_MATCHES`].
 /// Backs the tree's "Search…" row-context-menu action, which lists every hit
 /// in a Notepad++-style results panel rather than jumping to just one.
-pub fn search(root: &Value, query: &str, use_regex: bool) -> anyhow::Result<Vec<NodePath>> {
+pub fn search<V: ValueView>(
+    root: V,
+    query: &str,
+    use_regex: bool,
+) -> anyhow::Result<Vec<NodePath>> {
     let is_match: Box<dyn Fn(&str) -> bool> = if use_regex {
         let re = Regex::new(query)?;
         Box::new(move |s: &str| re.is_match(s))
@@ -291,8 +273,8 @@ pub fn search(root: &Value, query: &str, use_regex: bool) -> anyhow::Result<Vec<
     Ok(out)
 }
 
-fn search_rec(
-    value: &Value,
+fn search_rec<V: ValueView>(
+    value: V,
     key: Option<PathSegment>,
     is_match: &dyn Fn(&str) -> bool,
     path: &mut NodePath,
@@ -303,45 +285,142 @@ fn search_rec(
     }
 
     let key_matches = matches!(&key, Some(PathSegment::Key(k)) if is_match(k));
-    let value_matches = match value {
-        Value::String(s) => is_match(s),
-        Value::Number(n) => is_match(&n.to_string()),
-        Value::Bool(b) => is_match(if *b { "true" } else { "false" }),
-        Value::Null => is_match("null"),
-        Value::Array(_) | Value::Object(_) => false,
-    };
+    let value_matches = value
+        .scalar_value()
+        .is_some_and(|v| scalar_matches(&v, is_match));
     if key_matches || value_matches {
         out.push(path.clone());
     }
 
+    for (child_key, child) in value.iter_children() {
+        if out.len() >= MAX_SEARCH_MATCHES {
+            break;
+        }
+        let child_key = child_key.expect("iter_children yields a key/index for every child");
+        path.push(child_key.clone());
+        search_rec(child, Some(child_key), is_match, path, out);
+        path.pop();
+    }
+}
+
+fn scalar_matches(v: &Value, is_match: &dyn Fn(&str) -> bool) -> bool {
+    match v {
+        Value::String(s) => is_match(s),
+        Value::Number(n) => is_match(&n.to_string()),
+        Value::Bool(b) => is_match(if *b { "true" } else { "false" }),
+        Value::Null => is_match("null"),
+        Value::Array(_) | Value::Object(_) => {
+            unreachable!("scalar_value never returns a container")
+        }
+    }
+}
+
+/// Render `value` as indented JSON text (2-space indent, the same shape as
+/// `serde_json::to_string_pretty`), but stop once `node_budget` nodes
+/// (scalars, arrays, and objects each count as one) have been visited —
+/// used by the app's "Text view" so previewing a huge document or a huge
+/// query result (e.g. the single-item output of `.` over a multi-GB doc)
+/// costs only as much as the budget, never the whole tree. Returns the
+/// rendered text and whether it was cut short.
+pub fn pretty_print_bounded(value: &Value, node_budget: usize) -> (String, bool) {
+    let mut out = String::new();
+    let mut budget = node_budget;
+    let complete = write_node(value, 0, &mut out, &mut budget);
+    (out, !complete)
+}
+
+/// Writes one node and returns whether the whole subtree was written; `false`
+/// means the budget ran out somewhere inside it, so `out` holds a truncated
+/// (not necessarily valid-JSON) prefix.
+fn write_node(value: &Value, indent: usize, out: &mut String, budget: &mut usize) -> bool {
+    if *budget == 0 {
+        out.push('…');
+        return false;
+    }
+    *budget -= 1;
     match value {
-        Value::Array(items) => {
-            for (i, child) in items.iter().enumerate() {
-                if out.len() >= MAX_SEARCH_MATCHES {
-                    break;
-                }
-                path.push(PathSegment::Index(i));
-                search_rec(child, Some(PathSegment::Index(i)), is_match, path, out);
-                path.pop();
-            }
+        Value::Null => {
+            out.push_str("null");
+            true
         }
-        Value::Object(map) => {
-            for (k, child) in map.iter() {
-                if out.len() >= MAX_SEARCH_MATCHES {
-                    break;
-                }
-                path.push(PathSegment::Key(k.clone()));
-                search_rec(
-                    child,
-                    Some(PathSegment::Key(k.clone())),
-                    is_match,
-                    path,
-                    out,
-                );
-                path.pop();
-            }
+        Value::Bool(b) => {
+            out.push_str(if *b { "true" } else { "false" });
+            true
         }
-        _ => {}
+        Value::Number(n) => {
+            out.push_str(&n.to_string());
+            true
+        }
+        Value::String(s) => {
+            out.push_str(&serde_json::to_string(s).unwrap_or_else(|_| "\"\"".to_string()));
+            true
+        }
+        Value::Array(items) => write_array(items, indent, out, budget),
+        Value::Object(map) => write_object(map, indent, out, budget),
+    }
+}
+
+fn write_array(items: &[Value], indent: usize, out: &mut String, budget: &mut usize) -> bool {
+    if items.is_empty() {
+        out.push_str("[]");
+        return true;
+    }
+    out.push('[');
+    let child_indent = indent + 1;
+    let mut complete = true;
+    for (i, item) in items.iter().enumerate() {
+        out.push('\n');
+        push_indent(out, child_indent);
+        if !write_node(item, child_indent, out, budget) {
+            complete = false;
+            break;
+        }
+        if i + 1 < items.len() {
+            out.push(',');
+        }
+    }
+    out.push('\n');
+    push_indent(out, indent);
+    out.push(']');
+    complete
+}
+
+fn write_object(
+    map: &Map<String, Value>,
+    indent: usize,
+    out: &mut String,
+    budget: &mut usize,
+) -> bool {
+    if map.is_empty() {
+        out.push_str("{}");
+        return true;
+    }
+    out.push('{');
+    let child_indent = indent + 1;
+    let mut complete = true;
+    let len = map.len();
+    for (i, (k, v)) in map.iter().enumerate() {
+        out.push('\n');
+        push_indent(out, child_indent);
+        out.push_str(&serde_json::to_string(k).unwrap_or_else(|_| "\"\"".to_string()));
+        out.push_str(": ");
+        if !write_node(v, child_indent, out, budget) {
+            complete = false;
+            break;
+        }
+        if i + 1 < len {
+            out.push(',');
+        }
+    }
+    out.push('\n');
+    push_indent(out, indent);
+    out.push('}');
+    complete
+}
+
+fn push_indent(out: &mut String, level: usize) {
+    for _ in 0..level {
+        out.push_str("  ");
     }
 }
 
@@ -453,5 +532,34 @@ mod tests {
     fn search_invalid_regex_is_an_error() {
         let v = json!({"a": 1});
         assert!(search(&v, "(unclosed", true).is_err());
+    }
+
+    #[test]
+    fn pretty_print_bounded_matches_serde_when_under_budget() {
+        let v = json!({"a": [1, 2.5, "x", null, true], "b": {"c": -3}});
+        let (text, truncated) = pretty_print_bounded(&v, 1_000);
+        assert!(!truncated);
+        assert_eq!(text, serde_json::to_string_pretty(&v).unwrap());
+    }
+
+    #[test]
+    fn pretty_print_bounded_cuts_off_and_reports_truncation() {
+        let v = json!([1, 2, 3, 4, 5]);
+        // Budget covers the array itself plus its first two elements only.
+        let (text, truncated) = pretty_print_bounded(&v, 3);
+        assert!(truncated);
+        assert!(text.contains('1'));
+        assert!(text.contains('2'));
+        assert!(!text.contains('3'));
+    }
+
+    #[test]
+    fn pretty_print_bounded_empty_containers_never_truncate() {
+        let v = json!({"a": [], "b": {}});
+        // Exactly one budget unit per node: the root object, plus its two
+        // (empty, childless) values.
+        let (text, truncated) = pretty_print_bounded(&v, 3);
+        assert!(!truncated);
+        assert_eq!(text, serde_json::to_string_pretty(&v).unwrap());
     }
 }
