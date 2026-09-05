@@ -1,0 +1,31 @@
+# Python dependencies for the jsonquery GUI Robot Framework suite.
+# See test/docs/00_test_strategy.md for the rationale behind each choice, and
+# for the system (non-pip) packages that must be installed alongside these
+# (tesseract-ocr, xdotool, wmctrl, xclip on Linux).
+#
+# Versions are unpinned-minimum for now (requirements phase); pin exact
+# versions once the implementation phase confirms what actually installs
+# cleanly in the target test environment's Python. This dev machine runs
+# Python 3.14, which is newer than these vision-automation libraries usually
+# have wheels for at release time — if `pip install -r` fails here, create the
+# test venv against Python 3.11 or 3.12 instead rather than fighting 3.14.
+
+robotframework>=7.0
+
+# Mouse/keyboard control + image-template matching (SikuliX-style) for
+# interacting with the app's egui-rendered widgets, which have no
+# accessibility tree to query. See 00_test_strategy.md's AT-SPI investigation.
+# NOTE: PyPI's latest is 1.0 (last released 2019) despite the project looking
+# unmaintained -- confirmed working on Python 3.12 during implementation.
+robotframework-imagehorizonlibrary==1.0
+
+# OCR (via Tesseract) for reading text the app rendered — status bar,
+# tree/text view content — since there is no DOM/accessibility text API.
+pytesseract>=0.3
+
+# Clipboard read-back, for verifying the "Copy JSON Path" context-menu item.
+pyperclip>=1.9
+
+# Screenshot-on-failure evidence, used with Robot Framework's built-in
+# Screenshot library.
+mss>=9.0
