@@ -1,0 +1,23 @@
+# Maintainer: nujufas <nujufas@gmail.com>
+pkgname=jsonquery-gui-bin
+pkgver=0.2.0
+pkgrel=1
+pkgdesc="Native desktop GUI for browsing and querying large JSON files with jq, JSONPath, JMESPath, and JSON Pointer"
+arch=('x86_64')
+url="https://github.com/nujufas/jsonquery_gui"
+license=('MIT')
+provides=('jsonquery-gui')
+conflicts=('jsonquery-gui')
+source=("$pkgname-$pkgver.tar.gz::https://github.com/nujufas/jsonquery_gui/releases/download/v$pkgver/jsonquery_gui-$pkgver-linux-x86_64.tar.gz"
+        "jsonquery_gui.desktop"
+        "jsonquery_gui.png")
+sha256sums=('d3e4a9954ea40d28eeab3435feb8d432f9f4f322693e9b32cf9b1ec39a969f53'
+            '614ae5ed0be08baa934be414ac1568a7e1975e2906d1b25ef0950667268d9c92'
+            'b0701ad406646bdb998acaf35029bbd57486d1127fd1e0f2f5900d2d48e58098')
+
+package() {
+    install -Dm755 "jsonquery_gui-$pkgver-linux-x86_64/jsonquery_gui" "$pkgdir/usr/bin/jsonquery_gui"
+    install -Dm644 "jsonquery_gui-$pkgver-linux-x86_64/README.md" "$pkgdir/usr/share/doc/$pkgname/README.md"
+    install -Dm644 "jsonquery_gui.desktop" "$pkgdir/usr/share/applications/jsonquery_gui.desktop"
+    install -Dm644 "jsonquery_gui.png" "$pkgdir/usr/share/icons/hicolor/256x256/apps/jsonquery_gui.png"
+}

@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=jsonquery
+GenericName=JSON Query Tool
+Comment=Browse and query large JSON files with jq-compatible queries
+Exec=jsonquery_gui
+Icon=jsonquery_gui
+Categories=Development;Utility;
+Terminal=false
+StartupWMClass=jsonquery_gui
