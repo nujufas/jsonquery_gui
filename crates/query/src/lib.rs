@@ -1,20 +1,36 @@
-//! Embeds jaq to run jq-compatible queries against an in-memory
-//! `serde_json::Value`. jaq is this project's first query dialect, not its
-//! only one — [`JaqEngine`] (in [`jq`]) is the `jsonquery_core::engine`
-//! adapter other code should reach for; [`run_query`] below is the
-//! lower-level function it wraps.
+//! This project's query dialects, each plugged into
+//! `jsonquery_core::engine::QueryEngine`. jaq (in [`jq`]) was the first;
+//! [`json_pointer`], [`jsonpath`], and [`jmespath_engine`] add JSON Pointer
+//! (RFC 6901), JSONPath (RFC 9535, via `jsonpath-rust`), and JMESPath (via
+//! the `jmespath` crate) as independently pluggable dialects picked from the
+//! survey in docs/query-engines.html. [`Kind`] is the UI-facing enum tying a
+//! dialect's id to its `QueryEngine` impl and to [`Kind::detect`]'s
+//! best-effort auto-selection from the query text alone.
 //!
-//! Results are streamed out through a callback rather than collected into a
-//! `Vec` first: jaq's evaluator is generator-based, so pulling one item at a
-//! time is what lets a slow or unbounded query be cancelled mid-run and lets
-//! `first`/`limit` genuinely short-circuit (Architecture §4, §7).
+//! [`run_query`] below is jaq's own lower-level entry point, kept for
+//! [`JaqEngine`] and its tests to wrap; other code should reach for a
+//! `QueryEngine` (via [`Kind::engine`]) rather than this function directly.
+//! Its results are streamed out through a callback rather than collected
+//! into a `Vec` first: jaq's evaluator is generator-based, so pulling one
+//! item at a time is what lets a slow or unbounded query be cancelled
+//! mid-run and lets `first`/`limit` genuinely short-circuit (Architecture
+//! §4, §7). The other three dialects don't have this concern — JSONPath and
+//! JMESPath both evaluate to a bounded result eagerly — so their
+//! `QueryEngine` impls live directly in their own modules with no separate
+//! lower-level function.
 
 mod convert;
+pub mod jmespath_engine;
 pub mod jq;
+pub mod json_pointer;
+pub mod jsonpath;
 
 pub use convert::{from_val, to_val};
 pub use jaq_json::Val;
+pub use jmespath_engine::JmesPathEngine;
 pub use jq::JaqEngine;
+pub use json_pointer::JsonPointerEngine;
+pub use jsonpath::JsonPathEngine;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -36,6 +52,109 @@ pub enum QueryError {
 pub enum QueryEvent {
     Item(Value),
     ItemError(String),
+}
+
+/// Which `QueryEngine` a query should run against — set explicitly via the
+/// UI's engine picker, or left to [`Kind::detect`] when none of its buttons
+/// is selected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    Jq,
+    JsonPointer,
+    JsonPath,
+    JmesPath,
+}
+
+impl Kind {
+    pub const ALL: [Kind; 4] = [Kind::Jq, Kind::JsonPointer, Kind::JsonPath, Kind::JmesPath];
+
+    /// Short label for the engine-picker buttons and status-bar text.
+    pub fn label(self) -> &'static str {
+        match self {
+            Kind::Jq => "jq",
+            Kind::JsonPointer => "Pointer",
+            Kind::JsonPath => "JSONPath",
+            Kind::JmesPath => "JMESPath",
+        }
+    }
+
+    /// One-line syntax example, for the engine-picker buttons' hover text.
+    pub fn example(self) -> &'static str {
+        match self {
+            Kind::Jq => "jq — e.g. .[] | select(.age > 21) | .name",
+            Kind::JsonPointer => "JSON Pointer (RFC 6901) — e.g. /store/book/0",
+            Kind::JsonPath => "JSONPath (RFC 9535) — e.g. $.store.book[*].author",
+            Kind::JmesPath => "JMESPath — e.g. people[?age > `30`].age",
+        }
+    }
+
+    /// This dialect's `QueryEngine` implementor. Every engine here is a
+    /// zero-sized, stateless struct, so a `&'static dyn` reference is enough
+    /// — no allocation needed to hand the caller something to `.run()`.
+    pub fn engine(self) -> &'static dyn jsonquery_core::engine::QueryEngine {
+        match self {
+            Kind::Jq => &JaqEngine,
+            Kind::JsonPointer => &JsonPointerEngine,
+            Kind::JsonPath => &JsonPathEngine,
+            Kind::JmesPath => &JmesPathEngine,
+        }
+    }
+
+    /// Best-effort dialect detection from `query`'s own syntax, used when no
+    /// engine button is explicitly selected. JSON Pointer and JSONPath have
+    /// unambiguous leading markers (`/` and `$`), and jq filters
+    /// overwhelmingly start with `.`; JMESPath has no such marker and
+    /// overlaps a lot syntactically with jq (both use bare `foo.bar`-style
+    /// paths), so a handful of JMESPath-only substrings are checked before
+    /// falling back to jq, the richer and originally-default dialect.
+    pub fn detect(query: &str) -> Kind {
+        let trimmed = query.trim();
+        if trimmed.is_empty() || trimmed.starts_with('.') {
+            return Kind::Jq;
+        }
+        if trimmed.starts_with('/') {
+            return Kind::JsonPointer;
+        }
+        if trimmed.starts_with('$') {
+            return Kind::JsonPath;
+        }
+        const JMESPATH_MARKERS: [&str; 4] = ["[?", "&&", "||", "`"];
+        if JMESPATH_MARKERS.iter().any(|m| trimmed.contains(m)) {
+            return Kind::JmesPath;
+        }
+        Kind::Jq
+    }
+}
+
+#[cfg(test)]
+mod kind_tests {
+    use super::Kind;
+
+    #[test]
+    fn detects_json_pointer() {
+        assert_eq!(Kind::detect("/a/b/0"), Kind::JsonPointer);
+        assert_eq!(Kind::detect(""), Kind::Jq); // ambiguous; jq's "." also means "whole doc"
+    }
+
+    #[test]
+    fn detects_jsonpath() {
+        assert_eq!(Kind::detect("$.store.book[*].author"), Kind::JsonPath);
+    }
+
+    #[test]
+    fn detects_jq() {
+        assert_eq!(Kind::detect(".[] | select(.age > 21)"), Kind::Jq);
+    }
+
+    #[test]
+    fn detects_jmespath_via_filter_bracket() {
+        assert_eq!(Kind::detect("people[?age > `30`].age"), Kind::JmesPath);
+    }
+
+    #[test]
+    fn ambiguous_bare_path_defaults_to_jq() {
+        assert_eq!(Kind::detect("foo.bar"), Kind::Jq);
+    }
 }
 
 /// Compile `query_src` and run it against `input`, calling `on_event` once

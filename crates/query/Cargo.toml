@@ -10,6 +10,8 @@ crossbeam-channel = "0.5.16"
 jaq-core = "3.1.1"
 jaq-json = "2.0.3"
 jaq-std = "3.0.3"
+jmespath = "0.5.0"
+jsonpath-rust = "1.0.10"
 jsonquery-core = { path = "../core" }
 serde_json = { version = "1.0.151", features = ["arbitrary_precision", "preserve_order"] }
 thiserror = "2.0.20"

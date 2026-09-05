@@ -45,6 +45,15 @@ pub struct App {
     query_running: bool,
     query_error: Option<String>,
 
+    /// Explicit engine-picker selection (`None` = no button selected, so
+    /// [`jsonquery_query::Kind::detect`] chooses one from the query text at
+    /// run time).
+    query_engine: Option<jsonquery_query::Kind>,
+    /// Which engine the most recently run/running query actually used —
+    /// `query_engine` if set, else whatever `detect` picked — kept around
+    /// purely for the status bar's "ran with X" line.
+    last_resolved_engine: Option<jsonquery_query::Kind>,
+
     /// Always a `Value::Array` — the accumulated (possibly capped) results
     /// of the current query, in the shape the results tree renders directly.
     results: Value,
@@ -159,6 +168,8 @@ impl App {
             active_cancel: None,
             query_running: false,
             query_error: None,
+            query_engine: None,
+            last_resolved_engine: None,
             results: Value::Array(Vec::new()),
             results_item_errors: 0,
             last_item_error: None,
@@ -222,6 +233,7 @@ impl App {
                     self.results_count_so_far = 0;
                     self.results_truncated = false;
                     self.last_query_elapsed = None;
+                    self.last_resolved_engine = None;
                     self.results_tree.reset();
                     self.invalidate_results_text();
 
@@ -592,6 +604,7 @@ impl App {
         self.results_truncated = false;
         self.last_query_elapsed = None;
         self.last_query_cancelled = false;
+        self.last_resolved_engine = None;
         self.results_tree.reset();
         self.invalidate_results_text();
 
@@ -629,9 +642,15 @@ impl App {
         self.last_query_elapsed = None;
         self.query_running = true;
 
+        let engine = self
+            .query_engine
+            .unwrap_or_else(|| jsonquery_query::Kind::detect(&self.query_text));
+        self.last_resolved_engine = Some(engine);
+
         let _ = self.cmd_tx.send(Command::Query {
             doc,
             text: self.query_text.clone(),
+            engine,
             gen: self.query_gen,
             cancel,
         });
@@ -938,13 +957,37 @@ impl App {
                     self.run_query();
                 }
             }
+
+            // Engine picker, pinned to the query box's top right. None
+            // selected (the default) means "auto" — `Kind::detect` picks a
+            // dialect from the query text itself when the query runs.
+            // `SelectableLabel` gives selected buttons a subtle tinted
+            // background rather than a full button border, matching the
+            // "small, subtly-highlighted" look the other toggle buttons
+            // (theme, view mode) already use elsewhere in this bar.
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                for kind in jsonquery_query::Kind::ALL.into_iter().rev() {
+                    let selected = self.query_engine == Some(kind);
+                    let resp =
+                        ui.selectable_label(selected, egui::RichText::new(kind.label()).small());
+                    if resp.clicked() {
+                        self.query_engine = if selected { None } else { Some(kind) };
+                    }
+                    resp.on_hover_text(kind.example());
+                }
+                ui.weak(egui::RichText::new("Engine:").small());
+            });
         });
         ui.add(
             egui::TextEdit::multiline(&mut self.query_text)
                 .desired_rows(3)
                 .desired_width(f32::INFINITY)
                 .code_editor()
-                .hint_text(".   (jq-compatible — e.g. .[] | select(.age > 21) | .name)"),
+                .hint_text(
+                    "e.g. .[] | select(.age > 21) | .name\n\
+                     (auto-detects jq / JSON Pointer / JSONPath / JMESPath — \
+                     or pick one at top right)",
+                ),
         );
         ui.add_space(4.0);
     }
@@ -973,8 +1016,22 @@ impl App {
                 ui.separator();
             }
 
+            // Which engine actually ran — shown wherever the query's outcome
+            // is, so a result or error is never ambiguous about which
+            // dialect produced it, especially in "auto" mode.
+            let engine_suffix = self.last_resolved_engine.map(|k| {
+                if self.query_engine.is_none() {
+                    format!(" [{} · auto]", k.label())
+                } else {
+                    format!(" [{}]", k.label())
+                }
+            });
+
             if self.query_running {
-                ui.label("Query running…");
+                ui.label(format!(
+                    "Query running…{}",
+                    engine_suffix.as_deref().unwrap_or("")
+                ));
             } else if let Some(elapsed) = self.last_query_elapsed {
                 let shown = self.results.as_array().map(|a| a.len()).unwrap_or(0);
                 let mut s = format!(
@@ -989,6 +1046,7 @@ impl App {
                 if self.last_query_cancelled {
                     s.push_str(" — cancelled");
                 }
+                s.push_str(engine_suffix.as_deref().unwrap_or(""));
                 ui.label(s);
             }
 
@@ -1004,7 +1062,10 @@ impl App {
                 ui.separator();
                 ui.colored_label(
                     egui::Color32::from_rgb(220, 80, 80),
-                    format!("Query error: {err}"),
+                    format!(
+                        "Query error: {err}{}",
+                        engine_suffix.as_deref().unwrap_or("")
+                    ),
                 );
             }
 
