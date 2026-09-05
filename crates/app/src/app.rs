@@ -5,11 +5,11 @@ use std::time::Duration;
 
 use crossbeam_channel::{Receiver, Sender};
 use eframe::egui;
-use jsonquery_core::{Document, DocumentSource};
+use jsonquery_core::{path_string, resolve, Document, DocumentSource, NodePath, PathSegment};
 use serde_json::Value;
 
-use crate::tree_view::TreeView;
-use crate::worker::{self, Command, Event};
+use crate::tree_view::{RowAction, TreeView};
+use crate::worker::{self, Command, Event, SearchRoot};
 
 /// Bounded live-preview cap (Architecture §7): the results tree never holds
 /// more than this many items in memory at once, no matter how large the
@@ -26,6 +26,11 @@ pub struct App {
     load_error: Option<String>,
     save_error: Option<String>,
     last_saved: Option<PathBuf>,
+
+    /// "Reveal in source" request/reply state (results panel row clicks).
+    find_gen: u64,
+    finding: bool,
+    find_message: Option<String>,
 
     query_text: String,
     query_gen: u64,
@@ -56,15 +61,58 @@ pub struct App {
     /// is loaded.
     paste_text: String,
 
+    /// Which panel a click landed in most recently — Ctrl+F and Ctrl+S act
+    /// on this one, the same way a desktop app's "Find"/"Save" menu commands
+    /// act on whichever document window last had focus.
+    focused_panel: PanelKind,
+
     /// State for the "Open URL…" popup.
     show_url_dialog: bool,
     url_input: String,
+
+    /// State for the "Search…" popup and the results panel it feeds.
+    show_search_dialog: bool,
+    search_input: String,
+    search_regex: bool,
+    search_target: PanelKind,
+    search_gen: u64,
+    searching: bool,
+    search_error: Option<String>,
+    search_results: Vec<SearchMatch>,
+    /// Whether the bottom search-results panel is shown; set when a search
+    /// starts, cleared by its "Close" button.
+    search_panel_open: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ViewMode {
     Tree,
     Text,
+}
+
+/// The Source or Results panel — which tree a search/save action targets,
+/// and (via `App::focused_panel`) which one last had a click in it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PanelKind {
+    Source,
+    Results,
+}
+
+impl PanelKind {
+    fn label(self) -> &'static str {
+        match self {
+            PanelKind::Source => "Source",
+            PanelKind::Results => "Results",
+        }
+    }
+}
+
+/// One hit from a "Search…" run, ready for the results panel: enough to
+/// display it and, on click, reveal it back in its owning tree.
+struct SearchMatch {
+    target: PanelKind,
+    path: NodePath,
+    preview: String,
 }
 
 impl App {
@@ -87,6 +135,9 @@ impl App {
             load_error: None,
             save_error: None,
             last_saved: None,
+            find_gen: 0,
+            finding: false,
+            find_message: None,
             query_text: String::new(),
             query_gen: 0,
             active_cancel: None,
@@ -108,8 +159,18 @@ impl App {
             results_text_cache: String::new(),
             results_text_dirty: true,
             paste_text: String::new(),
+            focused_panel: PanelKind::Source,
             show_url_dialog: false,
             url_input: String::new(),
+            show_search_dialog: false,
+            search_input: String::new(),
+            search_regex: false,
+            search_target: PanelKind::Source,
+            search_gen: 0,
+            searching: false,
+            search_error: None,
+            search_results: Vec::new(),
+            search_panel_open: false,
         }
     }
 
@@ -142,6 +203,13 @@ impl App {
                     self.results_tree.reset();
                     self.results_text_dirty = true;
 
+                    // Invalidates any in-flight "reveal in source" too — it
+                    // would otherwise land on an unrelated new document.
+                    self.find_gen += 1;
+                    self.finding = false;
+                    self.find_message = None;
+                    self.invalidate_search();
+
                     self.doc = Some(doc);
                     self.source_tree.reset();
                     self.source_text_dirty = true;
@@ -157,6 +225,42 @@ impl App {
                 Event::SaveError(e) => {
                     self.last_saved = None;
                     self.save_error = Some(e);
+                }
+                Event::Found { gen, path } => {
+                    if gen != self.find_gen {
+                        continue;
+                    }
+                    self.finding = false;
+                    match path {
+                        Some(p) => {
+                            self.find_message = None;
+                            self.source_tree.reveal(p);
+                            self.source_view = ViewMode::Tree;
+                        }
+                        None => {
+                            self.find_message = Some("Not found in source.".to_string());
+                        }
+                    }
+                }
+                Event::SearchDone { gen, matches } => {
+                    if gen != self.search_gen {
+                        continue;
+                    }
+                    self.searching = false;
+                    self.search_error = None;
+                    let root = match self.search_target {
+                        PanelKind::Source => self.doc.as_ref().map(|d| &d.root),
+                        PanelKind::Results => Some(&self.results),
+                    };
+                    self.search_results = build_search_matches(self.search_target, root, matches);
+                }
+                Event::SearchError { gen, error } => {
+                    if gen != self.search_gen {
+                        continue;
+                    }
+                    self.searching = false;
+                    self.search_error = Some(error);
+                    self.search_results.clear();
                 }
                 Event::QueryItem { gen, value } => {
                     if gen != self.query_gen {
@@ -221,28 +325,35 @@ impl App {
     /// file) gets made permanent.
     fn save_source(&mut self) {
         let Some(doc) = self.doc.clone() else { return };
-        let default_name = match &doc.source {
-            DocumentSource::File(p) => p
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "data.json".to_string()),
-            DocumentSource::Pasted => "data.json".to_string(),
-            DocumentSource::Url(url) => url
-                .split(['?', '#'])
-                .next()
-                .unwrap_or(url)
-                .rsplit('/')
-                .next()
-                .filter(|s| !s.is_empty())
-                .unwrap_or("data.json")
-                .to_string(),
-        };
+        let default_name = default_filename_for_source(&doc.source);
         if let Some(path) = rfd::FileDialog::new()
             .set_file_name(&default_name)
             .add_filter("JSON", &["json"])
             .save_file()
         {
-            let _ = self.cmd_tx.send(Command::SaveFile { doc, path });
+            let _ = self.cmd_tx.send(Command::SaveFile {
+                doc,
+                node_path: None,
+                path,
+            });
+        }
+    }
+
+    /// Like `save_source`, but for one row of the source tree (a right-click
+    /// "Save…") rather than the whole document.
+    fn save_source_node(&mut self, node_path: NodePath) {
+        let Some(doc) = self.doc.clone() else { return };
+        let default_name = default_filename_for_node(&node_path, "data.json");
+        if let Some(path) = rfd::FileDialog::new()
+            .set_file_name(&default_name)
+            .add_filter("JSON", &["json"])
+            .save_file()
+        {
+            let _ = self.cmd_tx.send(Command::SaveFile {
+                doc,
+                node_path: Some(node_path),
+                path,
+            });
         }
     }
 
@@ -262,6 +373,138 @@ impl App {
         }
     }
 
+    /// Like `save_results`, but for one row of the results tree.
+    fn save_results_node(&mut self, node_path: NodePath) {
+        let Some(value) = resolve(&self.results, &node_path) else {
+            return;
+        };
+        let value = value.clone();
+        let default_name = default_filename_for_node(&node_path, "results.json");
+        if let Some(path) = rfd::FileDialog::new()
+            .set_file_name(&default_name)
+            .add_filter("JSON", &["json"])
+            .save_file()
+        {
+            let _ = self.cmd_tx.send(Command::SaveResults {
+                results: value,
+                path,
+            });
+        }
+    }
+
+    /// "Find in Source": look for the results row at `node_path`'s value
+    /// somewhere in the loaded source document, and if found,
+    /// expand/scroll/highlight it there (Architecture-style: the search runs
+    /// on the worker thread since the source document can be large, and is
+    /// discarded if it's stale by the time it comes back — same `gen`
+    /// pattern as queries).
+    fn navigate_to_source(&mut self, node_path: &NodePath) {
+        let Some(doc) = self.doc.clone() else { return };
+        let Some(target) = resolve(&self.results, node_path) else {
+            return;
+        };
+        self.find_gen += 1;
+        self.finding = true;
+        self.find_message = None;
+        let _ = self.cmd_tx.send(Command::FindInSource {
+            doc,
+            target: target.clone(),
+            gen: self.find_gen,
+        });
+    }
+
+    /// Ctrl+F (search) and Ctrl+S (save) act on `self.focused_panel` — the
+    /// Source or Results panel that last saw a click — the same way a
+    /// desktop app's menu-bar Find/Save act on whichever document window is
+    /// frontmost, rather than requiring a dedicated shortcut per panel.
+    fn handle_shortcuts(&mut self, ctx: &egui::Context) {
+        let find = ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::F));
+        if find {
+            match self.focused_panel {
+                PanelKind::Source if self.doc.is_some() => {
+                    self.open_search_dialog(PanelKind::Source);
+                }
+                PanelKind::Results => self.open_search_dialog(PanelKind::Results),
+                PanelKind::Source => {}
+            }
+        }
+
+        let save = ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::S));
+        if save {
+            match self.focused_panel {
+                PanelKind::Source if self.doc.is_some() => self.save_source(),
+                PanelKind::Results if self.results.as_array().is_some_and(|a| !a.is_empty()) => {
+                    self.save_results();
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Update `focused_panel` from a click this frame, so the next Ctrl+F or
+    /// Ctrl+S knows which panel to act on. `source_rect`/`results_rect` are
+    /// each panel's full on-screen area for this frame.
+    fn note_panel_click(
+        &mut self,
+        ctx: &egui::Context,
+        source_rect: egui::Rect,
+        results_rect: egui::Rect,
+    ) {
+        if !ctx.input(|i| i.pointer.any_pressed()) {
+            return;
+        }
+        let Some(pos) = ctx.input(|i| i.pointer.interact_pos()) else {
+            return;
+        };
+        if source_rect.contains(pos) {
+            self.focused_panel = PanelKind::Source;
+        } else if results_rect.contains(pos) {
+            self.focused_panel = PanelKind::Results;
+        }
+    }
+
+    /// Open the "Search…" dialog for `target`'s tree, discarding whatever
+    /// text was left over from a previous search.
+    fn open_search_dialog(&mut self, target: PanelKind) {
+        self.show_search_dialog = true;
+        self.search_target = target;
+        self.search_input.clear();
+    }
+
+    /// Send the current search dialog's query to the worker thread, over
+    /// whichever tree it was opened for.
+    fn run_search(&mut self) {
+        let root = match self.search_target {
+            PanelKind::Source => match self.doc.clone() {
+                Some(doc) => SearchRoot::Source(doc),
+                None => return,
+            },
+            PanelKind::Results => SearchRoot::Results(Arc::new(self.results.clone())),
+        };
+        self.search_gen += 1;
+        self.searching = true;
+        self.search_error = None;
+        self.search_results.clear();
+        self.search_panel_open = true;
+        let _ = self.cmd_tx.send(Command::Search {
+            root,
+            text: self.search_input.clone(),
+            regex: self.search_regex,
+            gen: self.search_gen,
+        });
+    }
+
+    /// Discard any in-flight or displayed search — the tree it was searching
+    /// just changed out from under it (a new document loaded, a new query
+    /// run, or the source cleared).
+    fn invalidate_search(&mut self) {
+        self.search_gen += 1;
+        self.searching = false;
+        self.search_error = None;
+        self.search_results.clear();
+        self.search_panel_open = false;
+    }
+
     /// Reset all document-derived state back to "nothing loaded", so the app
     /// can be pointed at a new source without restarting it.
     fn clear_source(&mut self) {
@@ -277,6 +520,10 @@ impl App {
         self.load_error = None;
         self.save_error = None;
         self.last_saved = None;
+        self.find_gen += 1;
+        self.finding = false;
+        self.find_message = None;
+        self.invalidate_search();
 
         self.results = Value::Array(Vec::new());
         self.results_item_errors = 0;
@@ -305,6 +552,11 @@ impl App {
         self.query_gen += 1;
         let cancel = Arc::new(AtomicBool::new(false));
         self.active_cancel = Some(cancel.clone());
+
+        // A new query invalidates any search over the previous results —
+        // the source tree isn't affected, but discarding both is simpler
+        // and correct either way.
+        self.invalidate_search();
 
         self.results = Value::Array(Vec::new());
         self.results_tree.reset();
@@ -446,6 +698,132 @@ impl App {
         }
     }
 
+    /// Popup prompting for a search query; shown when `show_search_dialog`
+    /// is set by a row's "Search…" context-menu item. Runs over the whole
+    /// tree it was opened for (`self.search_target`), not just the row that
+    /// was right-clicked.
+    fn search_dialog(&mut self, ctx: &egui::Context) {
+        if !self.show_search_dialog {
+            return;
+        }
+
+        let mut open = true;
+        let mut submit = false;
+        let mut cancel = false;
+        egui::Window::new(format!("Search — {}", self.search_target.label()))
+            .id(egui::Id::new("search_dialog"))
+            .collapsible(false)
+            .resizable(false)
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.label("Find:");
+                let resp = ui.add(
+                    egui::TextEdit::singleline(&mut self.search_input)
+                        .desired_width(320.0)
+                        .hint_text("text to find…"),
+                );
+                let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                ui.checkbox(&mut self.search_regex, "Regex");
+                ui.horizontal(|ui| {
+                    let find_clicked = ui
+                        .add_enabled(
+                            !self.search_input.trim().is_empty(),
+                            egui::Button::new("Find All"),
+                        )
+                        .clicked();
+                    submit = find_clicked || enter;
+                    cancel = ui.button("Cancel").clicked();
+                });
+            });
+
+        if cancel || !open {
+            self.show_search_dialog = false;
+        } else if submit && !self.search_input.trim().is_empty() {
+            self.show_search_dialog = false;
+            self.run_search();
+        }
+    }
+
+    /// The bottom "Search results" panel, populated by the last completed
+    /// search — a Notepad++-style "Find All" list rather than jumping
+    /// straight to one hit. Clicking a match reveals it in its owning tree.
+    fn search_results_panel(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            let mut heading = format!("Search results — {}", self.search_target.label());
+            if !self.search_input.is_empty() {
+                heading.push_str(&format!(" \"{}\"", self.search_input));
+            }
+            if self.search_regex {
+                heading.push_str(" (regex)");
+            }
+            ui.strong(heading);
+            if self.searching {
+                ui.spinner();
+            } else if self.search_error.is_none() {
+                ui.weak(format!("{} match(es)", self.search_results.len()));
+            }
+
+            ui.allocate_ui_with_layout(
+                egui::vec2(ui.available_width(), ui.spacing().interact_size.y),
+                egui::Layout::right_to_left(egui::Align::Center),
+                |ui| {
+                    if ui.button("Close").clicked() {
+                        self.search_panel_open = false;
+                    }
+                },
+            );
+        });
+        ui.separator();
+
+        if let Some(err) = &self.search_error {
+            ui.colored_label(
+                egui::Color32::from_rgb(220, 80, 80),
+                format!("Search error: {err}"),
+            );
+            return;
+        }
+        if !self.searching && self.search_results.is_empty() {
+            ui.weak("No matches found.");
+            return;
+        }
+
+        let mut reveal: Option<(PanelKind, NodePath)> = None;
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                for m in &self.search_results {
+                    let text = format!(
+                        "[{}]  {}   {}",
+                        m.target.label(),
+                        path_string(&m.path),
+                        m.preview
+                    );
+                    if ui
+                        .add(
+                            egui::Label::new(egui::RichText::new(text).monospace())
+                                .sense(egui::Sense::click()),
+                        )
+                        .clicked()
+                    {
+                        reveal = Some((m.target, m.path.clone()));
+                    }
+                }
+            });
+
+        if let Some((target, path)) = reveal {
+            match target {
+                PanelKind::Source => {
+                    self.source_tree.reveal(path);
+                    self.source_view = ViewMode::Tree;
+                }
+                PanelKind::Results => {
+                    self.results_tree.reveal(path);
+                    self.results_view = ViewMode::Tree;
+                }
+            }
+        }
+    }
+
     /// The inline "paste JSON" panel shown in place of the source tree while
     /// no document is loaded: paste, and it loads immediately — no button.
     fn paste_area(&mut self, ui: &mut egui::Ui, hovering_drop: bool) {
@@ -569,6 +947,15 @@ impl App {
                     format!("Query error: {err}"),
                 );
             }
+
+            if self.finding {
+                ui.separator();
+                ui.spinner();
+                ui.label("Locating in source…");
+            } else if let Some(msg) = &self.find_message {
+                ui.separator();
+                ui.weak(msg);
+            }
         });
     }
 
@@ -597,7 +984,18 @@ impl App {
         });
         ui.separator();
         match self.results_view {
-            ViewMode::Tree => self.results_tree.ui(ui, "results_tree", &self.results),
+            ViewMode::Tree => {
+                if let Some(action) = self
+                    .results_tree
+                    .ui(ui, "results_tree", &self.results, true)
+                {
+                    match action {
+                        RowAction::Save(node_path) => self.save_results_node(node_path),
+                        RowAction::FindInSource(node_path) => self.navigate_to_source(&node_path),
+                        RowAction::OpenSearch => self.open_search_dialog(PanelKind::Results),
+                    }
+                }
+            }
             ViewMode::Text => self.results_text_view(ui),
         }
     }
@@ -695,10 +1093,18 @@ impl eframe::App for App {
         self.drain_events();
         let hovering_drop = self.handle_drag_and_drop(ui);
         self.url_dialog(ui.ctx());
+        self.search_dialog(ui.ctx());
+        self.handle_shortcuts(ui.ctx());
 
         egui::Panel::top("toolbar").show(ui, |ui| self.toolbar(ui));
         egui::Panel::top("query_bar").show(ui, |ui| self.query_bar(ui));
         egui::Panel::bottom("status_bar").show(ui, |ui| self.status_bar(ui));
+        if self.search_panel_open {
+            egui::Panel::bottom("search_results_panel")
+                .resizable(true)
+                .default_size(180.0)
+                .show(ui, |ui| self.search_results_panel(ui));
+        }
 
         // Matches `CentralPanel`'s inner margin (`Frame::central_panel` uses
         // `Margin::same(8)`) so the "Source" and "Results" headers — and
@@ -707,7 +1113,7 @@ impl eframe::App for App {
         let source_frame =
             egui::Frame::side_top_panel(ui.style()).inner_margin(egui::Margin::same(8));
 
-        egui::Panel::left("source_panel")
+        let source_resp = egui::Panel::left("source_panel")
             .resizable(true)
             .default_size(ui.available_width() * 0.5)
             .frame(source_frame)
@@ -733,7 +1139,19 @@ impl eframe::App for App {
                     });
                     ui.separator();
                     match self.source_view {
-                        ViewMode::Tree => self.source_tree.ui(ui, "source_tree", &doc.root),
+                        ViewMode::Tree => {
+                            if let Some(action) =
+                                self.source_tree.ui(ui, "source_tree", &doc.root, false)
+                            {
+                                match action {
+                                    RowAction::Save(node_path) => self.save_source_node(node_path),
+                                    RowAction::OpenSearch => {
+                                        self.open_search_dialog(PanelKind::Source)
+                                    }
+                                    RowAction::FindInSource(_) => {}
+                                }
+                            }
+                        }
                         ViewMode::Text => self.source_text_view(ui, &doc),
                     }
                 }
@@ -744,7 +1162,85 @@ impl eframe::App for App {
                 }
             });
 
-        egui::CentralPanel::default().show(ui, |ui| self.results_panel(ui));
+        let results_resp = egui::CentralPanel::default().show(ui, |ui| self.results_panel(ui));
+
+        self.note_panel_click(
+            ui.ctx(),
+            source_resp.response.rect,
+            results_resp.response.rect,
+        );
+    }
+}
+
+fn default_filename_for_source(source: &DocumentSource) -> String {
+    match source {
+        DocumentSource::File(p) => p
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "data.json".to_string()),
+        DocumentSource::Pasted => "data.json".to_string(),
+        DocumentSource::Url(url) => url
+            .split(['?', '#'])
+            .next()
+            .unwrap_or(url)
+            .rsplit('/')
+            .next()
+            .filter(|s| !s.is_empty())
+            .unwrap_or("data.json")
+            .to_string(),
+    }
+}
+
+/// Default save-dialog filename for a single tree row, derived from its own
+/// key/index — e.g. row `.users[3]` suggests `item_3.json`, `.address`
+/// suggests `address.json`. Just a suggestion the user can freely rename, so
+/// this doesn't need to sanitize exotic key characters.
+fn default_filename_for_node(node_path: &NodePath, fallback: &str) -> String {
+    match node_path.last() {
+        Some(PathSegment::Key(k)) => format!("{k}.json"),
+        Some(PathSegment::Index(i)) => format!("item_{i}.json"),
+        None => fallback.to_string(),
+    }
+}
+
+/// Turn the worker's raw match paths into displayable `SearchMatch`es by
+/// resolving each one against `root` for a preview snippet. `root` is `None`
+/// only if the source document was cleared out from under an in-flight
+/// source search — those paths just fall back to a placeholder rather than
+/// being dropped, since `Event::SearchDone` is otherwise unconditionally
+/// accepted once its `gen` matches.
+fn build_search_matches(
+    target: PanelKind,
+    root: Option<&Value>,
+    paths: Vec<NodePath>,
+) -> Vec<SearchMatch> {
+    paths
+        .into_iter()
+        .map(|path| {
+            let preview = root
+                .and_then(|r| resolve(r, &path))
+                .map(preview_text)
+                .unwrap_or_else(|| "<value>".to_string());
+            SearchMatch {
+                target,
+                path,
+                preview,
+            }
+        })
+        .collect()
+}
+
+/// Short one-line rendering of a value for the search-results list — mirrors
+/// the tree view's own row text (Architecture: `tree_view::draw_row_visual`)
+/// without needing a `Ui` to draw it.
+fn preview_text(value: &Value) -> String {
+    match value {
+        Value::Null => "null".to_string(),
+        Value::Bool(b) => b.to_string(),
+        Value::Number(n) => n.to_string(),
+        Value::String(s) => format!("{s:?}"),
+        Value::Array(a) => format!("[…] ({} items)", a.len()),
+        Value::Object(o) => format!("{{…}} ({} keys)", o.len()),
     }
 }
 

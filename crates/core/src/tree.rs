@@ -10,6 +10,7 @@
 
 use std::collections::HashSet;
 
+use regex::Regex;
 use serde_json::Value;
 
 /// One step of a path into a JSON document: an object key or an array index.
@@ -181,6 +182,169 @@ pub fn resolve<'a>(root: &'a Value, path: &NodePath) -> Option<&'a Value> {
     Some(cur)
 }
 
+/// Render a node path as a jq-style path expression, e.g. `.foo[3]["a-b"]` —
+/// for the "Copy JSON Path" row action, so it can be pasted straight into the
+/// query bar.
+pub fn path_string(path: &[PathSegment]) -> String {
+    if path.is_empty() {
+        return ".".to_string();
+    }
+    let mut s = String::new();
+    for seg in path {
+        match seg {
+            PathSegment::Index(i) => {
+                s.push('[');
+                s.push_str(&i.to_string());
+                s.push(']');
+            }
+            PathSegment::Key(k) if is_bare_ident(k) => {
+                s.push('.');
+                s.push_str(k);
+            }
+            PathSegment::Key(k) => {
+                s.push('[');
+                s.push_str(&serde_json::to_string(k).unwrap_or_else(|_| format!("{k:?}")));
+                s.push(']');
+            }
+        }
+    }
+    if s.starts_with('.') {
+        s
+    } else {
+        format!(".{s}")
+    }
+}
+
+fn is_bare_ident(k: &str) -> bool {
+    let mut chars = k.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Find the first node in `root` (in depth-first, pre-order traversal) whose
+/// value is structurally equal to `target`, and return its path. This is a
+/// best-effort way to locate a query result back in the source document:
+/// most queries (selection, filtering, field access) pass matched values
+/// through unchanged, so an exact-value search finds the right node without
+/// the query engine needing to track provenance for every result. Values
+/// synthesized by a query (`add`, string interpolation, computed numbers,
+/// ...) generally won't be found — there's no single "source location" for
+/// those, so no match is a reasonable, honest outcome.
+pub fn find_path(root: &Value, target: &Value) -> Option<NodePath> {
+    let mut path = Vec::new();
+    find_path_rec(root, target, &mut path).then_some(path)
+}
+
+fn find_path_rec(value: &Value, target: &Value, path: &mut NodePath) -> bool {
+    if value == target {
+        return true;
+    }
+    match value {
+        Value::Array(items) => {
+            for (i, child) in items.iter().enumerate() {
+                path.push(PathSegment::Index(i));
+                if find_path_rec(child, target, path) {
+                    return true;
+                }
+                path.pop();
+            }
+        }
+        Value::Object(map) => {
+            for (k, child) in map.iter() {
+                path.push(PathSegment::Key(k.clone()));
+                if find_path_rec(child, target, path) {
+                    return true;
+                }
+                path.pop();
+            }
+        }
+        _ => {}
+    }
+    false
+}
+
+/// Cap on how many hits [`search`] collects, protecting memory and the
+/// results panel against a search that matches almost everything in a huge
+/// document (e.g. an empty pattern).
+const MAX_SEARCH_MATCHES: usize = 5_000;
+
+/// Search `root` for every node whose key or scalar value contains `query`
+/// (case-insensitively), or — if `use_regex` — matches it as a regular
+/// expression, depth-first pre-order, capped at [`MAX_SEARCH_MATCHES`].
+/// Backs the tree's "Search…" row-context-menu action, which lists every hit
+/// in a Notepad++-style results panel rather than jumping to just one.
+pub fn search(root: &Value, query: &str, use_regex: bool) -> anyhow::Result<Vec<NodePath>> {
+    let is_match: Box<dyn Fn(&str) -> bool> = if use_regex {
+        let re = Regex::new(query)?;
+        Box::new(move |s: &str| re.is_match(s))
+    } else {
+        let needle = query.to_lowercase();
+        Box::new(move |s: &str| s.to_lowercase().contains(&needle))
+    };
+
+    let mut out = Vec::new();
+    let mut path = Vec::new();
+    search_rec(root, None, is_match.as_ref(), &mut path, &mut out);
+    Ok(out)
+}
+
+fn search_rec(
+    value: &Value,
+    key: Option<PathSegment>,
+    is_match: &dyn Fn(&str) -> bool,
+    path: &mut NodePath,
+    out: &mut Vec<NodePath>,
+) {
+    if out.len() >= MAX_SEARCH_MATCHES {
+        return;
+    }
+
+    let key_matches = matches!(&key, Some(PathSegment::Key(k)) if is_match(k));
+    let value_matches = match value {
+        Value::String(s) => is_match(s),
+        Value::Number(n) => is_match(&n.to_string()),
+        Value::Bool(b) => is_match(if *b { "true" } else { "false" }),
+        Value::Null => is_match("null"),
+        Value::Array(_) | Value::Object(_) => false,
+    };
+    if key_matches || value_matches {
+        out.push(path.clone());
+    }
+
+    match value {
+        Value::Array(items) => {
+            for (i, child) in items.iter().enumerate() {
+                if out.len() >= MAX_SEARCH_MATCHES {
+                    break;
+                }
+                path.push(PathSegment::Index(i));
+                search_rec(child, Some(PathSegment::Index(i)), is_match, path, out);
+                path.pop();
+            }
+        }
+        Value::Object(map) => {
+            for (k, child) in map.iter() {
+                if out.len() >= MAX_SEARCH_MATCHES {
+                    break;
+                }
+                path.push(PathSegment::Key(k.clone()));
+                search_rec(
+                    child,
+                    Some(PathSegment::Key(k.clone())),
+                    is_match,
+                    path,
+                    out,
+                );
+                path.pop();
+            }
+        }
+        _ => {}
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -226,5 +390,68 @@ mod tests {
         let v = json!({"a": [10, 20]});
         let path = vec![PathSegment::Key("a".into()), PathSegment::Index(1)];
         assert_eq!(resolve(&v, &path), Some(&json!(20)));
+    }
+
+    #[test]
+    fn path_string_renders_bare_and_quoted_keys() {
+        assert_eq!(path_string(&[]), ".");
+        assert_eq!(path_string(&[PathSegment::Key("foo".into())]), ".foo");
+        assert_eq!(
+            path_string(&[PathSegment::Key("foo".into()), PathSegment::Index(3)]),
+            ".foo[3]"
+        );
+        assert_eq!(path_string(&[PathSegment::Index(2)]), ".[2]");
+        assert_eq!(path_string(&[PathSegment::Key("a-b".into())]), ".[\"a-b\"]");
+    }
+
+    #[test]
+    fn find_path_locates_an_equal_value() {
+        let v = json!({"a": [{"name": "Ada"}, {"name": "Alan"}]});
+        let path = find_path(&v, &json!({"name": "Alan"})).unwrap();
+        assert_eq!(
+            path,
+            vec![PathSegment::Key("a".into()), PathSegment::Index(1)]
+        );
+        assert_eq!(resolve(&v, &path), Some(&json!({"name": "Alan"})));
+    }
+
+    #[test]
+    fn find_path_returns_none_for_a_value_not_present() {
+        let v = json!({"a": 1});
+        assert_eq!(find_path(&v, &json!("nope")), None);
+    }
+
+    #[test]
+    fn search_matches_scalar_values_case_insensitively() {
+        let v = json!({"a": [{"name": "Ada"}, {"name": "Alan"}]});
+        let hits = search(&v, "ada", false).unwrap();
+        assert_eq!(
+            hits,
+            vec![vec![
+                PathSegment::Key("a".into()),
+                PathSegment::Index(0),
+                PathSegment::Key("name".into())
+            ]]
+        );
+    }
+
+    #[test]
+    fn search_matches_keys_too() {
+        let v = json!({"foo_bar": 1, "baz": 2});
+        let hits = search(&v, "foo", false).unwrap();
+        assert_eq!(hits, vec![vec![PathSegment::Key("foo_bar".into())]]);
+    }
+
+    #[test]
+    fn search_regex_mode_matches_pattern() {
+        let v = json!({"a": "id42", "b": "id-x"});
+        let hits = search(&v, r"^id\d+$", true).unwrap();
+        assert_eq!(hits, vec![vec![PathSegment::Key("a".into())]]);
+    }
+
+    #[test]
+    fn search_invalid_regex_is_an_error() {
+        let v = json!({"a": 1});
+        assert!(search(&v, "(unclosed", true).is_err());
     }
 }
