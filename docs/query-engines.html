@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Query Engines — jsonquery</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<input type="checkbox" id="nav-toggle">
+<label for="nav-toggle" class="nav-toggle-label">
+  <svg width="18" height="18" viewBox="0 0 18 18" fill="none"><path d="M2 4.5H16M2 9H16M2 13.5H16" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+  jsonquery docs
+</label>
+
+<div class="shell">
+  <nav class="sidebar">
+    <div class="brand">
+      <div class="brand-mark">JQ</div>
+      <div class="brand-text">
+        <div class="name">jsonquery</div>
+        <div class="sub">architecture docs</div>
+      </div>
+    </div>
+
+    <div class="nav-group">
+      <a class="nav-link" href="index.html"><span class="n">1</span>Overview</a>
+      <a class="nav-link" href="architecture.html"><span class="n">2</span>Architecture</a>
+      <a class="nav-link" href="decisions.html"><span class="n">3</span>Decisions &amp; Roadmap</a>
+
+      <a class="nav-link active" href="query-engines.html"><span class="n">4</span>Query Engines</a>
+      <ul class="subnav">
+        <li><a href="#context">Why more than jaq</a></li>
+        <li><a href="#shipped">What's shipped</a></li>
+        <li><a href="#matrix">Comparison matrix</a></li>
+        <li><a href="#not-a-query-engine">Not a query engine</a></li>
+        <li><a href="#sources">Sources</a></li>
+      </ul>
+    </div>
+
+    <div class="sidebar-foot">Research note · 2026-09-05<br>Feeds Decision 2 &amp; the <code>QueryEngine</code> seam — JSON Pointer, JSONPath, and JMESPath are now implemented alongside jaq, with a query-bar engine picker (auto-detect, or an explicit per-dialect toggle).</div>
+  </nav>
+
+  <div class="main-wrap">
+    <main>
+      <p class="eyebrow">Research note · query languages <span class="badge shipped" style="margin-left:8px">Status: 3 shipped</span></p>
+      <h1 class="page-title">Query Engines</h1>
+      <p class="lede">jaq was jsonquery's first query dialect, not its only one — JSON Pointer, JSONPath, and JMESPath now ship alongside it. This page surveys the wider JSON-query landscape — JSONPath variants, JSONata, JSON Pointer, JMESPath, and the JS-idiomatic tools (JSPath, Lodash, Underscore, raw JavaScript) — against a <code>jsonquery_core::engine::QueryEngine</code> trait built to hold more than one, records what was actually implemented from that survey, and recommends what to add next.</p>
+
+      <section class="doc-section" id="context">
+        <h2><span class="num">01</span>Why more than jaq</h2>
+        <p>Architecture <a href="architecture.html#query-engine">§4</a> originally treated jaq's own <code>ValT</code> trait as the query integration point. That's since been generalized: <code>QueryEngine</code> now lives in the engine-agnostic core (<code>crates/core/src/engine.rs</code>), and jaq (<code>crates/query/src/jq.rs</code>'s <code>JaqEngine</code>) is its first implementor, not a permanent special case — see <a href="decisions.html#d2-query-lang">Decision 2</a> for the original jq-vs-alternatives call. The prompt for this survey was a look at <a href="https://www.jsonquerytool.com/" target="_blank" rel="noopener">jsonquerytool.com</a>'s own transform-step picker, which lists ten-odd dialects side by side — this page asks which of those (and a few it misses, like JMESPath) are actually worth building a second, third, or fourth <code>QueryEngine</code> for.</p>
+      </section>
+
+      <section class="doc-section" id="shipped">
+        <h2><span class="num">02</span>What's shipped</h2>
+        <p>The survey's own "ship first" order (below) is exactly what landed: <strong>JSON Pointer</strong> (<code>crates/query/src/json_pointer.rs</code>, <code>JsonPointerEngine</code>, RFC&nbsp;6901 via <code>serde_json::Value::pointer</code>), <strong>JSONPath</strong> (<code>crates/query/src/jsonpath.rs</code>, <code>JsonPathEngine</code>, via <code>jsonpath-rust</code>), and <strong>JMESPath</strong> (<code>crates/query/src/jmespath_engine.rs</code>, <code>JmesPathEngine</code>, via the <code>jmespath</code> crate) all now implement <code>QueryEngine</code> alongside <code>JaqEngine</code>.</p>
+        <p>A new <code>jsonquery_query::Kind</code> enum (<code>crates/query/src/lib.rs</code>) ties each dialect's id to its engine and adds <code>Kind::detect(query_text)</code> — best-effort auto-selection from the query's own syntax (a leading <code>/</code> means JSON Pointer, a leading <code>$</code> means JSONPath, a few JMESPath-only substrings like <code>[?</code>/backtick literals/<code>&amp;&amp;</code>/<code>||</code> mean JMESPath, everything else — including jq's own leading <code>.</code> — defaults to jq). The query bar gained four small selectable-label buttons, top right, one per dialect: none selected (the default) means "auto," clicking one pins that engine explicitly, and the status bar reports which engine actually ran — e.g. <code>jq · auto</code> vs. a manually-picked <code>JMESPath</code> — so a result is never ambiguous about which dialect produced it.</p>
+        <div class="callout warn">
+          <span class="ic">⚠</span>
+          <div><strong class="lbl">Pitfall: JMESPath + <code>arbitrary_precision</code></strong>This workspace's <code>serde_json</code> runs with the <code>arbitrary_precision</code> feature; <code>jmespath</code>'s generic <code>Serialize</code>-based <code>ToJmespath</code> impl doesn't understand the private sentinel that feature emits for numbers, so feeding it a <code>&amp;Value</code> the "obvious" way silently turned every number into an unrelated object and broke numeric filters (<code>age &gt; `30`</code> matched nothing). Fixed in <code>jmespath_engine.rs</code> by converting <code>Value → jmespath::Variable</code> by hand, matching on <code>Value</code>'s variants directly instead of round-tripping through <code>Serialize</code>. Worth checking for again if a future engine also bridges through a generic <code>Serialize</code> impl rather than matching <code>Value</code> natively.</div>
+        </div>
+      </section>
+
+      <section class="doc-section" id="matrix">
+        <div class="decision">
+          <div class="d-head"><h3>Comparison matrix</h3></div>
+          <p class="d-question">Checked against crates.io / GitHub on 2026-09-05 — versions and maintenance status move; re-verify before implementing.</p>
+
+          <div class="tbl-wrap">
+          <table>
+            <thead><tr><th>Dialect</th><th>Crate(s)</th><th>License</th><th>Adoption</th><th>Why</th><th>Verdict</th></tr></thead>
+            <tbody>
+              <tr>
+                <td><strong>JSON Pointer</strong><br><span style="color:var(--text-dim);font-size:12.5px">RFC&nbsp;6901</span></td>
+                <td>built into <code>serde_json</code> — already a dependency</td>
+                <td>MIT/Apache-2.0</td>
+                <td>—</td>
+                <td><code>Value::pointer()</code> ships today. Zero new dependency, zero new risk — the cheapest possible way to prove the multi-engine plumbing (UI picker, dispatch) actually works end to end.</td>
+                <td><span class="badge shipped">Shipped</span></td>
+              </tr>
+              <tr>
+                <td><strong>JSONPath</strong><br><span style="color:var(--text-dim);font-size:12.5px">RFC&nbsp;9535</span></td>
+                <td><a href="https://crates.io/crates/jsonpath-rust" target="_blank" rel="noopener">jsonpath-rust</a></td>
+                <td>MIT</td>
+                <td>~88M downloads</td>
+                <td>Its 1.0 rewrite is RFC&nbsp;9535 compliant "except several cases." Read-only, and its API — <code>value.query("$.foo[*]") -&gt; Vec&lt;&amp;Value&gt;</code> — was close enough to <code>QueryEngine::run</code>'s shape to be nearly a drop-in adapter (<code>JsonPathEngine</code>, <code>crates/query/src/jsonpath.rs</code>).</td>
+                <td><span class="badge shipped">Shipped</span></td>
+              </tr>
+              <tr>
+                <td><strong>JSONPath</strong><br><span style="color:var(--text-dim);font-size:12.5px">RFC&nbsp;9535</span></td>
+                <td><a href="https://crates.io/crates/serde_json_path" target="_blank" rel="noopener">serde_json_path</a></td>
+                <td>MIT</td>
+                <td>~2.3M downloads</td>
+                <td>Also serde_json-native and RFC-9535-targeted (it's the option already named in Decision <a href="decisions.html#d2-query-lang">2</a>'s original table). Smaller install base than jsonpath-rust, otherwise comparable.</td>
+                <td><span class="badge alt">Alternative</span></td>
+              </tr>
+              <tr>
+                <td><strong>JMESPath</strong></td>
+                <td><a href="https://crates.io/crates/jmespath" target="_blank" rel="noopener">jmespath</a></td>
+                <td>MIT</td>
+                <td>~2.8M downloads</td>
+                <td>Not in the screenshot, but a well-established standard in its own right (AWS CLI <code>--query</code>, Terraform). crates.io shows an update as recent as 2026-01-19 — not dead despite some community forks implying otherwise. Shipped as <code>JmesPathEngine</code> (<code>crates/query/src/jmespath_engine.rs</code>) — see <a href="#shipped">What's shipped</a> for the <code>arbitrary_precision</code> pitfall hit along the way.</td>
+                <td><span class="badge shipped">Shipped</span></td>
+              </tr>
+              <tr>
+                <td><strong>JMESPath</strong></td>
+                <td><a href="https://crates.io/crates/jmespath_community" target="_blank" rel="noopener">jmespath_community</a></td>
+                <td>Apache-2.0</td>
+                <td>~7K downloads</td>
+                <td>A newer community fork with a faster commit cadence per its own docs, but a tiny fraction of the original crate's adoption so far.</td>
+                <td><span class="badge alt">Alternative</span></td>
+              </tr>
+              <tr>
+                <td><strong>Rust-native query DSL</strong></td>
+                <td><a href="https://crates.io/crates/jql-runner" target="_blank" rel="noopener">jql-runner</a></td>
+                <td>MIT/Apache-2.0</td>
+                <td>~91K downloads</td>
+                <td>Already written in Rust — the smallest possible integration gap of anything here — but its own bespoke syntax has far less outside familiarity than jq, JSONPath, or JMESPath.</td>
+                <td><span class="badge alt">Watch</span></td>
+              </tr>
+              <tr>
+                <td><strong>JSONata</strong></td>
+                <td><a href="https://github.com/Stedi/jsonata-rs" target="_blank" rel="noopener">jsonata-rs</a></td>
+                <td>Apache-2.0</td>
+                <td>~205K downloads</td>
+                <td>Explicitly alpha: ~800 of 1,000 upstream conformance tests pass, function signatures and regex are unsupported, last published 2025-02-03. Real demand (AWS Step Functions uses JSONata) but users would hit known gaps today.</td>
+                <td><span class="badge risk">Caution</span></td>
+              </tr>
+              <tr>
+                <td><strong>jsonquery</strong><br><span style="color:var(--text-dim);font-size:12.5px">jsonquerylang.org's own DSL</span></td>
+                <td>none — JS/TS + Python reference implementations only</td>
+                <td>ISC</td>
+                <td>—</td>
+                <td>No Rust port exists anywhere. It's deliberately small (~4.2&nbsp;kB minified, pipe syntax, ~50 built-ins) — closer in scope to how jaq itself was integrated than to adding a dependency.</td>
+                <td><span class="badge later">Future — from scratch</span></td>
+              </tr>
+              <tr>
+                <td><strong>JS-idiomatic tools</strong><br><span style="color:var(--text-dim);font-size:12.5px">JSPath, Lodash, Underscore, raw JavaScript</span></td>
+                <td><a href="https://github.com/boa-dev/boa" target="_blank" rel="noopener">boa_engine</a> — a JS engine, not a query-language crate</td>
+                <td>Unlicense OR MIT</td>
+                <td>~4.7M downloads</td>
+                <td>None of these four have a Rust port individually — they're JS utility libraries, not declarative query languages. boa is the only pure-Rust JS engine of note, so it's the one way to support all four at once (load lodash/underscore's own source as a JS "prelude") without breaking the single dependency-free-binary goal (<a href="decisions.html#d1-gui">Decision 1</a>) the way a QuickJS/V8 binding would.</td>
+                <td><span class="badge later">Future — bigger lift</span></td>
+              </tr>
+            </tbody>
+          </table>
+          </div>
+
+          <div class="verdict"><strong>Recommendation (shipped 2026-09-05):</strong> JSON Pointer, <a href="https://crates.io/crates/jsonpath-rust" target="_blank" rel="noopener">jsonpath-rust</a>, and <a href="https://crates.io/crates/jmespath" target="_blank" rel="noopener">jmespath</a> are all implemented — see <a href="#shipped">What's shipped</a>. JSONata, jsonquerylang.org's own DSL, and a boa-backed JS/Lodash mode remain separately-scoped follow-ups — an immature dependency, a from-scratch implementation, and a full embedded scripting engine, respectively — not quick wins alongside the first three.</div>
+        </div>
+      </section>
+
+      <section class="doc-section" id="not-a-query-engine">
+        <div class="callout info">
+          <span class="ic">ℹ</span>
+          <div><strong class="lbl">"JSON to XML" isn't a query engine</strong>jsonquerytool.com's picker also lists <code>xml2js</code> — a format converter, not a query language, and unrelated to <code>QueryEngine</code>. It maps onto the roadmap's already-planned <a href="decisions.html#d5-export">Decision 5</a> "CSV / NDJSON export" item as another output format, not a new dialect. <code>quick-xml</code> or <code>serde-xml-rs</code> would be the Rust tool for that, if it's ever wanted.</div>
+        </div>
+      </section>
+
+      <hr class="rule">
+
+      <section class="doc-section" id="sources" style="margin-top:0">
+        <h3 style="margin-top:0">Research notes &amp; sources</h3>
+        <p style="color:var(--text-dim);font-size:13px;margin-bottom:14px">Checked 2026-09-05 via crates.io's API and each project's GitHub/homepage. Crate versions and maintenance status move — re-verify before implementation, the way Decisions &amp; Roadmap's own sources note already asks for.</p>
+        <ul style="font-size:12.8px;color:var(--text-dim);padding-left:18px">
+          <li><a href="https://www.jsonquerytool.com/" target="_blank" rel="noopener">jsonquerytool.com</a> — the transform-step engine picker that prompted this survey.</li>
+          <li><a href="https://github.com/jsonquerylang/jsonquery" target="_blank" rel="noopener">jsonquerylang/jsonquery</a> — the jsonquerylang.org DSL: syntax, ISC license, JS/TS + Python reference implementations, no Rust port.</li>
+          <li><a href="https://jsonata.org/" target="_blank" rel="noopener">jsonata.org</a> and <a href="https://github.com/Stedi/jsonata-rs" target="_blank" rel="noopener">Stedi/jsonata-rs</a> — JSONata language and its alpha-stage Rust port.</li>
+          <li><a href="https://crates.io/crates/jsonpath-rust" target="_blank" rel="noopener">jsonpath-rust</a> and <a href="https://crates.io/crates/serde_json_path" target="_blank" rel="noopener">serde_json_path</a> (crates.io) — RFC&nbsp;9535 JSONPath implementations.</li>
+          <li><a href="https://www.rfc-editor.org/rfc/rfc9535.html" target="_blank" rel="noopener">RFC 9535</a> — JSONPath: Query Expressions for JSON.</li>
+          <li><a href="https://crates.io/crates/jmespath" target="_blank" rel="noopener">jmespath</a> and <a href="https://crates.io/crates/jmespath_community" target="_blank" rel="noopener">jmespath_community</a> (crates.io) — JMESPath implementations.</li>
+          <li><a href="https://crates.io/crates/jql-runner" target="_blank" rel="noopener">jql-runner</a> (crates.io) — the Rust-native JSON Query Language tool.</li>
+          <li><a href="https://github.com/boa-dev/boa" target="_blank" rel="noopener">boa-dev/boa</a> — pure-Rust JavaScript engine, evaluated as the route to JSPath/Lodash/Underscore/raw-JS support.</li>
+          <li>RFC&nbsp;6901 (JSON Pointer) — satisfied already by <code>serde_json::Value::pointer()</code>, no separate crate.</li>
+        </ul>
+      </section>
+
+      <div class="page-nav">
+        <a href="decisions.html"><span class="lbl">Previous</span>← Decisions &amp; Roadmap</a>
+        <a class="to-next" href="index.html"><span class="lbl">Back to start</span>Overview →</a>
+      </div>
+    </main>
+  </div>
+</div>
+</body>
+</html>

@@ -10,8 +10,8 @@ use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use crossbeam_channel::{Receiver, Sender};
+use jsonquery_core::engine::QueryEvent;
 use jsonquery_core::{Document, DocumentSource, NodePath};
-use jsonquery_query::QueryEvent;
 
 /// Cap on a URL download's response body, matching the "a few GB" v1 scale
 /// ceiling (Architecture §3) — protects against a malicious or misbehaving
@@ -98,6 +98,10 @@ pub enum Command {
     Query {
         doc: Arc<Document>,
         text: String,
+        /// Which `QueryEngine` to run `text` against — already resolved from
+        /// the UI's picker (or its auto-detect fallback) by the caller, so
+        /// the worker thread never has to make that judgment call itself.
+        engine: jsonquery_query::Kind,
         gen: u64,
         cancel: Arc<AtomicBool>,
     },
@@ -245,10 +249,11 @@ pub fn spawn(cmd_rx: Receiver<Command>, evt_tx: Sender<Event>, wake: impl Fn() +
                 Command::Query {
                     doc,
                     text,
+                    engine,
                     gen,
                     cancel,
                 } => {
-                    run_query(&evt_tx, &doc, &text, gen, &cancel, &wake);
+                    run_query(&evt_tx, &doc, &text, engine, gen, &cancel, &wake);
                 }
             }
         }
@@ -327,15 +332,20 @@ fn run_query(
     evt_tx: &Sender<Event>,
     doc: &Document,
     text: &str,
+    engine: jsonquery_query::Kind,
     gen: u64,
     cancel: &AtomicBool,
     wake: &impl Fn(),
 ) {
     let start = Instant::now();
-    let result = jsonquery_query::run_query(&doc.root, text, cancel, |event| match event {
-        QueryEvent::Item(value) => send(evt_tx, Event::QueryItem { gen, value }, wake),
-        QueryEvent::ItemError(error) => send(evt_tx, Event::QueryItemError { gen, error }, wake),
-    });
+    let result = engine
+        .engine()
+        .run(&doc.root, text, cancel, &mut |event| match event {
+            QueryEvent::Item(value) => send(evt_tx, Event::QueryItem { gen, value }, wake),
+            QueryEvent::ItemError(error) => {
+                send(evt_tx, Event::QueryItemError { gen, error }, wake)
+            }
+        });
 
     match result {
         Ok(_count) => send(

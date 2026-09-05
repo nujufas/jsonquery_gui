@@ -36,6 +36,7 @@
 
       <a class="nav-link" href="architecture.html"><span class="n">2</span>Architecture</a>
       <a class="nav-link" href="decisions.html"><span class="n">3</span>Decisions &amp; Roadmap</a>
+      <a class="nav-link" href="query-engines.html"><span class="n">4</span>Query Engines</a>
     </div>
 
     <div class="sidebar-foot">Draft · 2026-09-03<br>For review — nothing implemented yet.</div>
@@ -100,7 +101,7 @@
               <div class="d-arrow">→</div>
               <div class="d-box">Index / parse <span class="sub">sparse checkpoint table</span></div>
               <div class="d-arrow">→</div>
-              <div class="d-box accent">Query engine <span class="sub">jaq (jq-compatible)</span></div>
+              <div class="d-box accent">Query engine <span class="sub">jaq · JSON Pointer · JSONPath · JMESPath</span></div>
             </div>
           </div>
           <div class="d-col" style="margin-top:10px">
@@ -127,6 +128,10 @@
           <a class="option-card" href="decisions.html" style="text-decoration:none;color:inherit">
             <div class="top-row"><h4>Decisions &amp; Roadmap</h4><span class="badge rec">Decide</span></div>
             <p>Five choices that shape the build — GUI framework, query language, scale target, editing, export — each with a recommendation, plus the phased roadmap.</p>
+          </a>
+          <a class="option-card" href="query-engines.html" style="text-decoration:none;color:inherit">
+            <div class="top-row"><h4>Query Engines</h4><span class="badge shipped">3 shipped</span></div>
+            <p>jaq was the first query dialect, not the only one — JSON Pointer, JSONPath, and JMESPath now ship alongside it, picked via an auto-detecting query-bar toggle. JSONata, JS-idiomatic tools, and jsonquerylang.org's own DSL remain surveyed but not built.</p>
           </a>
         </div>
       </section>

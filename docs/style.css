@@ -319,6 +319,7 @@ pre code { background: none; border: none; padding: 0; }
 .badge.alt { background: var(--bg-sunken); color: var(--text-dim); }
 .badge.risk { background: var(--risk-soft); color: var(--risk); }
 .badge.later { background: var(--warn-soft); color: var(--warn); }
+.badge.shipped { background: var(--accent2-soft); color: var(--accent2); }
 
 /* option cards */
 .option-grid {
