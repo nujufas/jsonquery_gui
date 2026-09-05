@@ -7,5 +7,6 @@ license.workspace = true
 [dependencies]
 anyhow = "1.0.104"
 memmap2 = "0.9.11"
+regex = "1.11"
 serde_json = { version = "1.0.151", features = ["arbitrary_precision", "preserve_order"] }
 thiserror = "2.0.20"

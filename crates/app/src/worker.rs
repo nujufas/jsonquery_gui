@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use crossbeam_channel::{Receiver, Sender};
-use jsonquery_core::{Document, DocumentSource};
+use jsonquery_core::{Document, DocumentSource, NodePath};
 use jsonquery_query::QueryEvent;
 
 /// Cap on a URL download's response body, matching the "a few GB" v1 scale
@@ -18,17 +18,45 @@ use jsonquery_query::QueryEvent;
 /// server exhausting disk/memory via an unbounded response.
 const MAX_DOWNLOAD_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 
+/// Which tree a `Command::Search` runs over — the loaded source document (via
+/// its `Arc<Document>`, so a huge document isn't cloned just to search it) or
+/// the current query results (already bounded by the live-preview cap, so a
+/// plain clone into an `Arc` is cheap enough).
+pub enum SearchRoot {
+    Source(Arc<Document>),
+    Results(Arc<serde_json::Value>),
+}
+
 pub enum Command {
     OpenFile(PathBuf),
     OpenText(String),
     OpenUrl(String),
     SaveFile {
         doc: Arc<Document>,
+        /// The value to save: the whole document (`None`), or one node
+        /// within it — resolved here rather than on the UI thread, so a row
+        /// save doesn't need to clone a potentially huge document just to
+        /// pick one branch out of it.
+        node_path: Option<NodePath>,
         path: PathBuf,
     },
     SaveResults {
         results: serde_json::Value,
         path: PathBuf,
+    },
+    /// Look for a value structurally equal to `target` somewhere in `doc`,
+    /// for the results panel's "Find in Source" row action.
+    FindInSource {
+        doc: Arc<Document>,
+        target: serde_json::Value,
+        gen: u64,
+    },
+    /// Search a whole tree for `text`, for the "Search…" row action.
+    Search {
+        root: SearchRoot,
+        text: String,
+        regex: bool,
+        gen: u64,
     },
     Query {
         doc: Arc<Document>,
@@ -44,6 +72,18 @@ pub enum Event {
     LoadError(String),
     Saved(PathBuf),
     SaveError(String),
+    Found {
+        gen: u64,
+        path: Option<NodePath>,
+    },
+    SearchDone {
+        gen: u64,
+        matches: Vec<NodePath>,
+    },
+    SearchError {
+        gen: u64,
+        error: String,
+    },
     QueryItem {
         gen: u64,
         value: serde_json::Value,
@@ -84,8 +124,20 @@ pub fn spawn(cmd_rx: Receiver<Command>, evt_tx: Sender<Event>, wake: impl Fn() +
                     let result = download_to_temp_file(&url).map(Arc::new);
                     send_load_result(&evt_tx, result, &wake);
                 }
-                Command::SaveFile { doc, path } => {
-                    let result = save_json(&doc.root, &path);
+                Command::SaveFile {
+                    doc,
+                    node_path,
+                    path,
+                } => {
+                    let result = match &node_path {
+                        Some(np) => match jsonquery_core::resolve(&doc.root, np) {
+                            Some(v) => save_json(v, &path),
+                            None => Err(anyhow::anyhow!(
+                                "that value is no longer part of the document"
+                            )),
+                        },
+                        None => save_json(&doc.root, &path),
+                    };
                     match result {
                         Ok(()) => send(&evt_tx, Event::Saved(path), &wake),
                         Err(e) => send(&evt_tx, Event::SaveError(format!("{e:#}")), &wake),
@@ -96,6 +148,32 @@ pub fn spawn(cmd_rx: Receiver<Command>, evt_tx: Sender<Event>, wake: impl Fn() +
                     match result {
                         Ok(()) => send(&evt_tx, Event::Saved(path), &wake),
                         Err(e) => send(&evt_tx, Event::SaveError(format!("{e:#}")), &wake),
+                    }
+                }
+                Command::FindInSource { doc, target, gen } => {
+                    let path = jsonquery_core::find_path(&doc.root, &target);
+                    send(&evt_tx, Event::Found { gen, path }, &wake);
+                }
+                Command::Search {
+                    root,
+                    text,
+                    regex,
+                    gen,
+                } => {
+                    let value = match &root {
+                        SearchRoot::Source(doc) => &doc.root,
+                        SearchRoot::Results(v) => v.as_ref(),
+                    };
+                    match jsonquery_core::search(value, &text, regex) {
+                        Ok(matches) => send(&evt_tx, Event::SearchDone { gen, matches }, &wake),
+                        Err(e) => send(
+                            &evt_tx,
+                            Event::SearchError {
+                                gen,
+                                error: format!("{e:#}"),
+                            },
+                            &wake,
+                        ),
                     }
                 }
                 Command::Query {
