@@ -27,6 +27,33 @@ pub enum SearchRoot {
     Results(Arc<serde_json::Value>),
 }
 
+/// Which panel a `Command::RenderText` is rendering — echoed back on
+/// `Event::TextRendered` so the UI thread knows which cache to fill, without
+/// having to carry the (potentially large) rendered value back and forth to
+/// tell them apart.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum TextTargetKind {
+    Source,
+    Results,
+}
+
+/// What `Command::RenderText` renders: the loaded source document, or the
+/// current query results (already bounded by `LIVE_PREVIEW_CAP`, so a plain
+/// clone here is cheap — same reasoning as `Command::SaveResults`).
+pub enum TextTarget {
+    Source(Arc<Document>),
+    Results(serde_json::Value),
+}
+
+impl TextTarget {
+    fn kind(&self) -> TextTargetKind {
+        match self {
+            TextTarget::Source(_) => TextTargetKind::Source,
+            TextTarget::Results(_) => TextTargetKind::Results,
+        }
+    }
+}
+
 pub enum Command {
     OpenFile(PathBuf),
     OpenText(String),
@@ -58,6 +85,16 @@ pub enum Command {
         regex: bool,
         gen: u64,
     },
+    /// Pretty-print `target` as text for the "Text" view toggle, bounded to
+    /// `node_budget` nodes so a huge source document — or a huge single
+    /// query result, e.g. `.` over a multi-GB doc — can't block the UI
+    /// thread or blow past a reasonable render size (see `Event::Loading`'s
+    /// sibling concern in Architecture §7's "bounded live preview").
+    RenderText {
+        target: TextTarget,
+        node_budget: usize,
+        gen: u64,
+    },
     Query {
         doc: Arc<Document>,
         text: String,
@@ -83,6 +120,12 @@ pub enum Event {
     SearchError {
         gen: u64,
         error: String,
+    },
+    TextRendered {
+        target: TextTargetKind,
+        gen: u64,
+        text: String,
+        truncated: bool,
     },
     QueryItem {
         gen: u64,
@@ -175,6 +218,29 @@ pub fn spawn(cmd_rx: Receiver<Command>, evt_tx: Sender<Event>, wake: impl Fn() +
                             &wake,
                         ),
                     }
+                }
+                Command::RenderText {
+                    target,
+                    node_budget,
+                    gen,
+                } => {
+                    let kind = target.kind();
+                    let value = match &target {
+                        TextTarget::Source(doc) => &doc.root,
+                        TextTarget::Results(v) => v,
+                    };
+                    let (text, truncated) =
+                        jsonquery_core::pretty_print_bounded(value, node_budget);
+                    send(
+                        &evt_tx,
+                        Event::TextRendered {
+                            target: kind,
+                            gen,
+                            text,
+                            truncated,
+                        },
+                        &wake,
+                    );
                 }
                 Command::Query {
                     doc,

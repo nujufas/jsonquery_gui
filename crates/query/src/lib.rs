@@ -1,5 +1,8 @@
-//! Embeds jaq (Architecture §4) to run jq-compatible queries against an
-//! in-memory `serde_json::Value` (Phase 1 — see roadmap).
+//! Embeds jaq to run jq-compatible queries against an in-memory
+//! `serde_json::Value`. jaq is this project's first query dialect, not its
+//! only one — [`JaqEngine`] (in [`jq`]) is the `jsonquery_core::engine`
+//! adapter other code should reach for; [`run_query`] below is the
+//! lower-level function it wraps.
 //!
 //! Results are streamed out through a callback rather than collected into a
 //! `Vec` first: jaq's evaluator is generator-based, so pulling one item at a
@@ -7,9 +10,11 @@
 //! `first`/`limit` genuinely short-circuit (Architecture §4, §7).
 
 mod convert;
+pub mod jq;
 
 pub use convert::{from_val, to_val};
 pub use jaq_json::Val;
+pub use jq::JaqEngine;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 

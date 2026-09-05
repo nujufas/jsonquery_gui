@@ -17,6 +17,13 @@ use crate::worker::{self, Command, Event, SearchRoot};
 /// bypasses this for the full output.
 const LIVE_PREVIEW_CAP: usize = 50_000;
 
+/// Cap on how many nodes the "Text" view's pretty-printer walks (see
+/// `jsonquery_core::pretty_print_bounded`) — protects the render from a huge
+/// source document, or a huge single query result (e.g. `.` over a
+/// multi-GB doc, which `LIVE_PREVIEW_CAP` alone wouldn't bound: one item can
+/// still be arbitrarily large).
+const TEXT_VIEW_NODE_BUDGET: usize = 20_000;
+
 pub struct App {
     cmd_tx: Sender<Command>,
     evt_rx: Receiver<Event>,
@@ -54,8 +61,17 @@ pub struct App {
     results_view: ViewMode,
     source_text_cache: String,
     source_text_dirty: bool,
+    /// A `Command::RenderText` for the source is in flight; used to avoid
+    /// spamming the worker with a fresh request every frame while dirty and
+    /// to show a "Rendering…" placeholder instead of stale text.
+    source_text_pending: bool,
+    source_text_gen: u64,
+    source_text_truncated: bool,
     results_text_cache: String,
     results_text_dirty: bool,
+    results_text_pending: bool,
+    results_text_gen: u64,
+    results_text_truncated: bool,
 
     /// Buffer for the inline "paste JSON" text area shown while no document
     /// is loaded.
@@ -156,8 +172,14 @@ impl App {
             results_view: ViewMode::Tree,
             source_text_cache: String::new(),
             source_text_dirty: true,
+            source_text_pending: false,
+            source_text_gen: 0,
+            source_text_truncated: false,
             results_text_cache: String::new(),
             results_text_dirty: true,
+            results_text_pending: false,
+            results_text_gen: 0,
+            results_text_truncated: false,
             paste_text: String::new(),
             focused_panel: PanelKind::Source,
             show_url_dialog: false,
@@ -201,7 +223,7 @@ impl App {
                     self.results_truncated = false;
                     self.last_query_elapsed = None;
                     self.results_tree.reset();
-                    self.results_text_dirty = true;
+                    self.invalidate_results_text();
 
                     // Invalidates any in-flight "reveal in source" too — it
                     // would otherwise land on an unrelated new document.
@@ -212,7 +234,7 @@ impl App {
 
                     self.doc = Some(doc);
                     self.source_tree.reset();
-                    self.source_text_dirty = true;
+                    self.invalidate_source_text();
                 }
                 Event::LoadError(e) => {
                     self.loading = false;
@@ -262,6 +284,27 @@ impl App {
                     self.search_error = Some(error);
                     self.search_results.clear();
                 }
+                Event::TextRendered {
+                    target,
+                    gen,
+                    text,
+                    truncated,
+                } => match target {
+                    worker::TextTargetKind::Source => {
+                        if gen == self.source_text_gen {
+                            self.source_text_cache = text;
+                            self.source_text_truncated = truncated;
+                            self.source_text_pending = false;
+                        }
+                    }
+                    worker::TextTargetKind::Results => {
+                        if gen == self.results_text_gen {
+                            self.results_text_cache = text;
+                            self.results_text_truncated = truncated;
+                            self.results_text_pending = false;
+                        }
+                    }
+                },
                 Event::QueryItem { gen, value } => {
                     if gen != self.query_gen {
                         continue;
@@ -505,6 +548,23 @@ impl App {
         self.search_panel_open = false;
     }
 
+    /// Discard any in-flight or displayed source "Text" render — the
+    /// document it was rendering just changed out from under it.
+    fn invalidate_source_text(&mut self) {
+        self.source_text_gen += 1;
+        self.source_text_pending = false;
+        self.source_text_dirty = true;
+        self.source_text_truncated = false;
+    }
+
+    /// Same as `invalidate_source_text`, for the results panel.
+    fn invalidate_results_text(&mut self) {
+        self.results_text_gen += 1;
+        self.results_text_pending = false;
+        self.results_text_dirty = true;
+        self.results_text_truncated = false;
+    }
+
     /// Reset all document-derived state back to "nothing loaded", so the app
     /// can be pointed at a new source without restarting it.
     fn clear_source(&mut self) {
@@ -533,11 +593,11 @@ impl App {
         self.last_query_elapsed = None;
         self.last_query_cancelled = false;
         self.results_tree.reset();
-        self.results_text_dirty = true;
+        self.invalidate_results_text();
 
         self.source_tree.reset();
         self.source_text_cache.clear();
-        self.source_text_dirty = true;
+        self.invalidate_source_text();
         self.paste_text.clear();
     }
 
@@ -560,7 +620,7 @@ impl App {
 
         self.results = Value::Array(Vec::new());
         self.results_tree.reset();
-        self.results_text_dirty = true;
+        self.invalidate_results_text();
         self.results_item_errors = 0;
         self.last_item_error = None;
         self.results_count_so_far = 0;
@@ -1002,12 +1062,34 @@ impl App {
 
     /// Plain, selectable/copyable pretty-printed JSON — an alternative to the
     /// tree view for grabbing raw text with the mouse. Regenerated only when
-    /// the results actually change (`results_text_dirty`), not every frame.
+    /// the results actually change (`results_text_dirty`), not every frame,
+    /// and rendered on the worker thread, bounded to `TEXT_VIEW_NODE_BUDGET`
+    /// nodes — a single query result can itself be arbitrarily large (e.g.
+    /// `.` over a multi-GB document), so `LIVE_PREVIEW_CAP`'s item-count cap
+    /// alone doesn't bound this.
     fn results_text_view(&mut self, ui: &mut egui::Ui) {
-        if self.results_text_dirty {
-            self.results_text_cache = serde_json::to_string_pretty(&self.results)
-                .unwrap_or_else(|e| format!("<failed to render results as text: {e}>"));
+        if self.results_text_dirty && !self.results_text_pending {
+            self.results_text_pending = true;
             self.results_text_dirty = false;
+            let _ = self.cmd_tx.send(Command::RenderText {
+                target: worker::TextTarget::Results(self.results.clone()),
+                node_budget: TEXT_VIEW_NODE_BUDGET,
+                gen: self.results_text_gen,
+            });
+        }
+
+        if self.results_text_pending {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label("Rendering…");
+            });
+            return;
+        }
+
+        if self.results_text_truncated {
+            ui.weak(format!(
+                "Showing the first {TEXT_VIEW_NODE_BUDGET} nodes — use Tree view, or Save… for the full results."
+            ));
         }
         egui::ScrollArea::both()
             .auto_shrink([false, false])
@@ -1021,20 +1103,22 @@ impl App {
     }
 
     /// Pretty-printed JSON for the source document — the same Tree/Text
-    /// toggle as the results panel. Regenerated only when the loaded
-    /// document changes (`source_text_dirty`). For a *pasted* document the
-    /// text is directly editable; "Apply" (or Ctrl+Enter) re-parses the
-    /// edited buffer in place, so a typo doesn't mean re-pasting from
-    /// scratch. Opened files and URL downloads stay read-only, since editing
-    /// them wouldn't touch the file/URL they came from.
-    fn source_text_view(&mut self, ui: &mut egui::Ui, doc: &Document) {
-        if self.source_text_dirty {
-            self.source_text_cache = serde_json::to_string_pretty(&doc.root)
-                .unwrap_or_else(|e| format!("<failed to render source as text: {e}>"));
-            self.source_text_dirty = false;
-        }
-
+    /// toggle as the results panel. For a *pasted* document the text is
+    /// directly editable ("Apply", or Ctrl+Enter, re-parses the edited
+    /// buffer in place), rendered synchronously since typed/pasted input is
+    /// inherently human-sized — an editable buffer must hold the full,
+    /// exact text anyway, so there's nothing to bound. Opened files and URL
+    /// downloads are read-only and potentially huge, so those render on the
+    /// worker thread, bounded to `TEXT_VIEW_NODE_BUDGET` nodes, instead of
+    /// blocking the UI thread on a full-document stringify.
+    fn source_text_view(&mut self, ui: &mut egui::Ui, doc: &Arc<Document>) {
         if matches!(&doc.source, DocumentSource::Pasted) {
+            if self.source_text_dirty {
+                self.source_text_cache = serde_json::to_string_pretty(&doc.root)
+                    .unwrap_or_else(|e| format!("<failed to render source as text: {e}>"));
+                self.source_text_dirty = false;
+            }
+
             let mut apply = false;
             ui.horizontal(|ui| {
                 ui.weak("Editable — change the JSON below, then apply.");
@@ -1063,6 +1147,29 @@ impl App {
                 self.open_text(text);
             }
         } else {
+            if self.source_text_dirty && !self.source_text_pending {
+                self.source_text_pending = true;
+                self.source_text_dirty = false;
+                let _ = self.cmd_tx.send(Command::RenderText {
+                    target: worker::TextTarget::Source(doc.clone()),
+                    node_budget: TEXT_VIEW_NODE_BUDGET,
+                    gen: self.source_text_gen,
+                });
+            }
+
+            if self.source_text_pending {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label("Rendering…");
+                });
+                return;
+            }
+
+            if self.source_text_truncated {
+                ui.weak(format!(
+                    "Showing the first {TEXT_VIEW_NODE_BUDGET} nodes — use Tree view, or Save… for the full document."
+                ));
+            }
             egui::ScrollArea::both()
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
