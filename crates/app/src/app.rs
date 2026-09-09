@@ -61,8 +61,23 @@ pub struct App {
     last_item_error: Option<String>,
     results_count_so_far: usize,
     results_truncated: bool,
+    /// The live-preview item cap in effect for the *current* results —
+    /// normally `LIVE_PREVIEW_CAP`, or `usize::MAX` once the user has hit
+    /// "Expand All" to fetch the complete (unbounded) result set. Also
+    /// doubles as the node budget for the results "Text" view, so expanding
+    /// clears both caps together.
+    results_cap: usize,
     last_query_elapsed: Option<Duration>,
     last_query_cancelled: bool,
+    /// A "Search…" over Results arrived while `results_truncated` was still
+    /// true — deferred until the "Expand All" rerun it triggered finishes,
+    /// so the search covers the complete results rather than the capped
+    /// preview.
+    pending_results_search: bool,
+    /// Same idea as `pending_results_search`, for "Save…" over Results: the
+    /// destination path chosen while results were still truncated, applied
+    /// once the "Expand All" rerun it triggered completes.
+    pending_save_results: Option<PathBuf>,
 
     source_tree: TreeView,
     results_tree: TreeView,
@@ -175,8 +190,11 @@ impl App {
             last_item_error: None,
             results_count_so_far: 0,
             results_truncated: false,
+            results_cap: LIVE_PREVIEW_CAP,
             last_query_elapsed: None,
             last_query_cancelled: false,
+            pending_results_search: false,
+            pending_save_results: None,
             source_tree: TreeView::default(),
             results_tree: TreeView::default(),
             source_view: ViewMode::Tree,
@@ -232,6 +250,9 @@ impl App {
                     self.last_item_error = None;
                     self.results_count_so_far = 0;
                     self.results_truncated = false;
+                    self.results_cap = LIVE_PREVIEW_CAP;
+                    self.pending_results_search = false;
+                    self.pending_save_results = None;
                     self.last_query_elapsed = None;
                     self.last_resolved_engine = None;
                     self.results_tree.reset();
@@ -323,7 +344,7 @@ impl App {
                     }
                     self.results_count_so_far += 1;
                     if let Value::Array(arr) = &mut self.results {
-                        if arr.len() < LIVE_PREVIEW_CAP {
+                        if arr.len() < self.results_cap {
                             arr.push(value);
                         } else {
                             self.results_truncated = true;
@@ -350,13 +371,49 @@ impl App {
                     self.query_running = false;
                     self.last_query_elapsed = Some(elapsed);
                     self.last_query_cancelled = cancelled;
+
+                    // If the "Expand All" re-run a pending search/save was
+                    // waiting on got cancelled instead of completing, its
+                    // results are only a partial, arbitrarily-cut-off
+                    // snapshot — not the complete set either was promised —
+                    // so drop them rather than search/save that silently.
+                    if cancelled {
+                        if self.pending_results_search {
+                            self.pending_results_search = false;
+                            self.searching = false;
+                            self.search_error =
+                                Some("Cancelled while fetching full results.".to_string());
+                        }
+                        self.pending_save_results = None;
+                    } else {
+                        if self.pending_results_search {
+                            self.pending_results_search = false;
+                            self.run_search();
+                        }
+                        if let Some(path) = self.pending_save_results.take() {
+                            let _ = self.cmd_tx.send(Command::SaveResults {
+                                results: self.results.clone(),
+                                path,
+                            });
+                        }
+                    }
                 }
                 Event::QueryError { gen, error } => {
                     if gen != self.query_gen {
                         continue;
                     }
                     self.query_running = false;
-                    self.query_error = Some(error);
+                    self.query_error = Some(error.clone());
+                    // The "Expand All" re-run that a pending search/save was
+                    // waiting on failed outright — surface that instead of
+                    // leaving the search panel spinning or the save silently
+                    // dropped.
+                    if self.pending_results_search {
+                        self.pending_results_search = false;
+                        self.searching = false;
+                        self.search_error = Some(error);
+                    }
+                    self.pending_save_results = None;
                 }
             }
         }
@@ -412,19 +469,26 @@ impl App {
         }
     }
 
-    /// Prompt for a destination and write the current results (as currently
-    /// materialized — up to `LIVE_PREVIEW_CAP` items, same as what's shown)
-    /// to it as pretty-printed JSON.
+    /// Prompt for a destination and write the current results to it as
+    /// pretty-printed JSON. If the live preview is still capped, this first
+    /// re-runs the query unbounded (`expand_results`) and defers the actual
+    /// save until that completes, so the file gets the complete results, not
+    /// just the up-to-`LIVE_PREVIEW_CAP` preview.
     fn save_results(&mut self) {
         if let Some(path) = rfd::FileDialog::new()
             .set_file_name("results.json")
             .add_filter("JSON", &["json"])
             .save_file()
         {
-            let _ = self.cmd_tx.send(Command::SaveResults {
-                results: self.results.clone(),
-                path,
-            });
+            if self.results_truncated {
+                self.expand_results();
+                self.pending_save_results = Some(path);
+            } else {
+                let _ = self.cmd_tx.send(Command::SaveResults {
+                    results: self.results.clone(),
+                    path,
+                });
+            }
         }
     }
 
@@ -527,8 +591,22 @@ impl App {
     }
 
     /// Send the current search dialog's query to the worker thread, over
-    /// whichever tree it was opened for.
+    /// whichever tree it was opened for. Searching Results while the live
+    /// preview is still capped would silently miss matches beyond the cap,
+    /// so that case first re-runs the query unbounded (`expand_results`) and
+    /// retries the search once it completes (`pending_results_search`,
+    /// handled in `Event::QueryDone`).
     fn run_search(&mut self) {
+        if self.search_target == PanelKind::Results && self.results_truncated {
+            self.expand_results();
+            self.pending_results_search = true;
+            self.searching = true;
+            self.search_error = None;
+            self.search_results.clear();
+            self.search_panel_open = true;
+            return;
+        }
+
         let root = match self.search_target {
             PanelKind::Source => match self.doc.clone() {
                 Some(doc) => SearchRoot::Source(doc),
@@ -602,6 +680,9 @@ impl App {
         self.last_item_error = None;
         self.results_count_so_far = 0;
         self.results_truncated = false;
+        self.results_cap = LIVE_PREVIEW_CAP;
+        self.pending_results_search = false;
+        self.pending_save_results = None;
         self.last_query_elapsed = None;
         self.last_query_cancelled = false;
         self.last_resolved_engine = None;
@@ -615,8 +696,24 @@ impl App {
     }
 
     /// Start a new query run, cancelling whatever query was previously in
-    /// flight (Architecture §5's generation-counter pattern).
+    /// flight (Architecture §5's generation-counter pattern). Always resets
+    /// the live-preview cap back to the bounded default — a fresh "Run"
+    /// means a new query intent, not a continuation of a previous "Expand
+    /// All".
     fn run_query(&mut self) {
+        self.run_query_capped(LIVE_PREVIEW_CAP);
+    }
+
+    /// Re-run the current query with the live-preview cap lifted, so the
+    /// results tree, its "Text" view, and (via `pending_results_search` /
+    /// `pending_save_results`) any search or save waiting on it all end up
+    /// working from the complete, unbounded result set instead of the
+    /// capped live preview.
+    fn expand_results(&mut self) {
+        self.run_query_capped(usize::MAX);
+    }
+
+    fn run_query_capped(&mut self, cap: usize) {
         let Some(doc) = self.doc.clone() else { return };
 
         if let Some(prev) = self.active_cancel.take() {
@@ -638,6 +735,9 @@ impl App {
         self.last_item_error = None;
         self.results_count_so_far = 0;
         self.results_truncated = false;
+        self.results_cap = cap;
+        self.pending_results_search = false;
+        self.pending_save_results = None;
         self.query_error = None;
         self.last_query_elapsed = None;
         self.query_running = true;
@@ -978,9 +1078,23 @@ impl App {
                 ui.weak(egui::RichText::new("Engine:").small());
             });
         });
+        // Ties the box's minimum height to whatever room the (now resizable)
+        // "query_bar" panel above has for it this frame, so dragging the
+        // panel's bottom edge visibly grows/shrinks the box even when the
+        // query itself is short. `desired_rows` is still just a *minimum* —
+        // a query with more lines than fit still grows the box further, same
+        // as before. Wrapping this in a `ScrollArea` instead (so oversized
+        // queries would scroll rather than grow) was tried and reverted: the
+        // cursor's scroll-into-view request on every keystroke fights the
+        // panel's own content-based auto-sizing and the two feed back into
+        // each other, ballooning the panel to the full window height after
+        // typing as little as a second line.
+        let line_height = ui.text_style_height(&egui::TextStyle::Monospace)
+            + ui.spacing().extra_text_line_spacing;
+        let desired_rows = ((ui.available_height() / line_height).floor() as usize).max(1);
         ui.add(
             egui::TextEdit::multiline(&mut self.query_text)
-                .desired_rows(3)
+                .desired_rows(desired_rows)
                 .desired_width(f32::INFINITY)
                 .code_editor()
                 .hint_text(
@@ -1048,6 +1162,17 @@ impl App {
                 }
                 s.push_str(engine_suffix.as_deref().unwrap_or(""));
                 ui.label(s);
+                if self.results_truncated
+                    && ui
+                        .add_enabled(!self.query_running, egui::Button::new("Expand All"))
+                        .on_hover_text(
+                            "Re-run the query without the live-preview cap, fetching all \
+                             results into memory.",
+                        )
+                        .clicked()
+                {
+                    self.expand_results();
+                }
             }
 
             if self.results_item_errors > 0 {
@@ -1127,14 +1252,20 @@ impl App {
     /// and rendered on the worker thread, bounded to `TEXT_VIEW_NODE_BUDGET`
     /// nodes — a single query result can itself be arbitrarily large (e.g.
     /// `.` over a multi-GB document), so `LIVE_PREVIEW_CAP`'s item-count cap
-    /// alone doesn't bound this.
+    /// alone doesn't bound this. That node budget lifts too, to `usize::MAX`,
+    /// once `results_cap` is unbounded (i.e. "Expand All" has run).
     fn results_text_view(&mut self, ui: &mut egui::Ui) {
+        let node_budget = if self.results_cap == usize::MAX {
+            usize::MAX
+        } else {
+            TEXT_VIEW_NODE_BUDGET
+        };
         if self.results_text_dirty && !self.results_text_pending {
             self.results_text_pending = true;
             self.results_text_dirty = false;
             let _ = self.cmd_tx.send(Command::RenderText {
                 target: worker::TextTarget::Results(self.results.clone()),
-                node_budget: TEXT_VIEW_NODE_BUDGET,
+                node_budget,
                 gen: self.results_text_gen,
             });
         }
@@ -1148,9 +1279,21 @@ impl App {
         }
 
         if self.results_text_truncated {
-            ui.weak(format!(
-                "Showing the first {TEXT_VIEW_NODE_BUDGET} nodes — use Tree view, or Save… for the full results."
-            ));
+            ui.horizontal(|ui| {
+                ui.weak(format!(
+                    "Showing the first {TEXT_VIEW_NODE_BUDGET} nodes — use Tree view, or Save… for the full results."
+                ));
+                if ui
+                    .add_enabled(!self.query_running, egui::Button::new("Expand All"))
+                    .on_hover_text(
+                        "Re-run the query without the node-count cap, rendering the complete \
+                         text.",
+                    )
+                    .clicked()
+                {
+                    self.expand_results();
+                }
+            });
         }
         egui::ScrollArea::both()
             .auto_shrink([false, false])
@@ -1265,7 +1408,11 @@ impl eframe::App for App {
         self.handle_shortcuts(ui.ctx());
 
         egui::Panel::top("toolbar").show(ui, |ui| self.toolbar(ui));
-        egui::Panel::top("query_bar").show(ui, |ui| self.query_bar(ui));
+        egui::Panel::top("query_bar")
+            .resizable(true)
+            .default_size(100.0)
+            .min_size(60.0)
+            .show(ui, |ui| self.query_bar(ui));
         egui::Panel::bottom("status_bar").show(ui, |ui| self.status_bar(ui));
         if self.search_panel_open {
             egui::Panel::bottom("search_results_panel")
