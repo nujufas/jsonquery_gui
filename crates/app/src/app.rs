@@ -1035,13 +1035,28 @@ impl App {
 
         // Fill whatever space is left in the panel rather than a fixed row
         // count, so the box grows/shrinks with the window instead of leaving
-        // dead space below it.
-        let resp = ui.add_sized(
-            ui.available_size(),
-            egui::TextEdit::multiline(&mut self.paste_text)
-                .code_editor()
-                .hint_text("Paste JSON here…"),
-        );
+        // dead space below it. Captured before opening the ScrollArea below
+        // (rather than calling `ui.available_size()` from inside it) so a
+        // short/empty paste still fills the visible panel instead of
+        // shrinking to a single line -- a vertical ScrollArea reports an
+        // effectively unbounded height for its content.
+        let avail = ui.available_size();
+        // A bare `TextEdit` has no scrolling of its own -- confirmed during
+        // implementation that pasting a long single-line document (no
+        // scrollbar, mouse wheel did nothing, even Ctrl+End didn't scroll
+        // the cursor into view) needs this explicit ScrollArea to be
+        // navigable at all.
+        let resp = egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.add_sized(
+                    avail,
+                    egui::TextEdit::multiline(&mut self.paste_text)
+                        .code_editor()
+                        .hint_text("Paste JSON here…"),
+                )
+            })
+            .inner;
 
         let pasted = resp.has_focus()
             && ui
@@ -1532,10 +1547,19 @@ impl App {
                     apply = true;
                 }
             });
-            let resp = ui.add_sized(
-                ui.available_size(),
-                egui::TextEdit::multiline(&mut self.source_text_cache).code_editor(),
-            );
+            // See the same-shaped fix in `paste_area` -- a bare `TextEdit`
+            // doesn't scroll on its own, so a long pasted/edited document had
+            // no way to reveal anything past the first screenful.
+            let avail = ui.available_size();
+            let resp = egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    ui.add_sized(
+                        avail,
+                        egui::TextEdit::multiline(&mut self.source_text_cache).code_editor(),
+                    )
+                })
+                .inner;
             if resp.has_focus()
                 && ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Enter))
             {

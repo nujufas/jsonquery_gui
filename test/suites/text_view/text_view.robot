@@ -159,6 +159,32 @@ TC-TXT-009 A File Or URL Source's Text View Has No Editable Buffer
     Region Should Not Contain Text    @{SOURCE_PANEL}    Apply
     [Teardown]    Run Keywords    Stop Fixture Server    AND    Close Jsonquery App
 
+TC-TXT-011 A Long Pasted Document's Text View Scrolls
+    [Documentation]    Regression test: the editable Text view for a pasted
+    ...    document used to render its buffer in a bare `TextEdit` with no
+    ...    enclosing `ScrollArea` -- confirmed (outside this suite, against
+    ...    a real ~230KB pasted document) that this left a long document
+    ...    with no visible scrollbar, no response to the mouse wheel, and no
+    ...    cursor-follow scrolling even via keyboard navigation (Ctrl+End).
+    ...    A 300-element array pretty-prints to far more lines than fit in
+    ...    the panel at once, so its last element ("index": 299) starts out
+    ...    scrolled out of view and only appears once scrolling genuinely
+    ...    works.
+    [Tags]    p1
+    ${json}=    Evaluate    __import__("json").dumps([{"index": i} for i in range(300)])
+    Load Fixture Via Paste    ${json}
+    Click At    140    144
+    Sleep    0.3s
+    Region Should Not Contain Text    @{SOURCE_PANEL}    299
+    FOR    ${i}    IN RANGE    15
+        Scroll At    300    400    -60
+        Sleep    0.2s
+        ${found}=    Run Keyword And Return Status
+        ...    Region Should Contain Text    @{SOURCE_PANEL}    299
+        Exit For Loop If    ${found}
+    END
+    Region Should Contain Text    @{SOURCE_PANEL}    299
+
 TC-TXT-004 A Large Document's Text View Is Capped And Shows A Notice
     [Documentation]    File/URL Text views are bounded to a 20,000-node
     ...    render budget -- exercised via a 25,000-element array over URL
