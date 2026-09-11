@@ -1,0 +1,56 @@
+name: jsonquery-gui
+title: jsonquery
+base: core24
+version: '0.3.1'
+summary: Browse and query large JSON files with jq, JSONPath, JMESPath & Pointer
+description: |
+  jsonquery is a native desktop GUI for browsing and querying large JSON
+  files. It streams and virtualizes big files instead of loading them
+  whole, and lets you query with jq, JSON Pointer, JSONPath, or JMESPath --
+  pick a query engine (or leave it on auto-detect) and see results update
+  live in a tree or text view.
+
+  Open files by drag-and-drop, file picker, pasted text, or URL. Query-box
+  autocomplete is available for jq.
+grade: stable
+confinement: strict
+license: MIT
+icon: assets/icons/icon-256.png
+contact: https://github.com/nujufas/jsonquery_gui/issues
+issues: https://github.com/nujufas/jsonquery_gui/issues
+source-code: https://github.com/nujufas/jsonquery_gui
+website: https://github.com/nujufas/jsonquery_gui
+
+platforms:
+  amd64:
+
+apps:
+  jsonquery-gui:
+    command: bin/jsonquery_gui
+    extensions: [gnome]
+    common-id: io.github.nujufas.jsonquery_gui
+    plugs:
+      - network
+
+parts:
+  jsonquery-gui:
+    # Not using `plugin: rust`: it fetches its toolchain via the `rustup`
+    # *snap*, and snapcraft's `gnome` extension composes its own PATH
+    # (`.../gnome-46-2404-sdk/current/usr/bin${PATH:+:$PATH}`) against a
+    # minimal baseline that excludes /snap/bin, so the rust plugin's own
+    # environment-validation step can't find that rustup and always fails
+    # with "'rustup' not found" -- reproducible regardless of build backend.
+    # Installing Rust ourselves via rustup.sh sidesteps the snap entirely.
+    plugin: nil
+    source: .
+    build-packages:
+      - curl
+      - ca-certificates
+      - gcc
+      - pkg-config
+    override-build: |
+      curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+          sh -s -- -y --default-toolchain stable --profile minimal
+      . "$HOME/.cargo/env"
+      cargo build --release -p jsonquery_gui
+      install -Dm755 target/release/jsonquery_gui "$CRAFT_PART_INSTALL/bin/jsonquery_gui"

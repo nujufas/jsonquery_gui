@@ -70,6 +70,14 @@ macOS builds aren't published yet, so the tap is Linux-only for now. If
 Homebrew refuses the formula as an untrusted tap, run
 `brew trust nujufas/jsonquery-gui` first.
 
+### Snap (Linux)
+
+```sh
+sudo snap install jsonquery-gui
+```
+
+Also available on the [Snap Store](https://snapcraft.io/jsonquery-gui).
+
 ### Download a build
 
 Prebuilt Linux and Windows binaries are attached to each
@@ -115,6 +123,7 @@ build/linux.sh      # native release build -> .tar.gz
 build/appimage.sh   # native release build -> self-integrating .AppImage
 build/windows.sh    # cross-compiled via `cross`/Docker -> .zip
 build/all.sh        # all three, plus a listing of dist/
+build/snap.sh       # sandboxed build via snapcraft -> dist/*.snap
 ```
 
 `build/windows.sh` needs a working Docker daemon (cross-compiles inside a
@@ -126,6 +135,11 @@ layout, just needs a Rust toolchain and PowerShell.
 The AppImage is desktop-pinnable out of the box: it self-registers a
 `.desktop` entry and icon on first launch (no `appimaged`/AppImageLauncher
 required), so right-click → Pin works from the taskbar/dock immediately.
+
+`build/snap.sh` needs `snapcraft` plus a multipass or LXD build backend. It
+isn't wired into `build/all.sh` — it builds in its own sandbox and isn't
+needed for the tarball/AppImage/Windows release artifacts. See
+[`packaging/snap/`](packaging/snap/) for build/test/publish details.
 
 ## Development
 
