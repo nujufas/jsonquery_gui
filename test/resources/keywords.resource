@@ -25,13 +25,20 @@ Library           AppLibrary.py
 @{STATUS_AREA}            230    0      950     20
 @{QUERY_ROW}              0      22     260     24
 @{ENGINE_PICKER_ROW}      970    22     230     24
-@{QUERY_TEXTBOX}          0      46     1200    55
-@{SOURCE_HEADER}          0      118    300     20
-@{SOURCE_HINT_ROW}        0      140    592     20
-@{RESULTS_HEADER}         600    118    300     20
-@{RESULTS_SAVE_BUTTON}    1140   118    60      20
-@{SOURCE_PANEL}           0      140    592     600
-@{RESULTS_PANEL}          600    140    600     600
+# Height deliberately tight to one text line (not the query box's full,
+# resizable height): confirmed during implementation that Tesseract
+# reliably misreads short query text (e.g. "/does/not/exist" came back as
+# "ae") when the crop is much taller than the single line of text it
+# contains -- the same "sparse region" OCR failure mode documented
+# elsewhere in this file, just triggered by excess height here rather than
+# width.
+@{QUERY_TEXTBOX}          0      46     1200    22
+@{SOURCE_HEADER}          0      135    300     20
+@{SOURCE_HINT_ROW}        0      165    592     20
+@{RESULTS_HEADER}         600    135    300     20
+@{RESULTS_SAVE_BUTTON}    1140   135    60      20
+@{SOURCE_PANEL}           0      135    592     600
+@{RESULTS_PANEL}          600    135    600     600
 # Tall enough to hold jsonpath-rust's own multi-line syntax-error messages
 # (confirmed during implementation: a JSONPath parse error can render as 5-6
 # lines -- "Query error: ..." plus the underlying crate's own "-->" pointer
@@ -77,6 +84,23 @@ ${ENGINE_POINTER_X}       1060
 ${ENGINE_JSONPATH_X}      1110
 ${ENGINE_JMESPATH_X}      1168
 ${ENGINE_ROW_Y}           38
+# Query-box autocomplete popup (see suggest.rs / query_suggest.rs) -- the
+# feature's own on/off toggle sits immediately left of the theme toggle
+# (THEME_TOGGLE_X/Y above), same icon-only-so-fixed-click-point reasoning.
+# AUTOCOMPLETE_ICON_PROBE is a pixel inside the 💡 glyph itself confirmed
+# (during implementation) to shift by ~60 grayscale levels between the
+# enabled/disabled icon-color states -- used the same relative-pixel-color
+# way as THEME_TOGGLE's own background-color check in TC-WIN-002.
+${AUTOCOMPLETE_TOGGLE_X}       1151
+${AUTOCOMPLETE_TOGGLE_Y}       10
+${AUTOCOMPLETE_ICON_PROBE_X}   1147
+${AUTOCOMPLETE_ICON_PROBE_Y}   10
+# The popup renders as a floating Area anchored just under the query box
+# (left_bottom of its rect), sized to content up to a 320px-tall scroll
+# area -- wide/tall enough here to catch it regardless of the query box's
+# own (resizable) height.
+@{SUGGEST_POPUP_AREA}         0      100    480    400
+
 # Fixtures served over HTTP for Open URL... tests -- avoids depending on the
 # public internet, and lets load-failure/non-JSON/empty/oversized cases be
 # constructed on demand rather than relying on a real remote server's
@@ -135,8 +159,13 @@ Select Engine
     [Documentation]    Clicks the named engine picker button (jq / Pointer /
     ...    JSONPath / JMESPath). Clicking an already-selected engine
     ...    deselects it back to auto-detect (app's own toggle behavior).
+    ...    Retried: confirmed during implementation that Tesseract
+    ...    occasionally misreads the short "jq" label (seen read back as
+    ...    both "iq" and "ja" at this size), the same class of OCR
+    ...    flakiness documented throughout this resource.
     [Arguments]    ${engine_label}
-    Click Text In Region    @{ENGINE_PICKER_ROW}    ${engine_label}
+    Wait Until Keyword Succeeds    3x    0.3s
+    ...    Click Text In Region    @{ENGINE_PICKER_ROW}    ${engine_label}
 
 Clear Query Box
     [Documentation]    Empties the query box without typing a replacement --
@@ -226,3 +255,22 @@ Run Current Query
 Press Ctrl Enter And Wait
     Press Keys    ctrl    enter
     Wait Until Region Matches    @{STATUS_BAR}    result\\(s\\)|error    timeout=5
+
+Toggle Autocomplete
+    [Documentation]    Clicks the query box's 💡 autocomplete toggle and
+    ...    confirms the icon's own color actually changed (retried -- same
+    ...    occasionally-dropped-synthetic-click flakiness documented
+    ...    elsewhere in this resource). Flips whichever direction it's
+    ...    currently NOT in; call it once from a fresh launch to turn
+    ...    autocomplete on, again to turn it back off.
+    ${before}=    Get Pixel Color    ${AUTOCOMPLETE_ICON_PROBE_X}    ${AUTOCOMPLETE_ICON_PROBE_Y}
+    Wait Until Keyword Succeeds    5x    0.3s
+    ...    Click Autocomplete Toggle And Verify Changed    ${before}
+
+Click Autocomplete Toggle And Verify Changed
+    [Arguments]    ${baseline}
+    Click At    ${AUTOCOMPLETE_TOGGLE_X}    ${AUTOCOMPLETE_TOGGLE_Y}
+    Sleep    0.3s
+    ${after}=    Get Pixel Color    ${AUTOCOMPLETE_ICON_PROBE_X}    ${AUTOCOMPLETE_ICON_PROBE_Y}
+    Colors Should Not Match    ${baseline}    ${after}
+    ...    msg=Expected the 💡 icon's color to change after clicking the autocomplete toggle

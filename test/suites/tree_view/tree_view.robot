@@ -34,9 +34,9 @@ TC-TREE-001 Each Value Kind Renders With Its Own Color And Text Shape
     Region Should Contain Text    @{SOURCE_PANEL}    true
     Region Should Contain Text    @{SOURCE_PANEL}    null
     Region Should Contain Text    @{SOURCE_PANEL}    3 items
-    ${string_color}=    Get Pixel Color    150    182
-    ${number_color}=    Get Pixel Color    136    203
-    ${bool_color}=    Get Pixel Color    140    225
+    ${string_color}=    Get Pixel Color    121    197
+    ${number_color}=    Get Pixel Color    137    218
+    ${bool_color}=    Get Pixel Color    134    239
     Colors Should Not Match    ${string_color}    ${number_color}
     ...    msg=Expected string and number rows to render in different colors
     Colors Should Not Match    ${number_color}    ${bool_color}
@@ -56,13 +56,13 @@ TC-TREE-002 A Container Row Toggles Via Its Arrow Or A Double-Click
     ${json}=    Get File    ${FIXTURES}/people.json
     Load Fixture Via Paste    ${json}
     Region Should Not Contain Text    @{SOURCE_PANEL}    Alice
-    Click At    28    182
+    Click At    28    197
     Sleep    0.3s
     Region Should Contain Text    @{SOURCE_PANEL}    Alice
-    Click At    28    182
+    Click At    28    197
     Sleep    0.3s
     Region Should Not Contain Text    @{SOURCE_PANEL}    Alice
-    Double Click At    100    182
+    Double Click At    100    197
     Sleep    0.3s
     Region Should Contain Text    @{SOURCE_PANEL}    Alice
 

@@ -17,7 +17,7 @@ ${FIXTURES}    ${CURDIR}/../../resources/fixtures
 # The context menu is a floating popup near the right-click point -- a wide
 # capture picks up tree rows behind/around it too, garbling the OCR read
 # (confirmed during implementation). Keep this tight to just the popup.
-@{CONTEXT_MENU_AREA}    95    170    250    100
+@{CONTEXT_MENU_AREA}    95    195    250    100
 
 *** Keywords ***
 Load People Fixture
@@ -30,7 +30,7 @@ TC-CTX-001 Menu Contents And Order On A Source Row
     [Documentation]    Save..., Copy JSON Path, separator, Search... -- no
     ...    Find in Source (that item is Results-tree only).
     [Tags]    p1
-    Open Row Context Menu    100    172
+    Open Row Context Menu    100    197
     Region Should Contain Text    @{CONTEXT_MENU_AREA}    Save
     Region Should Contain Text    @{CONTEXT_MENU_AREA}    Copy JSON Path
     Region Should Contain Text    @{CONTEXT_MENU_AREA}    Search
@@ -42,8 +42,8 @@ TC-CTX-002 Menu Contents And Order On A Results Row
     ...    already covered by TC-CTX-001).
     [Tags]    p1
     Run Query    .[0]
-    Open Row Context Menu    650    182
-    @{menu}=    Row Context Menu Region    650    182
+    Open Row Context Menu    650    197
+    @{menu}=    Row Context Menu Region    650    197
     Region Should Contain Text    @{menu}    Save
     Region Should Contain Text    @{menu}    Copy JSON Path
     Region Should Contain Text    @{menu}    Find in Source
@@ -55,8 +55,8 @@ TC-CTX-006 Search... Scopes To Whichever Tree It Was Opened From
     ...    row's owning panel, not always "Source".
     [Tags]    p2
     Run Query    .[0]
-    Open Row Context Menu    650    182
-    @{menu}=    Row Context Menu Region    650    182
+    Open Row Context Menu    650    197
+    @{menu}=    Row Context Menu Region    650    197
     Click Text In Region    @{menu}    Search
     Region Should Contain Text    @{POPUP_DIALOG_AREA}    Results
 
@@ -71,7 +71,7 @@ TC-CTX-003 Copy JSON Path Copies The Path To The Clipboard
     ...    copying its path should put a jq-style path on the clipboard.
     [Tags]    p1
     Set Clipboard    sentinel-before-copy
-    Open Row Context Menu    100    172
+    Open Row Context Menu    100    197
     Click Text In Region    @{CONTEXT_MENU_AREA}    Copy JSON Path
     ${path}=    Get Clipboard
     Should Not Be Equal As Strings    ${path}    sentinel-before-copy

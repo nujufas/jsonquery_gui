@@ -30,16 +30,16 @@ TC-SAVE-002 Source Save... Stays Available Regardless Of Query State
     ...    at all -- checked here by confirming its label's color never
     ...    changes across "no query run yet" and "a query just ran".
     [Tags]    p3
-    ${before_query}=    Get Pixel Color    566    129
+    ${before_query}=    Get Pixel Color    566    144
     Run Query    .[0].name
-    ${after_query}=    Get Pixel Color    566    129
+    ${after_query}=    Get Pixel Color    566    144
     Colors Should Match    ${before_query}    ${after_query}
     ...    msg=Expected Source's Save... to look the same regardless of query state
 
 TC-SAVE-005 Results Save... Is Disabled Until There Are Results To Save
     [Tags]    p1
-    ${disabled_color}=    Get Pixel Color    1165    129
+    ${disabled_color}=    Get Pixel Color    1165    144
     Run Query    .[0].name
-    ${enabled_color}=    Get Pixel Color    1165    129
+    ${enabled_color}=    Get Pixel Color    1165    144
     Colors Should Not Match    ${disabled_color}    ${enabled_color}
     ...    msg=Expected Results' Save... to visibly enable once a query produced results

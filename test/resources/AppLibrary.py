@@ -37,6 +37,7 @@ import pytesseract
 from PIL import Image
 from robot.api import logger
 from robot.api.deco import keyword, library
+from robot.libraries.BuiltIn import BuiltIn
 
 pyautogui.FAILSAFE = False
 
@@ -62,6 +63,8 @@ class AppLibrary:
         self._window_id = None
         self._fixture_server = None
         self._fixture_server_thread = None
+        self._shot_test_name = None
+        self._shot_seq = 0
 
     # -- display lifecycle (once per suite run) -----------------------------
 
@@ -166,7 +169,20 @@ class AppLibrary:
 
     @keyword("Close Jsonquery App")
     def close_jsonquery_app(self):
-        """Kills the current jsonquery_gui process, if any."""
+        """Kills the current jsonquery_gui process, if any.
+
+        First captures one full-window screenshot tagged with the test's
+        final status, so every test -- not just ones that happen to make
+        their own OCR/region checks -- leaves behind at least one piece of
+        visual evidence in the log. Best-effort: a screenshot failure (e.g.
+        the window already vanished) must never block the process cleanup
+        below, since this keyword runs unconditionally as Test Teardown."""
+        if self._window_id is not None:
+            try:
+                status = BuiltIn().get_variable_value("${TEST STATUS}") or "UNKNOWN"
+                self.screenshot_window(label=f"final-{status}")
+            except Exception as e:
+                logger.warn(f"Could not capture final screenshot: {e}")
         if self._app_proc is not None:
             try:
                 self._app_proc.send_signal(signal.SIGKILL)
@@ -282,20 +298,64 @@ class AppLibrary:
 
     # -- screenshots / OCR ----------------------------------------------------
 
+    @staticmethod
+    def _slugify(name):
+        return re.sub(r"[^A-Za-z0-9_-]+", "_", name).strip("_") or "unknown"
+
+    def _next_screenshot_path(self, tag):
+        """Path (under `<outputdir>/screenshots/<test>/`) for the next
+        auto-captured screenshot of the current test, numbered in the order
+        they're taken so the log reads top-to-bottom the same way the test
+        ran. Numbering (and the subfolder) resets whenever the active test
+        name changes, so a re-run or a new test starts back at 1 rather than
+        accumulating across the whole suite."""
+        test_name = BuiltIn().get_variable_value("${TEST NAME}") or "no_test"
+        if test_name != self._shot_test_name:
+            self._shot_test_name = test_name
+            self._shot_seq = 0
+        self._shot_seq += 1
+        out_dir = BuiltIn().get_variable_value("${OUTPUTDIR}") or "."
+        shot_dir = os.path.join(out_dir, "screenshots", self._slugify(test_name))
+        os.makedirs(shot_dir, exist_ok=True)
+        filename = f"{self._shot_seq:03d}-{self._slugify(tag)}.png"
+        return os.path.join(shot_dir, filename)
+
+    def _embed_screenshot(self, abs_path, caption):
+        """Logs `abs_path` into the Robot log as a clickable thumbnail, so
+        every screenshot this library takes leaves behind visual evidence a
+        human can actually check -- OCR/pixel text output alone can't show
+        whether a mismatch was a genuine rendering bug or just a
+        misread/timing artifact of the check itself."""
+        out_dir = BuiltIn().get_variable_value("${OUTPUTDIR}") or "."
+        rel_path = os.path.relpath(abs_path, out_dir)
+        logger.info(
+            f'{caption}<br/><a href="{rel_path}" target="_blank">'
+            f'<img src="{rel_path}" style="max-width:480px;border:1px solid #999;"/></a>',
+            html=True,
+        )
+
     @keyword("Screenshot Region")
-    def screenshot_region(self, x, y, width, height, path=None):
-        """Returns a PIL Image of the given app-relative region (also saves
-        it to `path` if given, for failure evidence)."""
+    def screenshot_region(self, x, y, width, height, path=None, log=True, label="region"):
+        """Returns a PIL Image of the given app-relative region. Unless
+        `log=False`, also saves it under `<outputdir>/screenshots/<test>/`
+        and embeds it into the Robot log for this test (see
+        `_embed_screenshot`) -- callers that only need a throwaway capture
+        (e.g. `Get Pixel Color`'s 1x1 probe) pass `log=False` to skip this.
+        `path`, if given, is an *additional* save location."""
         ax, ay = self._to_absolute(int(x), int(y))
         img = pyautogui.screenshot(region=(ax, ay, int(width), int(height)))
         if path:
             img.save(path)
+        if log:
+            auto_path = self._next_screenshot_path(label)
+            img.save(auto_path)
+            self._embed_screenshot(auto_path, f"{label} ({x},{y},{width}x{height})")
         return img
 
     @keyword("Screenshot Window")
-    def screenshot_window(self, path=None):
+    def screenshot_window(self, path=None, log=True, label="window"):
         w, h = self.get_window_size()
-        return self.screenshot_region(0, 0, w, h, path=path)
+        return self.screenshot_region(0, 0, w, h, path=path, log=log, label=label)
 
     @staticmethod
     def _ocr_words(img, upscale=5, psm=6):
@@ -323,7 +383,7 @@ class AppLibrary:
     @keyword("Read Region Text")
     def read_region_text(self, x, y, width, height, psm=6):
         """OCRs the given app-relative region and returns the recognized text."""
-        img = self.screenshot_region(x, y, width, height)
+        img = self.screenshot_region(x, y, width, height, label="ocr-read")
         words = self._ocr_words(img, psm=int(psm))
         # Group by line so multi-word text reads back in natural order.
         lines = {}
@@ -425,7 +485,7 @@ class AppLibrary:
         the same line (e.g. "Copy JSON Path" is 3 separate tokens to
         Tesseract) -- confirmed necessary during implementation for any
         multi-word button/menu-item label."""
-        img = self.screenshot_region(x, y, width, height)
+        img = self.screenshot_region(x, y, width, height, label=f"find-{target}")
         words = self._ocr_words(img, psm=int(psm))
         target_l = target.lower()
         for w in words:
@@ -460,7 +520,10 @@ class AppLibrary:
     @keyword("Get Pixel Color")
     def get_pixel_color(self, x, y):
         """Returns an (r, g, b) tuple for the app-relative pixel."""
-        img = self.screenshot_region(x, y, 1, 1)
+        # A single pixel is meaningless as visual evidence, so this one
+        # capture is deliberately excluded from the log (see
+        # `screenshot_region`'s `log` param).
+        img = self.screenshot_region(x, y, 1, 1, log=False)
         return img.convert("RGB").getpixel((0, 0))
 
     @keyword("Colors Should Match")

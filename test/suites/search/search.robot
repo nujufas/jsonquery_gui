@@ -142,7 +142,7 @@ TC-SRCH-004 Results Panel Header Format And Close
 TC-SRCH-005 A Hit Line Shows Its Path And Preview, And Reveals On Click
     [Documentation]    The hit is `.[0].name` (a leaf two levels deep) --
     ...    revealing it expands row 0 first, so the leaf itself ends up at
-    ...    row 0's *child* position (y=203), not row 0's own row (y=182,
+    ...    row 0's *child* position (y=218), not row 0's own row (y=197,
     ...    which is what a container-valued reveal like TC-SRCH-020 would
     ...    highlight instead). Checked as ".name" rather than the full
     ...    ".[0].name": confirmed during implementation that a digit
@@ -160,10 +160,10 @@ TC-SRCH-005 A Hit Line Shows Its Path And Preview, And Reveals On Click
     Region Should Contain Text    @{SEARCH_RESULTS_AREA}    [Source]
     Region Should Contain Text    @{SEARCH_RESULTS_AREA}    .name
     Region Should Contain Text    @{SEARCH_RESULTS_AREA}    Alice
-    ${baseline}=    Get Pixel Color    300    203
+    ${baseline}=    Get Pixel Color    300    218
     Click Text In Region    @{SEARCH_RESULTS_AREA}    .name
     Sleep    0.5s
-    ${highlighted}=    Get Pixel Color    300    203
+    ${highlighted}=    Get Pixel Color    300    218
     Colors Should Not Match    ${baseline}    ${highlighted}
     ...    msg=Expected clicking a hit to highlight the revealed row in Source
 
@@ -179,19 +179,19 @@ TC-SRCH-007c Clearing The Source Invalidates The Open Search Panel
 TC-SRCH-020 Find In Source Reveals A Structurally-Equal Result
     [Tags]    p1
     Run Query    .[0]
-    Open Row Context Menu    650    182
-    @{menu}=    Row Context Menu Region    650    182
-    ${baseline}=    Get Pixel Color    300    182
+    Open Row Context Menu    650    197
+    @{menu}=    Row Context Menu Region    650    197
+    ${baseline}=    Get Pixel Color    300    197
     Click Text In Region    @{menu}    Find in Source
     Sleep    0.3s
-    ${highlighted}=    Get Pixel Color    300    182
+    ${highlighted}=    Get Pixel Color    300    197
     Colors Should Not Match    ${baseline}    ${highlighted}
     ...    msg=Expected the matching Source row to be highlighted after Find in Source
 
 TC-SRCH-021 Find In Source Reports Not Found For A Computed Value
     [Tags]    p1
     Run Query    .[0].name + "!"
-    Open Row Context Menu    650    182
-    @{menu}=    Row Context Menu Region    650    182
+    Open Row Context Menu    650    197
+    @{menu}=    Row Context Menu Region    650    197
     Click Text In Region    @{menu}    Find in Source
     Wait Until Region Contains Text    @{STATUS_BAR}    Not found in source    timeout=5

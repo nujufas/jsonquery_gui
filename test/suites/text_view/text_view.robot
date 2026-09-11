@@ -46,22 +46,22 @@ Apply And Check Tree For
     ...    only fires when the textarea `has_focus()`) needs an explicit
     ...    click *into* the textarea afterward, not just onto its tab.
     [Arguments]    ${apply_action}    ${expect_in_tree}
-    Click At    141    130
+    Click At    140    144
     Sleep    0.2s
     Click At    200    400
     Sleep    0.1s
     Run Keyword    ${apply_action}
     Sleep    0.3s
     Region Should Not Contain Text    @{STATUS_BAR}    Load error
-    Click At    99    130
+    Click At    99    144
     Sleep    0.3s
     Region Should Contain Text    @{SOURCE_PANEL}    ${expect_in_tree}
 
 Click Apply Button
-    Click At    356    160
+    Click At    356    176
 
 Click Apply Button And Wait For Load Error
-    Click At    356    160
+    Click At    356    176
     Wait Until Region Contains Text    @{STATUS_BAR}    Load error    timeout=3
 
 Press Ctrl Enter
@@ -79,23 +79,23 @@ TC-TXT-001 Source And Results Text/Tree Toggles Are Independent
     [Tags]    p1
     ${json}=    Get File    ${FIXTURES}/people.json
     Load Fixture Via Paste    ${json}
-    ${results_text_tab_baseline}=    Get Pixel Color    744    124
-    Click At    141    130
+    ${results_text_tab_baseline}=    Get Pixel Color    744    144
+    Click At    140    144
     Sleep    0.3s
     Region Should Contain Text    @{SOURCE_PANEL}    Editable
-    ${still_baseline}=    Get Pixel Color    744    124
+    ${still_baseline}=    Get Pixel Color    744    144
     Colors Should Match    ${results_text_tab_baseline}    ${still_baseline}
     ...    msg=Switching Source to Text should not select Results' Text tab
-    Click At    744    130
+    Click At    744    144
     Sleep    0.3s
     Region Should Contain Text    @{SOURCE_PANEL}    Editable
-    ${results_text_tab_selected}=    Get Pixel Color    744    124
+    ${results_text_tab_selected}=    Get Pixel Color    744    144
     Colors Should Not Match    ${results_text_tab_baseline}    ${results_text_tab_selected}
     ...    msg=Expected Results' Text tab to visibly highlight once selected
-    Click At    99    130
+    Click At    99    144
     Sleep    0.3s
     Region Should Not Contain Text    @{SOURCE_PANEL}    Editable
-    ${results_text_tab_still_selected}=    Get Pixel Color    744    124
+    ${results_text_tab_still_selected}=    Get Pixel Color    744    144
     Colors Should Match    ${results_text_tab_selected}    ${results_text_tab_still_selected}
     ...    msg=Switching Source back to Tree should not affect Results' own toggle
 
@@ -103,7 +103,7 @@ TC-TXT-006 Editing And Applying A Pasted Document's Text Reloads It
     [Tags]    p1
     ${json}=    Get File    ${FIXTURES}/simple_object.json
     Load Fixture Via Paste    ${json}
-    Click At    141    130
+    Click At    140    144
     Sleep    0.3s
     Select All And Type    200    250    {"changed": true, "count": 99}
     Apply And Verify Reload By Content    Click Apply Button    99
@@ -112,7 +112,7 @@ TC-TXT-007 Ctrl+Enter Applies The Edited Buffer
     [Tags]    p2
     ${json}=    Get File    ${FIXTURES}/simple_object.json
     Load Fixture Via Paste    ${json}
-    Click At    141    130
+    Click At    140    144
     Sleep    0.3s
     Select All And Type    200    250    {"changed": true, "count": 77}
     Apply And Verify Reload By Content    Press Ctrl Enter    77
@@ -121,7 +121,7 @@ TC-TXT-008 Applying Invalid JSON Shows A Load Error And Keeps The Buffer
     [Tags]    p2
     ${json}=    Get File    ${FIXTURES}/simple_object.json
     Load Fixture Via Paste    ${json}
-    Click At    141    130
+    Click At    140    144
     Sleep    0.3s
     Select All And Type    200    250    { this is not json
     Wait Until Keyword Succeeds    3x    0.5s
@@ -132,15 +132,15 @@ TC-TXT-010 Apply Is Disabled When The Buffer Is Blank
     [Tags]    p3
     ${json}=    Get File    ${FIXTURES}/simple_object.json
     Load Fixture Via Paste    ${json}
-    Click At    141    130
+    Click At    140    144
     Sleep    0.3s
-    ${enabled_color}=    Get Pixel Color    310    160
+    ${enabled_color}=    Get Pixel Color    310    176
     Click At    200    250
     Sleep    0.2s
     Press Keys    ctrl    a
     Press Key    delete
     Sleep    0.3s
-    ${disabled_color}=    Get Pixel Color    310    160
+    ${disabled_color}=    Get Pixel Color    310    176
     Colors Should Not Match    ${enabled_color}    ${disabled_color}
     ...    msg=Expected Apply's label to visibly dim once the buffer went blank
 
@@ -153,7 +153,7 @@ TC-TXT-009 A File Or URL Source's Text View Has No Editable Buffer
     ${base_url}=    Start Fixture Server    ${HTTP_FIXTURES_DIR}
     Load Via Url    ${base_url}/valid.json
     Wait Until Region Contains Text    @{STATUS_AREA}    valid.json    timeout=5
-    Click At    141    130
+    Click At    140    144
     Sleep    0.3s
     Region Should Not Contain Text    @{SOURCE_PANEL}    Editable
     Region Should Not Contain Text    @{SOURCE_PANEL}    Apply
@@ -168,7 +168,7 @@ TC-TXT-004 A Large Document's Text View Is Capped And Shows A Notice
     ${base_url}=    Start Fixture Server    ${HTTP_FIXTURES_DIR}
     Load Via Url    ${base_url}/big_array.json
     Wait Until Region Contains Text    @{STATUS_AREA}    KB    timeout=5
-    Click At    141    130
+    Click At    140    144
     Sleep    0.5s
     Region Should Contain Text    @{SOURCE_PANEL}    first 20000 nodes
     [Teardown]    Run Keywords    Stop Fixture Server    AND    Close Jsonquery App
