@@ -8,6 +8,7 @@ use eframe::egui;
 use jsonquery_core::{path_string, resolve, Document, DocumentSource, NodePath, PathSegment};
 use serde_json::Value;
 
+use crate::query_suggest::{apply_suggestion, QuerySuggest};
 use crate::tree_view::{RowAction, TreeView};
 use crate::worker::{self, Command, Event, SearchRoot};
 
@@ -53,6 +54,9 @@ pub struct App {
     /// `query_engine` if set, else whatever `detect` picked — kept around
     /// purely for the status bar's "ran with X" line.
     last_resolved_engine: Option<jsonquery_query::Kind>,
+    /// The query box's autocomplete popup: current candidates, keyboard
+    /// selection, and dismiss/re-arm state (see `query_suggest.rs`).
+    query_suggest: QuerySuggest,
 
     /// Always a `Value::Array` — the accumulated (possibly capped) results
     /// of the current query, in the shape the results tree renders directly.
@@ -185,6 +189,7 @@ impl App {
             query_error: None,
             query_engine: None,
             last_resolved_engine: None,
+            query_suggest: QuerySuggest::default(),
             results: Value::Array(Vec::new()),
             results_item_errors: 0,
             last_item_error: None,
@@ -807,9 +812,16 @@ impl App {
                 // back to `doc`.
                 let label = doc.source.label();
                 let mut label_ref = label.as_str();
+                // Give the path the whole row minus a modest reserve for
+                // what follows it (the byte size, an occasional NDJSON
+                // note, and the two icon buttons pinned to the far right)
+                // rather than a fixed width — a long path should get to use
+                // the room a short one leaves empty, not sit truncated next
+                // to a mostly-blank toolbar.
+                let label_width = (ui.available_width() - 200.0).max(120.0);
                 ui.add(
                     egui::TextEdit::singleline(&mut label_ref)
-                        .desired_width(320.0)
+                        .desired_width(label_width)
                         .font(egui::TextStyle::Monospace),
                 );
                 ui.weak(human_bytes(doc.byte_len));
@@ -826,12 +838,16 @@ impl App {
             }
 
             // Claims whatever width is left after everything above, so the
-            // theme toggle sits pinned at the top-right corner regardless of
-            // how long the path/status text is.
+            // theme toggle (and, just to its left, the autocomplete toggle)
+            // sit pinned at the top-right corner regardless of how long the
+            // path/status text is.
             ui.allocate_ui_with_layout(
                 egui::vec2(ui.available_width(), ui.spacing().interact_size.y),
                 egui::Layout::right_to_left(egui::Align::Center),
-                theme_toggle_button,
+                |ui| {
+                    theme_toggle_button(ui);
+                    autocomplete_toggle_button(ui, &mut self.query_suggest);
+                },
             );
         });
     }
@@ -1092,18 +1108,197 @@ impl App {
         let line_height = ui.text_style_height(&egui::TextStyle::Monospace)
             + ui.spacing().extra_text_line_spacing;
         let desired_rows = ((ui.available_height() / line_height).floor() as usize).max(1);
-        ui.add(
-            egui::TextEdit::multiline(&mut self.query_text)
-                .desired_rows(desired_rows)
-                .desired_width(f32::INFINITY)
-                .code_editor()
-                .hint_text(
-                    "e.g. .[] | select(.age > 21) | .name\n\
-                     (auto-detects jq / JSON Pointer / JSONPath / JMESPath — \
-                     or pick one at top right)",
-                ),
-        );
+        self.query_text_edit(ui, desired_rows);
         ui.add_space(4.0);
+    }
+
+    /// The query box itself, plus its autocomplete popup
+    /// (`jsonquery_query::suggest`, via `self.query_suggest`).
+    ///
+    /// Up/Down/Enter/Tab must be intercepted from the input queue *before*
+    /// `TextEdit::show` runs, or the widget itself will consume them first
+    /// (moving the cursor a line, inserting a newline/tab) — so a
+    /// keyboard-driven accept splices `self.query_text` and repositions the
+    /// widget's persisted cursor state a frame "early", ahead of `show`,
+    /// rather than after it the way the popup's mouse-click handling does.
+    fn query_text_edit(&mut self, ui: &mut egui::Ui, desired_rows: usize) {
+        let id = egui::Id::new("query_text_edit_box");
+
+        if let Some(idx) = self.query_suggest.intercept_keys(ui.ctx(), id) {
+            if let Some(item) = self.query_suggest.items.get(idx).cloned() {
+                let new_cursor = apply_suggestion(&mut self.query_text, &item);
+                set_text_edit_cursor(ui.ctx(), id, new_cursor);
+                self.query_suggest.accepted(new_cursor);
+            }
+        }
+
+        let output = egui::TextEdit::multiline(&mut self.query_text)
+            .id(id)
+            .desired_rows(desired_rows)
+            .desired_width(f32::INFINITY)
+            .code_editor()
+            .hint_text(
+                "e.g. .[] | select(.age > 21) | .name\n\
+                 (auto-detects jq / JSON Pointer / JSONPath / JMESPath — \
+                 or pick one at top right)",
+            )
+            .show(ui);
+
+        // Captured *before* the focus check below: clicking anywhere on the
+        // popup itself (a separate `egui::Area`, outside the `TextEdit`'s
+        // own widget rect) makes `output.response.has_focus()` false this
+        // same frame — egui clears a text edit's focus as soon as a click
+        // lands outside it, before this method even learns *what* was
+        // clicked. Gating the popup's own rendering/click-handling below on
+        // `self.query_suggest.open` directly would mean the `else` branch's
+        // `close()` (which clears `items`) always runs first and hides the
+        // popup this exact frame — so a click on a suggestion row would
+        // never reach that row's own `clicked()` check at all, silently
+        // swallowing every mouse-driven accept. Using `was_open` instead
+        // keeps rendering the popup (and checking for a click) this frame
+        // regardless of the focus change the click itself just caused; if
+        // nothing in it was clicked, next frame's `open` is already false
+        // and it simply stays gone, same as today.
+        let was_open = self.query_suggest.open;
+        // Whether to actually close things out below: deferred rather than
+        // done right here, since doing it here would run *before* the
+        // popup gets a chance to check whether the very click that took
+        // focus away landed on one of its own rows (see `was_open`'s own
+        // comment) — clearing `items` this early would blank the rows out
+        // from under that check.
+        let mut lost_focus_this_frame = false;
+
+        if output.response.has_focus() {
+            let cursor_char = output.cursor_range.map(|r| r.primary.index.0);
+            self.query_suggest.recompute(
+                &self.query_text,
+                cursor_char,
+                output.response.changed(),
+                self.query_engine,
+                self.doc.as_ref().map(|d| &d.root),
+            );
+        } else {
+            lost_focus_this_frame = true;
+        }
+
+        if was_open {
+            // A long candidate list (e.g. every index of a large array)
+            // starts collapsed to a short preview rather than dumping
+            // hundreds of rows straight into the window; keyboard
+            // navigation past the fold, or clicking the trailing "N more"
+            // row, reveals the rest inside a height-capped scroll area.
+            const COLLAPSED_ROWS: usize = 10;
+            const POPUP_MAX_HEIGHT: f32 = 320.0;
+
+            let total = self.query_suggest.items.len();
+            let show_all = self.query_suggest.expanded
+                || total <= COLLAPSED_ROWS
+                || self.query_suggest.selected >= COLLAPSED_ROWS;
+            let visible_count = if show_all { total } else { COLLAPSED_ROWS };
+            let row_count = visible_count + usize::from(!show_all);
+
+            // Force a one-frame invisible "sizing pass" whenever the target
+            // row count changes (see `QuerySuggest::popup_sized_for_rows`)
+            // so the Area actually re-measures instead of reusing a stale
+            // remembered rect from a previously-shown, differently-sized
+            // popup.
+            let force_resize = self.query_suggest.popup_sized_for_rows != Some(row_count);
+            self.query_suggest.popup_sized_for_rows = Some(row_count);
+
+            let anchor = output.response.rect.left_bottom();
+            let mut clicked = None;
+            let mut expand_clicked = false;
+            egui::Area::new(id.with("suggest_popup"))
+                .fixed_pos(anchor)
+                .order(egui::Order::Foreground)
+                // `egui::Area` remembers its rect by `Id` across frames —
+                // including across a full close/reopen cycle, since
+                // nothing clears that memory just because the popup wasn't
+                // drawn for a few frames. So a popup last shown small (e.g.
+                // 3 root-array items) that reopens later needing to be much
+                // bigger (e.g. 50 items, collapsed to 10 + a "more" row)
+                // would otherwise stay clamped at the old, wrong size
+                // forever: the `ScrollArea` below only gets however much
+                // room the Area's *stale* remembered rect hands it, no
+                // matter how tall its own content wants to be. Forcing a
+                // one-frame invisible "sizing pass" exactly when the
+                // target row count changes (tracked in
+                // `popup_sized_for_rows`) makes egui re-measure from a
+                // generous default instead of reusing that stale rect.
+                .sizing_pass(force_resize)
+                .show(ui.ctx(), |ui| {
+                    egui::Frame::popup(ui.style()).show(ui, |ui| {
+                        ui.set_max_width(440.0);
+                        let row_height = ui.text_style_height(&egui::TextStyle::Body)
+                            + ui.spacing().item_spacing.y;
+                        // Still worth reserving as a floor even with the
+                        // sizing-pass fix above: it's what lets the list
+                        // grow smoothly while a *single* popup stays
+                        // continuously open (e.g. more candidates appearing
+                        // as the user keeps typing), without waiting for a
+                        // row-count-changed sizing pass on every keystroke.
+                        ui.set_min_height((row_count as f32 * row_height).min(POPUP_MAX_HEIGHT));
+                        egui::ScrollArea::vertical()
+                            .max_height(POPUP_MAX_HEIGHT)
+                            .auto_shrink([false, true])
+                            .show(ui, |ui| {
+                                for (i, item) in self
+                                    .query_suggest
+                                    .items
+                                    .iter()
+                                    .take(visible_count)
+                                    .enumerate()
+                                {
+                                    let selected = i == self.query_suggest.selected;
+                                    let row = format!("{}  —  {}", item.label, item.detail);
+                                    let resp = ui.selectable_label(selected, row);
+                                    if selected {
+                                        resp.scroll_to_me(Some(egui::Align::Center));
+                                    }
+                                    if resp.clicked() {
+                                        clicked = Some(i);
+                                    }
+                                }
+                                if !show_all {
+                                    let remaining = total - visible_count;
+                                    let more = ui.selectable_label(
+                                        false,
+                                        egui::RichText::new(format!("…  {remaining} more"))
+                                            .weak()
+                                            .italics(),
+                                    );
+                                    if more.clicked() {
+                                        expand_clicked = true;
+                                    }
+                                }
+                            });
+                    });
+                });
+            if expand_clicked {
+                self.query_suggest.expanded = true;
+            }
+            if let Some(idx) = clicked {
+                if let Some(item) = self.query_suggest.items.get(idx).cloned() {
+                    let new_cursor = apply_suggestion(&mut self.query_text, &item);
+                    set_text_edit_cursor(ui.ctx(), id, new_cursor);
+                    self.query_suggest.accepted(new_cursor);
+                }
+            } else if expand_clicked {
+                // Also took focus away from the `TextEdit` this same frame
+                // (it's a click on the popup, same as a row click above),
+                // so it needs the same explicit reclaim a row-click accept
+                // gets from `set_text_edit_cursor` — otherwise the box
+                // stays unfocused and the next keystroke goes nowhere.
+                ui.ctx().memory_mut(|m| m.request_focus(id));
+            } else if lost_focus_this_frame {
+                // The click (or whatever else took focus away) wasn't on
+                // one of the popup's own rows after all — a genuine
+                // "clicked elsewhere" — so close it out now.
+                self.query_suggest.close();
+            }
+        } else if lost_focus_this_frame {
+            self.query_suggest.close();
+        }
     }
 
     fn status_bar(&mut self, ui: &mut egui::Ui) {
@@ -1387,6 +1582,24 @@ impl App {
     }
 }
 
+/// Reposition a `TextEdit`'s cursor from outside the widget itself (used
+/// after `apply_suggestion` splices its text), and give it focus. Egui
+/// keys a `TextEdit`'s cursor/selection state by widget `Id` in its own
+/// persisted memory, separate from the string it's editing, so moving the
+/// cursor after a programmatic edit means writing that state back directly
+/// rather than through anything `TextEdit`'s own builder exposes.
+fn set_text_edit_cursor(ctx: &egui::Context, id: egui::Id, char_idx: usize) {
+    use egui::text::{CCursor, CCursorRange};
+    use egui::widgets::text_edit::TextEditState;
+
+    let mut state = TextEditState::load(ctx, id).unwrap_or_default();
+    state
+        .cursor
+        .set_char_range(Some(CCursorRange::one(CCursor::new(char_idx))));
+    state.store(ctx, id);
+    ctx.memory_mut(|m| m.request_focus(id));
+}
+
 /// Small ☀/🌙 button that flips between light and dark theme.
 fn theme_toggle_button(ui: &mut egui::Ui) {
     let (icon, tooltip, next) = if ui.ctx().theme() == egui::Theme::Dark {
@@ -1396,6 +1609,31 @@ fn theme_toggle_button(ui: &mut egui::Ui) {
     };
     if ui.button(icon).on_hover_text(tooltip).clicked() {
         ui.ctx().set_theme(next);
+    }
+}
+
+/// Small 💡 button for the (experimental) query-box autocomplete feature —
+/// same single-icon-plus-hover-text shape as `theme_toggle_button`, but
+/// dimmed rather than swapped for a different glyph when off: there's no
+/// obvious "unlit bulb" icon to pair it with the way sun/moon pairs for
+/// light/dark.
+fn autocomplete_toggle_button(ui: &mut egui::Ui, suggest: &mut QuerySuggest) {
+    let enabled = suggest.enabled;
+    let icon = egui::RichText::new("💡");
+    let icon = if enabled {
+        icon
+    } else {
+        icon.color(ui.visuals().weak_text_color())
+    };
+    let tooltip = if enabled {
+        "Autocomplete suggestions — experimental\n\
+         On: click to turn off, or press Esc while a suggestion is showing."
+    } else {
+        "Autocomplete suggestions — experimental\n\
+         Off: click to turn on."
+    };
+    if ui.button(icon).on_hover_text(tooltip).clicked() {
+        suggest.set_enabled(!enabled);
     }
 }
 

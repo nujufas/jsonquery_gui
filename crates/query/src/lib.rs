@@ -24,6 +24,7 @@ pub mod jmespath_engine;
 pub mod jq;
 pub mod json_pointer;
 pub mod jsonpath;
+pub mod suggest;
 
 pub use convert::{from_val, to_val};
 pub use jaq_json::Val;
@@ -31,6 +32,7 @@ pub use jmespath_engine::JmesPathEngine;
 pub use jq::JaqEngine;
 pub use json_pointer::JsonPointerEngine;
 pub use jsonpath::JsonPathEngine;
+pub use suggest::{engines_in_scope, suggest, Suggestion};
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
