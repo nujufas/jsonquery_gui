@@ -7,21 +7,16 @@ file (or paste JSON directly) and query it with **jq**, **JSON Pointer**,
 
 ![jsonquery screenshot](docs/images/screenshot.png)
 
-## Built by AI
-
-This project — the code, the architecture docs, and the build tooling — was
-built by [Claude](https://claude.com) (Anthropic's AI), working from a series
-of prompts by the repo owner. The [architecture proposal and decision
-docs](docs/index.html) capture the reasoning behind the design choices along
-the way — open them locally in a browser to read them rendered (GitHub shows
-`.html` files as source, not as pages).
-
 ## Features
 
 - **Four query dialects, one box** — [jq](https://jqlang.github.io/jq/) (via
   embedded [jaq](https://github.com/01mf02/jaq)), JSON Pointer (RFC 6901),
   JSONPath (RFC 9535), and JMESPath. Pick one from the toolbar or let the app
   auto-detect it from what you type.
+- **Inline autocomplete** — as-you-type suggestions for jq's built-in
+  functions, each with a short doc string, toggleable from the toolbar.
+
+  ![Autocomplete suggestions in the query box](docs/images/screenshot-autocomplete.png)
 - **Streamed, cancellable queries** — results appear as jq produces them, so
   `first(...)`/`limit(...)` genuinely stop early; starting a new query aborts
   whatever was still running.
@@ -35,8 +30,10 @@ the way — open them locally in a browser to read them rendered (GitHub shows
   plain, selectable/copyable pretty-printed text.
 - **Search** — case-insensitive substring or regex search across the source
   or the results tree, with click-to-reveal on a hit.
-- **Right-click row menus** — copy a node's path, search from that scope, or
-  save just that node to a file.
+
+  ![Search results panel showing a match in the source tree](docs/images/screenshot-search.png)
+- **Right-click row menus** — copy a node's path, search from that scope,
+  save just that node to a file, or expand a whole subtree at once.
 - **Save to file** — the whole source document, the whole result set, or a
   single node, independently.
 - **Load however's convenient** — drag-and-drop, an **Open File…** picker,
@@ -44,16 +41,6 @@ the way — open them locally in a browser to read them rendered (GitHub shows
 - **Light and dark themes**, switchable from the toolbar.
 - **Keyboard shortcuts** — `Ctrl+Enter` run/apply, `Ctrl+F` search,
   `Ctrl+S` save (both scoped to whichever panel you last clicked).
-
-## Status
-
-**Phase 1** is implemented: full in-memory parsing, four query dialects, and
-a virtualized-tree GUI for both the source document and query results. It's
-solid for small-to-medium files.
-
-Multi-gigabyte files need Phase 2 (a memory-mapped, lazily-resolved index),
-which isn't built yet. See [`docs/decisions.html`](docs/decisions.html) for
-the full roadmap.
 
 ## Known limitations
 
@@ -66,15 +53,28 @@ the full roadmap.
   ```sh
   WAYLAND_DISPLAY= cargo run --release -p jsonquery_gui
   ```
+- Multi-gigabyte files are not yet backed by a memory-mapped, lazily-resolved
+  index, so very large documents load fully into memory. See
+  [Scaling beyond in-memory](docs/architecture.md#scaling-beyond-in-memory).
 
 ## Getting started
+
+### Homebrew (Linux)
+
+```sh
+brew tap nujufas/jsonquery-gui
+brew install jsonquery-gui
+```
+
+macOS builds aren't published yet, so the tap is Linux-only for now.
 
 ### Download a build
 
 Prebuilt Linux and Windows binaries are attached to each
-[GitHub Release](https://github.com/nujufas/jsonquery_gui/releases). You can
-also build them yourself with the scripts in [`build/`](build/) — see
-[Building](#building) below.
+[GitHub Release](https://github.com/nujufas/jsonquery_gui/releases). An AUR
+package (`jsonquery-gui-bin`) is also available for Arch-based distros — see
+[`packaging/aur/`](packaging/aur/). You can also build everything yourself
+with the scripts in [`build/`](build/) — see [Building](#building) below.
 
 ### Build from source
 
@@ -141,34 +141,22 @@ without pulling in a GUI toolkit:
 
 A Robot Framework GUI test suite (screen-driven, OCR-assisted) lives under
 [`test/`](test/README.md) — see that README for how to run it.
-
-### Test data
-
-[`scripts/gen_test_data.py`](scripts/gen_test_data.py) generates a large
-synthetic JSON or NDJSON file for exercising the app, with unicode and
-19-digit integer ids that exceed `f64`'s exact-integer range:
-
-```sh
-scripts/gen_test_data.py                                    # ~200k records to test-data/large.json
-scripts/gen_test_data.py --target-size 1GB -o test-data/big.json
-scripts/gen_test_data.py --format ndjson -n 1000000 -o test-data/events.ndjson
-```
-
-Each run also prints a handful of sample queries worth trying against the
-file it just generated.
+[`scripts/gen_test_data.py`](scripts/gen_test_data.py) generates large
+synthetic JSON/NDJSON files (with unicode and 19-digit integer ids) for
+exercising the app by hand.
 
 ## Architecture
 
-The design — pipeline, indexing strategy, concurrency model, crate layout —
-is written up in [`docs/`](docs/index.html):
+The design — pipeline, concurrency model, crate layout — is written up in
+[`docs/`](docs/index.md):
 
-- [`docs/index.html`](docs/index.html) — problem statement, goals, high-level shape.
-- [`docs/architecture.html`](docs/architecture.html) — the full system design.
-- [`docs/decisions.html`](docs/decisions.html) — the decisions that shaped the build, open risks, and the roadmap.
-- [`docs/query-engines.html`](docs/query-engines.html) — the query-dialect landscape and why these four were picked.
-
-(Open these locally in a browser — GitHub renders `.html` files as source, not as pages.)
+- [`docs/index.md`](docs/index.md) — problem statement, goals, high-level shape.
+- [`docs/architecture.md`](docs/architecture.md) — the full system design.
+- [`docs/query-engines.md`](docs/query-engines.md) — the query-dialect landscape and why these four were picked.
 
 ## License
 
 [MIT](LICENSE)
+
+Built with the help of [Claude](https://claude.com) — see
+[`docs/`](docs/index.md) for the architecture docs behind it.
