@@ -66,7 +66,9 @@ brew tap nujufas/jsonquery-gui
 brew install jsonquery-gui
 ```
 
-macOS builds aren't published yet, so the tap is Linux-only for now.
+macOS builds aren't published yet, so the tap is Linux-only for now. If
+Homebrew refuses the formula as an untrusted tap, run
+`brew trust nujufas/jsonquery-gui` first.
 
 ### Download a build
 
