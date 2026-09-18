@@ -10,6 +10,7 @@ use serde_json::Value;
 
 use crate::query_suggest::{apply_suggestion, QuerySuggest};
 use crate::tree_view::{RowAction, TreeView};
+use crate::tutorial::{LoadRequest, Tutorial};
 use crate::worker::{self, Command, Event, SearchRoot};
 
 /// Bounded live-preview cap (Architecture §7): the results tree never holds
@@ -57,6 +58,13 @@ pub struct App {
     /// The query box's autocomplete popup: current candidates, keyboard
     /// selection, and dismiss/re-arm state (see `query_suggest.rs`).
     query_suggest: QuerySuggest,
+
+    /// The tutorial window (a second native window) and its state.
+    tutorial: Tutorial,
+    /// The tutorial's "▶ Try it" replaced the source document and wants the
+    /// query run as soon as that new document has loaded (loading is
+    /// asynchronous, and finishing it cancels any query already running).
+    run_after_load: bool,
 
     /// Always a `Value::Array` — the accumulated (possibly capped) results
     /// of the current query, in the shape the results tree renders directly.
@@ -190,6 +198,8 @@ impl App {
             query_engine: None,
             last_resolved_engine: None,
             query_suggest: QuerySuggest::default(),
+            tutorial: Tutorial::default(),
+            run_after_load: false,
             results: Value::Array(Vec::new()),
             results_item_errors: 0,
             last_item_error: None,
@@ -273,10 +283,15 @@ impl App {
                     self.doc = Some(doc);
                     self.source_tree.reset();
                     self.invalidate_source_text();
+
+                    if std::mem::take(&mut self.run_after_load) {
+                        self.run_query();
+                    }
                 }
                 Event::LoadError(e) => {
                     self.loading = false;
                     self.load_error = Some(e);
+                    self.run_after_load = false;
                 }
                 Event::Saved(path) => {
                     self.save_error = None;
@@ -542,6 +557,10 @@ impl App {
     /// desktop app's menu-bar Find/Save act on whichever document window is
     /// frontmost, rather than requiring a dedicated shortcut per panel.
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::F1)) {
+            self.tutorial.open_or_focus(ctx);
+        }
+
         let find = ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::F));
         if find {
             match self.focused_panel {
@@ -769,6 +788,26 @@ impl App {
         self.last_query_cancelled = true;
     }
 
+    /// Apply what the tutorial window asked for: pin the engine to the
+    /// lesson's dialect (a bare `office.city` would otherwise be
+    /// auto-detected as jq), put the query in the box, and/or replace the
+    /// source document — running the query once that document has loaded.
+    fn apply_tutorial_request(&mut self, request: LoadRequest) {
+        if let Some(query) = request.query {
+            self.query_engine = Some(request.kind);
+            self.query_text = query.to_owned();
+            self.query_suggest.close();
+        }
+        match request.data {
+            Some(data) => {
+                self.run_after_load = request.run;
+                self.open_text(data.to_owned());
+            }
+            None if request.run => self.run_query(),
+            None => {}
+        }
+    }
+
     fn handle_drag_and_drop(&mut self, ui: &egui::Ui) -> bool {
         let (hovering, dropped_path) = ui.ctx().input(|i| {
             let hovering = !i.raw.hovered_files.is_empty();
@@ -818,7 +857,7 @@ impl App {
                 // rather than a fixed width — a long path should get to use
                 // the room a short one leaves empty, not sit truncated next
                 // to a mostly-blank toolbar.
-                let label_width = (ui.available_width() - 200.0).max(120.0);
+                let label_width = (ui.available_width() - 232.0).max(120.0);
                 ui.add(
                     egui::TextEdit::singleline(&mut label_ref)
                         .desired_width(label_width)
@@ -838,15 +877,16 @@ impl App {
             }
 
             // Claims whatever width is left after everything above, so the
-            // theme toggle (and, just to its left, the autocomplete toggle)
-            // sit pinned at the top-right corner regardless of how long the
-            // path/status text is.
+            // theme toggle (and, just to its left, the autocomplete toggle
+            // and the tutorial button) sit pinned at the top-right corner
+            // regardless of how long the path/status text is.
             ui.allocate_ui_with_layout(
                 egui::vec2(ui.available_width(), ui.spacing().interact_size.y),
                 egui::Layout::right_to_left(egui::Align::Center),
                 |ui| {
                     theme_toggle_button(ui);
                     autocomplete_toggle_button(ui, &mut self.query_suggest);
+                    tutorial_button(ui, &mut self.tutorial);
                 },
             );
         });
@@ -1661,6 +1701,22 @@ fn autocomplete_toggle_button(ui: &mut egui::Ui, suggest: &mut QuerySuggest) {
     }
 }
 
+/// Small 📖 button that opens the tutorial window (or brings it to the front
+/// if it's already open) — same single-icon-plus-hover-text shape as the
+/// autocomplete and theme buttons beside it. F1 does the same.
+fn tutorial_button(ui: &mut egui::Ui, tutorial: &mut Tutorial) {
+    if ui
+        .button("📖")
+        .on_hover_text(
+            "Tutorial — learn jq, JSON Pointer, JSONPath and JMESPath, with examples you can \
+             load and run here.\nF1 also opens it.",
+        )
+        .clicked()
+    {
+        tutorial.open_or_focus(ui.ctx());
+    }
+}
+
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.drain_events();
@@ -1746,6 +1802,10 @@ impl eframe::App for App {
             source_resp.response.rect,
             results_resp.response.rect,
         );
+
+        if let Some(request) = self.tutorial.show(ui.ctx()) {
+            self.apply_tutorial_request(request);
+        }
     }
 }
 
