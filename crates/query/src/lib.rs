@@ -25,6 +25,7 @@ pub mod jq;
 pub mod json_pointer;
 pub mod jsonpath;
 pub mod suggest;
+pub mod tutorial;
 
 pub use convert::{from_val, to_val};
 pub use jaq_json::Val;
@@ -59,7 +60,7 @@ pub enum QueryEvent {
 /// Which `QueryEngine` a query should run against — set explicitly via the
 /// UI's engine picker, or left to [`Kind::detect`] when none of its buttons
 /// is selected.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Kind {
     Jq,
     JsonPointer,

@@ -17,6 +17,13 @@ file (or paste JSON directly) and query it with **jq**, **JSON Pointer**,
   functions, each with a short doc string, toggleable from the toolbar.
 
   ![Autocomplete suggestions in the query box](docs/images/screenshot-autocomplete.png)
+- **Built-in tutorial** — the 📖 icon in the toolbar (or `F1`) opens a
+  separate window with a lesson tree for each dialect. Every lesson has short
+  examples with the query broken down piece by piece and a live result;
+  **▶ Try it** loads an example's data and query into the main window so you
+  can edit and experiment. See [Tutorial](docs/tutorial.md).
+
+  ![The tutorial window](docs/images/screenshot-tutorial.png)
 - **Streamed, cancellable queries** — results appear as jq produces them, so
   `first(...)`/`limit(...)` genuinely stop early; starting a new query aborts
   whatever was still running.
@@ -40,7 +47,8 @@ file (or paste JSON directly) and query it with **jq**, **JSON Pointer**,
   pasting JSON straight into the text area, or loading from a URL.
 - **Light and dark themes**, switchable from the toolbar.
 - **Keyboard shortcuts** — `Ctrl+Enter` run/apply, `Ctrl+F` search,
-  `Ctrl+S` save (both scoped to whichever panel you last clicked).
+  `Ctrl+S` save (both scoped to whichever panel you last clicked), `F1`
+  tutorial.
 
 ## Known limitations
 
@@ -103,7 +111,8 @@ cargo run --release -p jsonquery_gui
 2. Pick a query engine (or leave it on auto-detect) and write a query, e.g.
    `.users[] | select(.active) | {name, roles}` for jq, `/users/0` for
    Pointer, `$.users[*].name` for JSONPath, or `users[?active].name` for
-   JMESPath.
+   JMESPath. New to one of them? The 📖 tutorial has short lessons for all
+   four.
 3. Press **Run** (or `Ctrl+Enter`). Results stream into the right-hand
    panel — toggle it between **Tree** and **Text**, search it, or save it.
 

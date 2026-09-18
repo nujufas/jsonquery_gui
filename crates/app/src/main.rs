@@ -6,6 +6,7 @@
 mod app;
 mod query_suggest;
 mod tree_view;
+mod tutorial;
 mod worker;
 
 /// Must match the AppImage's `.desktop` file (`StartupWMClass=jsonquery_gui`,
@@ -14,17 +15,20 @@ mod worker;
 /// stick.
 const APP_ID: &str = "jsonquery_gui";
 
-fn main() -> eframe::Result {
-    let icon = eframe::icon_data::from_png_bytes(include_bytes!("../../../assets/icon.png"))
-        .expect("bundled icon should be a valid PNG");
+/// The window icon, shared by the main window and the tutorial window.
+fn app_icon() -> egui::IconData {
+    eframe::icon_data::from_png_bytes(include_bytes!("../../../assets/icon.png"))
+        .expect("bundled icon should be a valid PNG")
+}
 
+fn main() -> eframe::Result {
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1200.0, 800.0])
             .with_min_inner_size([640.0, 420.0])
             .with_title("jsonquery")
             .with_app_id(APP_ID)
-            .with_icon(icon),
+            .with_icon(app_icon()),
         ..Default::default()
     };
 
