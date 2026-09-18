@@ -39,6 +39,11 @@ file (or paste JSON directly) and query it with **jq**, **JSON Pointer**,
   or the results tree, with click-to-reveal on a hit.
 
   ![Search results panel showing a match in the source tree](docs/images/screenshot-search.png)
+- **Find in Source** — right-click a result row to see where it came from.
+  The row's key and value are matched against the source, and for array
+  elements their position: one hit is revealed directly, several are listed
+  with the best guess selected, and a computed value falls back to a text
+  search.
 - **Right-click row menus** — copy a node's path, search from that scope,
   save just that node to a file, or expand a whole subtree at once.
 - **Save to file** — the whole source document, the whole result set, or a

@@ -21,8 +21,8 @@ use serde_json::Value;
 pub enum RowAction {
     /// "Save…" was chosen from a row's context menu.
     Save(NodePath),
-    /// "Find in Source" was chosen from a results row's context menu — look
-    /// for this value somewhere in the loaded source document.
+    /// "Find in Source" was chosen from a results row's context menu — work
+    /// out where this row's key/value came from in the loaded source document.
     FindInSource(NodePath),
     /// "Search…" was chosen from a row's context menu — open a find dialog
     /// that searches the whole tree, not just this row.

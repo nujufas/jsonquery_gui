@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use anyhow::Context;
 use crossbeam_channel::{Receiver, Sender};
 use jsonquery_core::engine::QueryEvent;
-use jsonquery_core::{Document, DocumentSource, NodePath};
+use jsonquery_core::{Document, DocumentSource, NodePath, SourceMatches};
 
 /// Cap on a URL download's response body, matching the "a few GB" v1 scale
 /// ceiling (Architecture §3) — protects against a malicious or misbehaving
@@ -71,11 +71,15 @@ pub enum Command {
         results: serde_json::Value,
         path: PathBuf,
     },
-    /// Look for a value structurally equal to `target` somewhere in `doc`,
-    /// for the results panel's "Find in Source" row action.
+    /// Work out where a results row came from in `doc`, for the results
+    /// panel's "Find in Source" row action: `target` is the row's value, and
+    /// the row sits at `rel` below the `nth` item of the query's result
+    /// stream (both only used to rank candidates).
     FindInSource {
         doc: Arc<Document>,
         target: serde_json::Value,
+        nth: usize,
+        rel: NodePath,
         gen: u64,
     },
     /// Search a whole tree for `text`, for the "Search…" row action.
@@ -115,7 +119,7 @@ pub enum Event {
     SaveError(String),
     Found {
         gen: u64,
-        path: Option<NodePath>,
+        matches: SourceMatches,
     },
     SearchDone {
         gen: u64,
@@ -197,9 +201,15 @@ pub fn spawn(cmd_rx: Receiver<Command>, evt_tx: Sender<Event>, wake: impl Fn() +
                         Err(e) => send(&evt_tx, Event::SaveError(format!("{e:#}")), &wake),
                     }
                 }
-                Command::FindInSource { doc, target, gen } => {
-                    let path = jsonquery_core::find_path(&doc.root, &target);
-                    send(&evt_tx, Event::Found { gen, path }, &wake);
+                Command::FindInSource {
+                    doc,
+                    target,
+                    nth,
+                    rel,
+                    gen,
+                } => {
+                    let matches = jsonquery_core::locate(&doc.root, &target, nth, &rel);
+                    send(&evt_tx, Event::Found { gen, matches }, &wake);
                 }
                 Command::Search {
                     root,

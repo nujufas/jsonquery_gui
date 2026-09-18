@@ -5,7 +5,9 @@ use std::time::Duration;
 
 use crossbeam_channel::{Receiver, Sender};
 use eframe::egui;
-use jsonquery_core::{path_string, resolve, Document, DocumentSource, NodePath, PathSegment};
+use jsonquery_core::{
+    path_string, resolve, Document, DocumentSource, NodePath, PathSegment, SourceMatches,
+};
 use serde_json::Value;
 
 use crate::query_suggest::{apply_suggestion, QuerySuggest};
@@ -40,6 +42,9 @@ pub struct App {
     find_gen: u64,
     finding: bool,
     find_message: Option<String>,
+    /// The results row the in-flight (or last) "Find in Source" was asked
+    /// about, as a jq-style path — the heading of its candidate list.
+    find_row: String,
 
     query_text: String,
     query_gen: u64,
@@ -131,9 +136,25 @@ pub struct App {
     searching: bool,
     search_error: Option<String>,
     search_results: Vec<SearchMatch>,
+    /// Which entry of `search_results` is the one currently revealed in its
+    /// tree — drawn highlighted in the panel: the best guess of a "Find in
+    /// Source" (revealed as soon as it's found), then whatever was clicked.
+    search_selected: Option<usize>,
     /// Whether the bottom search-results panel is shown; set when a search
     /// starts, cleared by its "Close" button.
     search_panel_open: bool,
+    /// `Some` while that panel lists "Find in Source" candidates (in
+    /// `search_results`) rather than "Search…" hits.
+    find_panel: Option<FindPanel>,
+}
+
+/// What a "Find in Source" candidate list is a list of, for its heading.
+struct FindPanel {
+    /// The results row that was looked up, as a jq-style path.
+    row: String,
+    /// The text searched for when no node held an equal value (the row's
+    /// value was computed), so the list is only an approximation.
+    searched_for: Option<String>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -190,6 +211,7 @@ impl App {
             find_gen: 0,
             finding: false,
             find_message: None,
+            find_row: String::new(),
             query_text: String::new(),
             query_gen: 0,
             active_cancel: None,
@@ -236,7 +258,9 @@ impl App {
             searching: false,
             search_error: None,
             search_results: Vec::new(),
+            search_selected: None,
             search_panel_open: false,
+            find_panel: None,
         }
     }
 
@@ -301,20 +325,30 @@ impl App {
                     self.last_saved = None;
                     self.save_error = Some(e);
                 }
-                Event::Found { gen, path } => {
+                Event::Found { gen, matches } => {
                     if gen != self.find_gen {
                         continue;
                     }
                     self.finding = false;
-                    match path {
-                        Some(p) => {
-                            self.find_message = None;
-                            self.source_tree.reveal(p);
-                            self.source_view = ViewMode::Tree;
-                        }
-                        None => {
-                            self.find_message = Some("Not found in source.".to_string());
-                        }
+                    self.find_message = None;
+                    let SourceMatches {
+                        paths,
+                        searched_for,
+                    } = matches;
+                    let Some(best) = paths.first().cloned() else {
+                        self.find_message = Some("Not found in source.".to_string());
+                        continue;
+                    };
+                    // An exact match is revealed straight away: the only one,
+                    // or the best guess of several. A text-search fallback is
+                    // approximate, so it's only listed — it shouldn't yank
+                    // the Source tree somewhere on a guess.
+                    if searched_for.is_none() {
+                        self.source_tree.reveal(best);
+                        self.source_view = ViewMode::Tree;
+                    }
+                    if searched_for.is_some() || paths.len() > 1 {
+                        self.show_find_list(paths, searched_for);
                     }
                 }
                 Event::SearchDone { gen, matches } => {
@@ -531,25 +565,57 @@ impl App {
         }
     }
 
-    /// "Find in Source": look for the results row at `node_path`'s value
-    /// somewhere in the loaded source document, and if found,
-    /// expand/scroll/highlight it there (Architecture-style: the search runs
-    /// on the worker thread since the source document can be large, and is
-    /// discarded if it's stale by the time it comes back — same `gen`
-    /// pattern as queries).
+    /// "Find in Source": work out where the results row at `node_path` came
+    /// from in the loaded source document (`jsonquery_core::locate`). One
+    /// exact hit is expanded/scrolled/highlighted there; several — or a
+    /// text-search fallback for a computed value — are listed in the bottom
+    /// panel (`Event::Found`). The lookup runs on the worker thread since
+    /// the source document can be large, and is discarded if it's stale by
+    /// the time it comes back — same `gen` pattern as queries.
     fn navigate_to_source(&mut self, node_path: &NodePath) {
         let Some(doc) = self.doc.clone() else { return };
+        // A results row's first segment is which query output it belongs to;
+        // the results root, the whole result set, isn't anything the source
+        // could hold — and isn't worth cloning to find that out.
+        let Some((&PathSegment::Index(nth), rel)) = node_path.split_first() else {
+            self.find_message = Some("Not found in source.".to_string());
+            return;
+        };
         let Some(target) = resolve(&self.results, node_path) else {
             return;
         };
         self.find_gen += 1;
         self.finding = true;
         self.find_message = None;
+        self.find_row = path_string(node_path);
         let _ = self.cmd_tx.send(Command::FindInSource {
             doc,
             target: target.clone(),
+            nth,
+            rel: rel.to_vec(),
             gen: self.find_gen,
         });
+    }
+
+    /// List `paths` — Source nodes, best guess first — in the bottom panel as
+    /// the candidates for the results row `self.find_row`, in place of
+    /// whatever "Search…" hits it showed.
+    fn show_find_list(&mut self, paths: Vec<NodePath>, searched_for: Option<String>) {
+        // Supersede any "Search…" still in flight, so its late hits can't
+        // overwrite this list under the wrong heading.
+        self.search_gen += 1;
+        self.searching = false;
+        self.search_error = None;
+        let root = self.doc.as_ref().map(|d| &d.root);
+        self.search_results = build_search_matches(PanelKind::Source, root, paths);
+        // Only an exact match was revealed (see `Event::Found`), and it was
+        // the first entry.
+        self.search_selected = searched_for.is_none().then_some(0);
+        self.find_panel = Some(FindPanel {
+            row: self.find_row.clone(),
+            searched_for,
+        });
+        self.search_panel_open = true;
     }
 
     /// Ctrl+F (search) and Ctrl+S (save) act on `self.focused_panel` — the
@@ -626,7 +692,7 @@ impl App {
             self.pending_results_search = true;
             self.searching = true;
             self.search_error = None;
-            self.search_results.clear();
+            self.clear_hits();
             self.search_panel_open = true;
             return;
         }
@@ -641,7 +707,7 @@ impl App {
         self.search_gen += 1;
         self.searching = true;
         self.search_error = None;
-        self.search_results.clear();
+        self.clear_hits();
         self.search_panel_open = true;
         let _ = self.cmd_tx.send(Command::Search {
             root,
@@ -658,8 +724,16 @@ impl App {
         self.search_gen += 1;
         self.searching = false;
         self.search_error = None;
-        self.search_results.clear();
+        self.clear_hits();
         self.search_panel_open = false;
+    }
+
+    /// Empty the bottom panel's hit list, along with everything that
+    /// describes it (which entry is selected, and what it's a list of).
+    fn clear_hits(&mut self) {
+        self.search_results.clear();
+        self.search_selected = None;
+        self.find_panel = None;
     }
 
     /// Discard any in-flight or displayed source "Text" render — the
@@ -982,20 +1056,37 @@ impl App {
     /// The bottom "Search results" panel, populated by the last completed
     /// search — a Notepad++-style "Find All" list rather than jumping
     /// straight to one hit. Clicking a match reveals it in its owning tree.
+    /// It doubles as the candidate list of a "Find in Source" that had more
+    /// than one answer (`self.find_panel`).
     fn search_results_panel(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            let mut heading = format!("Search results — {}", self.search_target.label());
-            if !self.search_input.is_empty() {
-                heading.push_str(&format!(" \"{}\"", self.search_input));
-            }
-            if self.search_regex {
-                heading.push_str(" (regex)");
-            }
+            let heading = match &self.find_panel {
+                Some(find) => format!("Find in Source — {}", find.row),
+                None => {
+                    let mut heading = format!("Search results — {}", self.search_target.label());
+                    if !self.search_input.is_empty() {
+                        heading.push_str(&format!(" \"{}\"", self.search_input));
+                    }
+                    if self.search_regex {
+                        heading.push_str(" (regex)");
+                    }
+                    heading
+                }
+            };
             ui.strong(heading);
             if self.searching {
                 ui.spinner();
             } else if self.search_error.is_none() {
-                ui.weak(format!("{} match(es)", self.search_results.len()));
+                let mut count = format!("{} match(es)", self.search_results.len());
+                match &self.find_panel {
+                    Some(FindPanel {
+                        searched_for: Some(text),
+                        ..
+                    }) => count.push_str(&format!(" — no exact match, text search for \"{text}\"")),
+                    Some(_) => count.push_str(" — best match first"),
+                    None => {}
+                }
+                ui.weak(count);
             }
 
             ui.allocate_ui_with_layout(
@@ -1022,30 +1113,48 @@ impl App {
             return;
         }
 
-        let mut reveal: Option<(PanelKind, NodePath)> = None;
+        let mut reveal: Option<(usize, PanelKind, NodePath)> = None;
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                for m in &self.search_results {
+                for (i, m) in self.search_results.iter().enumerate() {
                     let text = format!(
                         "[{}]  {}   {}",
                         m.target.label(),
                         path_string(&m.path),
                         m.preview
                     );
-                    if ui
-                        .add(
-                            egui::Label::new(egui::RichText::new(text).monospace())
-                                .sense(egui::Sense::click()),
-                        )
-                        .clicked()
-                    {
-                        reveal = Some((m.target, m.path.clone()));
+                    // Reserve the highlight's slot before the label so it's
+                    // painted behind the text; same tint the trees use for a
+                    // revealed row.
+                    let full_width = ui.available_width();
+                    let highlight = ui.painter().add(egui::Shape::Noop);
+                    let resp = ui.add(
+                        egui::Label::new(egui::RichText::new(text).monospace())
+                            .sense(egui::Sense::click()),
+                    );
+                    if self.search_selected == Some(i) {
+                        let row = egui::Rect::from_min_size(
+                            resp.rect.min,
+                            egui::vec2(full_width.max(resp.rect.width()), resp.rect.height()),
+                        );
+                        ui.painter().set(
+                            highlight,
+                            egui::Shape::rect_filled(
+                                row,
+                                2.0,
+                                ui.visuals().selection.bg_fill.linear_multiply(0.5),
+                            ),
+                        );
+                    }
+                    if resp.clicked() {
+                        reveal = Some((i, m.target, m.path.clone()));
                     }
                 }
             });
 
-        if let Some((target, path)) = reveal {
+        if let Some((i, target, path)) = reveal {
+            self.search_selected = Some(i);
             match target {
                 PanelKind::Source => {
                     self.source_tree.reveal(path);

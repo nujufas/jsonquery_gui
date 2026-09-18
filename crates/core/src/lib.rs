@@ -5,7 +5,7 @@ pub mod view;
 
 pub use document::{load, load_text, Document, DocumentSource};
 pub use tree::{
-    find_path, flatten_visible, new_expanded_at_root, path_string, pretty_print_bounded, resolve,
-    search, ExpandState, NodePath, PathSegment, RowInfo, ValueKind,
+    flatten_visible, locate, new_expanded_at_root, path_string, pretty_print_bounded, resolve,
+    search, ExpandState, NodePath, PathSegment, RowInfo, SourceMatches, ValueKind,
 };
 pub use view::ValueView;
