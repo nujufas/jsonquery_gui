@@ -231,9 +231,16 @@ visible, rather than assuming one right-click always opens it.
 | TC-SRCH-005 | Hit line format + click-to-reveal | P1 | **Passing** | `suites/search/` |
 | TC-SRCH-006 | 5,000-match cap, no notice shown | P3 | Not implemented — constructing a 5,000+-match fixture for one P3 case wasn't worth the added suite runtime | `suites/search/` |
 | TC-SRCH-007 | Search invalidated by new load/query/Clear | P3 | **Passing** (Clear sub-case only, as TC-SRCH-007c — the new-load/new-query sub-cases weren't implemented: distinguishing "invalidated" from "just not re-shown yet" reliably needs more than this harness's coarse OCR checks) | `suites/search/` |
-| TC-SRCH-020 | Find in Source: success reveal | P1 | **Passing** | `suites/search/` |
+| TC-SRCH-020 | Find in Source: single exact hit revealed directly | P1 | **Passing** | `suites/search/` |
 | TC-SRCH-021 | Find in Source: not-found (non-error) | P1 | **Passing** | `suites/search/` |
 | TC-SRCH-022 | Unavailable on Source rows — cross-ref TC-CTX-001 | P2 | **Passing** (covered by TC-CTX-001 — duplicate by design, no separate test) | `suites/context_menus/` |
+| TC-SRCH-023 | Find in Source: several hits listed, best selected + revealed | P1 | **Passing** | `suites/search/` |
+| TC-SRCH-024 | Find in Source: clicking another candidate moves selection + reveal | P1 | **Passing** | `suites/search/` |
+| TC-SRCH-025 | Find in Source: transformed string falls back to text search, listed only | P1 | **Passing** | `suites/search/` |
+| TC-SRCH-026 | A new Search replaces a Find in Source list | P3 | **Passing** | `suites/search/` |
+| TC-SRCH-027 | Find in Source: nested key/value row lists its same-key matches, nth selected | P1 | **Passing** | `suites/search/` |
+| TC-SRCH-028 | Find in Source: nested row's other match picked from the list | P1 | **Passing** | `suites/search/` |
+| TC-SRCH-029 | Find in Source: nested row whose key picks out one node jumps to it | P1 | **Passing** | `suites/search/` |
 
 **Confirmed during implementation, the two biggest findings in this whole
 second pass**: (1) the search-results panel **sizes itself to its content**
@@ -288,17 +295,17 @@ hit line below it — clicking ".name" (unique to the hit line) instead.
 
 ## Coverage summary
 
-- Total test cases defined: **124** distinct IDs (counting `TC-TOOL-007a-d`
+- Total test cases defined: **131** distinct IDs (counting `TC-TOOL-007a-d`
   as one row of four data-driven variants) across 10 feature areas. (107 from
   the original requirements pass, plus 17 query-correctness cases —
   TC-QRY-023–027, 034–036, 042–045, 052–056 — added in the third
   implementation pass to broaden per-engine query coverage beyond the
   original auto-detect/error-semantics focus.)
 - P1 (release-blocking core correctness): 26.
-- **91 test cases actually implemented and run**, across 10 suites under
+- **98 test cases actually implemented and run**, across 10 suites under
   `test/suites/` — `launch_and_window` (4), `opening_sources` (12),
   `query_engines` (39), `toolbar_and_status` (5), `tree_view` (4),
-  `text_view` (7), `context_menus` (5), `search` (9), `keyboard_shortcuts`
+  `text_view` (7), `context_menus` (5), `search` (16), `keyboard_shortcuts`
   (4), `saving` (2) — **all passing**, confirmed green across multiple
   consecutive full-suite runs via `test/run.sh` during implementation (see
   00_test_strategy.md's flakiness note for the residual, mitigated-not-
@@ -306,7 +313,7 @@ hit line below it — clicking ".name" (unique to the hit line) instead.
   under TC-QRY-044). A further 8 requirement IDs are marked Passing by
   cross-reference to one of those 91 (same underlying code path, deliberately
   not re-implemented as a separate test — see each area's own note above),
-  for **99 of the 124 IDs covered**.
+  for **106 of the 131 IDs covered**.
 - **Blocked: 12** — every case needing the native Open File or Save dialog to
   actually complete (TC-OPEN-001/002, TC-CTX-004, TC-SAVE-001/003/004/006/
   007/008/009/010, TC-KEY-003). Root cause confirmed and documented in

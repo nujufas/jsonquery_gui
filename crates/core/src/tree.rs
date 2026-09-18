@@ -186,33 +186,138 @@ fn is_bare_ident(k: &str) -> bool {
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
-/// Find the first node in `root` (in depth-first, pre-order traversal) whose
-/// value is structurally equal to `target`, and return its path. This is a
-/// best-effort way to locate a query result back in the source document:
-/// most queries (selection, filtering, field access) pass matched values
-/// through unchanged, so an exact-value search finds the right node without
-/// the query engine needing to track provenance for every result. Values
-/// synthesized by a query (`add`, string interpolation, computed numbers,
-/// ...) generally won't be found — there's no single "source location" for
-/// those, so no match is a reasonable, honest outcome.
-pub fn find_path<V: ValueView>(root: V, target: &Value) -> Option<NodePath> {
-    let mut path = Vec::new();
-    find_path_rec(root, target, &mut path).then_some(path)
+/// Where a results row's value probably came from in the source document —
+/// what [`locate`] returns.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct SourceMatches {
+    /// Candidate locations, best guess first; empty if nothing was found.
+    pub paths: Vec<NodePath>,
+    /// `None` when every path holds a value equal to the row's. `Some(text)`
+    /// when no node did — the value was presumably computed — and `paths` are
+    /// instead the hits of a plain [`search`] for `text`.
+    pub searched_for: Option<String>,
 }
 
-fn find_path_rec<V: ValueView>(value: V, target: &Value, path: &mut NodePath) -> bool {
+/// Locate a query result back in the source document, for the results
+/// panel's "Find in Source". `target` is the clicked row's value; the row sits
+/// at `rel` (its own key/index path) below the `nth` item of the query's
+/// result stream. `nth` is a position in the results, not in the source, so
+/// like `rel` it is only a hint for ordering candidates (see [`rank`]).
+///
+/// Most queries (selection, filtering, field access) pass values through
+/// unchanged, without the query engine having to track provenance for each
+/// result, so:
+///
+/// 1. Look for every node equal to `target` — key and value together: the
+///    ones under the same trailing keys/indices as the row are preferred
+///    ([`rank`]), so a repeated value is told apart by its key, and an array
+///    element by its index.
+/// 2. A value the query synthesized (`add`, string interpolation, ...) equals
+///    nothing, so the fallback is a plain text [`search`] — for the value if
+///    it's a string (it may have been lower-cased, trimmed, sliced, ...), else
+///    for the row's key — ranked the same way.
+///
+/// If both find nothing there is no single "source location" to point at, and
+/// an empty result is the honest outcome.
+pub fn locate<V: ValueView + Clone>(
+    root: V,
+    target: &Value,
+    nth: usize,
+    rel: &[PathSegment],
+) -> SourceMatches {
+    let mut exact = Vec::new();
+    collect_equal(root.clone(), target, &mut Vec::new(), &mut exact);
+    if !exact.is_empty() {
+        return SourceMatches {
+            paths: rank(exact, rel, nth),
+            searched_for: None,
+        };
+    }
+
+    let string_text = match target {
+        Value::String(s) => Some(s.trim()),
+        _ => None,
+    };
+    let key_text = match rel.last() {
+        Some(PathSegment::Key(k)) => Some(k.as_str()),
+        _ => None,
+    };
+    for text in string_text
+        .into_iter()
+        .chain(key_text)
+        .filter(|t| !t.is_empty())
+    {
+        // A plain (non-regex) search has no way to fail.
+        let hits = search(root.clone(), text, false).unwrap_or_default();
+        if !hits.is_empty() {
+            return SourceMatches {
+                paths: rank(hits, rel, nth),
+                searched_for: Some(text.to_string()),
+            };
+        }
+    }
+    SourceMatches::default()
+}
+
+/// Every node in `root` structurally equal to `target`, depth-first
+/// pre-order, capped at [`MAX_SEARCH_MATCHES`].
+fn collect_equal<V: ValueView>(
+    value: V,
+    target: &Value,
+    path: &mut NodePath,
+    out: &mut Vec<NodePath>,
+) {
+    if out.len() >= MAX_SEARCH_MATCHES {
+        return;
+    }
     if structurally_equal(&value, target) {
-        return true;
+        // Nothing inside a node equal to `target` can itself equal `target`,
+        // so there's no point walking down into it.
+        out.push(path.clone());
+        return;
     }
     for (child_key, child) in value.iter_children() {
         let child_key = child_key.expect("iter_children yields a key/index for every child");
         path.push(child_key);
-        if find_path_rec(child, target, path) {
-            return true;
-        }
+        collect_equal(child, target, path, out);
         path.pop();
     }
-    false
+}
+
+/// Order candidate source locations for one results row, best guess first.
+///
+/// A candidate that shares more trailing segments with the row's own path
+/// (`rel`, below its query output) is better — for a row that is element 2 of
+/// a `tags` array, `.tags[2]` beats `.tags[0]` — and only the best-sharing
+/// group is kept, so an equal value under a different key drops out whenever
+/// one under the same key exists. Within that group a candidate whose
+/// innermost array index (above the shared segments) is `nth`, the query
+/// output's own position, comes first: the n-th output of a `.users[]`-style
+/// iteration is usually `users[n]`. Ties keep document order.
+fn rank(paths: Vec<NodePath>, rel: &[PathSegment], nth: usize) -> Vec<NodePath> {
+    let shared = |p: &NodePath| {
+        p.iter()
+            .rev()
+            .zip(rel.iter().rev())
+            .take_while(|(a, b)| a == b)
+            .count()
+    };
+    let best = paths.iter().map(shared).max().unwrap_or(0);
+
+    let mut ranked: Vec<(bool, NodePath)> = paths
+        .into_iter()
+        .filter(|p| shared(p) == best)
+        .map(|p| {
+            let innermost_index = p[..p.len() - best].iter().rev().find_map(|seg| match seg {
+                PathSegment::Index(i) => Some(*i),
+                PathSegment::Key(_) => None,
+            });
+            (innermost_index == Some(nth), p)
+        })
+        .collect();
+    // Stable, so document order survives within each half.
+    ranked.sort_by_key(|(same_position, _)| !same_position);
+    ranked.into_iter().map(|(_, p)| p).collect()
 }
 
 /// Whether `value` and `target` describe the same JSON structure — the same
@@ -221,10 +326,14 @@ fn find_path_rec<V: ValueView>(value: V, target: &Value, path: &mut NodePath) ->
 /// pairs, order-independent), but computed one child at a time through
 /// [`ValueView`] instead of requiring `value` to already be a `Value`.
 fn structurally_equal<V: ValueView>(value: &V, target: &Value) -> bool {
+    // Cheap rejection first: `locate` runs this on every node of the document,
+    // and the scalar arm below clones the node's value.
+    if value.kind() != ValueKind::of(target) {
+        return false;
+    }
     match target {
         Value::Array(items) => {
-            value.kind() == ValueKind::Array
-                && value.child_count() == items.len()
+            value.child_count() == items.len()
                 && items.iter().enumerate().all(|(i, item)| {
                     value
                         .child_at(i)
@@ -232,8 +341,7 @@ fn structurally_equal<V: ValueView>(value: &V, target: &Value) -> bool {
                 })
         }
         Value::Object(map) => {
-            value.kind() == ValueKind::Object
-                && value.child_count() == map.len()
+            value.child_count() == map.len()
                 && map.iter().all(|(k, v)| {
                     value
                         .child_by_key(k)
@@ -483,21 +591,157 @@ mod tests {
         assert_eq!(path_string(&[PathSegment::Key("a-b".into())]), ".[\"a-b\"]");
     }
 
-    #[test]
-    fn find_path_locates_an_equal_value() {
-        let v = json!({"a": [{"name": "Ada"}, {"name": "Alan"}]});
-        let path = find_path(&v, &json!({"name": "Alan"})).unwrap();
-        assert_eq!(
-            path,
-            vec![PathSegment::Key("a".into()), PathSegment::Index(1)]
-        );
-        assert_eq!(resolve(&v, &path), Some(&json!({"name": "Alan"})));
+    fn key(k: &str) -> PathSegment {
+        PathSegment::Key(k.into())
+    }
+
+    fn idx(i: usize) -> PathSegment {
+        PathSegment::Index(i)
     }
 
     #[test]
-    fn find_path_returns_none_for_a_value_not_present() {
+    fn locate_finds_an_equal_container() {
+        let v = json!({"a": [{"name": "Ada"}, {"name": "Alan"}]});
+        let found = locate(&v, &json!({"name": "Alan"}), 0, &[]);
+        assert_eq!(found.paths, vec![vec![key("a"), idx(1)]]);
+        assert_eq!(found.searched_for, None);
+        assert_eq!(resolve(&v, &found.paths[0]), Some(&json!({"name": "Alan"})));
+    }
+
+    #[test]
+    fn locate_returns_nothing_for_a_value_not_present() {
         let v = json!({"a": 1});
-        assert_eq!(find_path(&v, &json!("nope")), None);
+        assert_eq!(locate(&v, &json!("nope"), 0, &[]), SourceMatches::default());
+        // A computed number has no text worth searching for, and no key.
+        assert_eq!(locate(&v, &json!(31), 0, &[]), SourceMatches::default());
+    }
+
+    #[test]
+    fn locate_lists_every_equal_value_in_document_order() {
+        let v = json!({"a": {"city": "Paris"}, "b": [{"city": "Paris"}, {"city": "Rome"}]});
+        // Output 9: no candidate sits at array index 9, so nothing is promoted.
+        let found = locate(&v, &json!("Paris"), 9, &[]);
+        assert_eq!(
+            found.paths,
+            vec![
+                vec![key("a"), key("city")],
+                vec![key("b"), idx(0), key("city")]
+            ]
+        );
+    }
+
+    #[test]
+    fn locate_puts_the_nth_element_first_for_the_nth_output() {
+        let v = json!({"users": [
+            {"country": "US"}, {"country": "UK"}, {"country": "US"}, {"country": "US"}
+        ]});
+        // `.users[].country` yields US, UK, US, US; the row is output 2.
+        let found = locate(&v, &json!("US"), 2, &[]);
+        assert_eq!(
+            found.paths,
+            vec![
+                vec![key("users"), idx(2), key("country")],
+                vec![key("users"), idx(0), key("country")],
+                vec![key("users"), idx(3), key("country")],
+            ]
+        );
+    }
+
+    #[test]
+    fn locate_prefers_nodes_under_the_same_key() {
+        let v = json!({"a": {"name": "x"}, "b": {"alias": "x"}, "c": {"name": "x"}});
+        // Row `.name` = "x": the `alias` node has the value but not the key.
+        let found = locate(&v, &json!("x"), 0, &[key("name")]);
+        assert_eq!(
+            found.paths,
+            vec![vec![key("a"), key("name")], vec![key("c"), key("name")]]
+        );
+        assert_eq!(found.searched_for, None);
+    }
+
+    #[test]
+    fn locate_keeps_value_only_matches_when_no_node_shares_the_key() {
+        let v = json!({"a": {"name": "x"}, "b": {"alias": "x"}});
+        // The query renamed `name` to `n`.
+        let found = locate(&v, &json!("x"), 0, &[key("n")]);
+        assert_eq!(
+            found.paths,
+            vec![vec![key("a"), key("name")], vec![key("b"), key("alias")]]
+        );
+        assert_eq!(found.searched_for, None);
+    }
+
+    #[test]
+    fn locate_matches_the_array_index_of_an_element_row() {
+        let v = json!({"users": [{"tags": ["a", "b"]}, {"tags": ["b", "a"]}]});
+        // Row `.tags[1]` = "b": `users[1].tags[0]` is also "b", but sits at
+        // the wrong index.
+        let found = locate(&v, &json!("b"), 0, &[key("tags"), idx(1)]);
+        assert_eq!(
+            found.paths,
+            vec![vec![key("users"), idx(0), key("tags"), idx(1)]]
+        );
+    }
+
+    #[test]
+    fn locate_puts_the_nth_output_first_among_nodes_under_the_same_key() {
+        let v = json!({
+            "hq": {"code": "00100"},
+            "depots": [{}, {}, {"code": "75001"}],
+            "sites": [
+                {"city": "Paris", "zip": "75001"},
+                {"city": "Rome", "zip": "00100"},
+                {"city": "Lyon", "zip": "75001"},
+            ],
+        });
+        // Row `.zip` of output 2 of `.sites[]`. `depots[2].code` holds the
+        // same value at the same index, but under another key, so it is out.
+        let found = locate(&v, &json!("75001"), 2, &[key("zip")]);
+        assert_eq!(
+            found.paths,
+            vec![
+                vec![key("sites"), idx(2), key("zip")],
+                vec![key("sites"), idx(0), key("zip")],
+            ]
+        );
+        // Row `.zip` of output 0 of `.sites[1]`: `hq.code` is out too, which
+        // leaves a single exact candidate.
+        let found = locate(&v, &json!("00100"), 0, &[key("zip")]);
+        assert_eq!(found.paths, vec![vec![key("sites"), idx(1), key("zip")]]);
+    }
+
+    #[test]
+    fn locate_falls_back_to_a_text_search_for_a_transformed_string() {
+        let v = json!({"name": "Alice", "other": 1});
+        // `.name | ascii_downcase` -> "alice": no equal node, but the search
+        // is case-insensitive.
+        let found = locate(&v, &json!("alice"), 0, &[]);
+        assert_eq!(found.paths, vec![vec![key("name")]]);
+        assert_eq!(found.searched_for.as_deref(), Some("alice"));
+    }
+
+    #[test]
+    fn locate_falls_back_to_the_key_when_the_string_is_nowhere() {
+        let v = json!({"users": [{"name": "Ann"}, {"name": "Bob"}, {"name": "Cy"}]});
+        // Row `.name` of output 1 of `.users[] | {name: (.name + "!")}`:
+        // "Bob!" is computed, so the search falls through to the key `name` —
+        // and the output's position puts `users[1].name` first.
+        let found = locate(&v, &json!("Bob!"), 1, &[key("name")]);
+        assert_eq!(found.searched_for.as_deref(), Some("name"));
+        assert_eq!(
+            found.paths,
+            vec![
+                vec![key("users"), idx(1), key("name")],
+                vec![key("users"), idx(0), key("name")],
+                vec![key("users"), idx(2), key("name")],
+            ]
+        );
+    }
+
+    #[test]
+    fn locate_does_not_search_for_a_blank_string() {
+        let v = json!({"a": "x"});
+        assert_eq!(locate(&v, &json!("  "), 0, &[]), SourceMatches::default());
     }
 
     #[test]

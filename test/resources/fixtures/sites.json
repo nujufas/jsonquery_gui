@@ -1,0 +1,9 @@
+{
+  "hq": {"code": "00100"},
+  "depots": [{}, {}, {"code": "75001"}],
+  "sites": [
+    {"city": "Paris", "zip": "75001"},
+    {"city": "Rome", "zip": "00100"},
+    {"city": "Lyon", "zip": "75001"}
+  ]
+}

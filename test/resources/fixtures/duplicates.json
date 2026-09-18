@@ -1,0 +1,7 @@
+{
+  "users": [
+    {"name": "Ann", "country": "US"},
+    {"name": "Bob", "country": "UK"},
+    {"name": "Cy", "country": "US"}
+  ]
+}
