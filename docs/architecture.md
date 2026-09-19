@@ -133,7 +133,7 @@ jsonquery/
 ├── Cargo.toml                # workspace
 ├── crates/
 │   ├── core/                 # file ingest, the tree data layer
-│   ├── query/                # the four query engines + suggest.rs (autocomplete)
+│   ├── query/                # the four query engines + suggest.rs (autocomplete) + highlight.rs (query colouring)
 │   └── app/                  # eframe app: panels, virtualized tree widget, worker thread
 ├── docs/                     # this site
 └── benches/                  # criterion benchmarks against synthetic large files

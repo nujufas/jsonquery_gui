@@ -18,21 +18,11 @@ use eframe::egui::{self, text::LayoutJob, text::TextFormat, Color32, RichText, T
 use jsonquery_query::tutorial::{self as content, Example, Lesson, Outcome, Span};
 use jsonquery_query::Kind;
 
+use crate::query_highlight::part_color;
+
 /// How long the "Loaded in the main window" confirmation stays in the
 /// tutorial's status bar.
 const NOTICE_FOR: Duration = Duration::from_secs(5);
-
-/// Highlight tints for the query's explained fragments and their matching
-/// rows in the Explanation list. Deliberately few and well separated: the
-/// first is regex101's orange, the second its blue.
-const PALETTE: [(u8, u8, u8); 6] = [
-    (255, 145, 40),
-    (70, 150, 255),
-    (70, 200, 120),
-    (190, 120, 255),
-    (255, 105, 150),
-    (40, 195, 200),
-];
 
 /// What the reader asked to push into the main window. The window applies
 /// it (`App::apply_tutorial_request`): pinning the engine to `kind`,
@@ -557,17 +547,6 @@ fn query_job(ui: &egui::Ui, example: &Example, lit_part: Option<usize>) -> Layou
         job.append(text, 0.0, format);
     }
     job
-}
-
-fn part_color(index: usize, dark: bool, lit: bool) -> Color32 {
-    let (r, g, b) = PALETTE[index % PALETTE.len()];
-    let alpha = match (dark, lit) {
-        (true, false) => 85,
-        (true, true) => 175,
-        (false, false) => 80,
-        (false, true) => 160,
-    };
-    Color32::from_rgba_unmultiplied(r, g, b, alpha)
 }
 
 /// The dark inset panel used for queries, data and results.

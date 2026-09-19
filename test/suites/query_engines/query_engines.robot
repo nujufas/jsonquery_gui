@@ -68,6 +68,9 @@ TC-QRY-003 Query Box Shows Hint Text When Empty
     [Documentation]    The multiline query box's placeholder text, visible
     ...    whenever it's empty (a fresh load never has query text yet).
     [Tags]    p3
+    # Plain OCR on purpose, not `Query Box Should Contain Text`: this reads
+    # the dim placeholder (there is no query, so nothing is tinted), and
+    # flattening the tints would erase dim text along with them.
     Region Should Contain Text    @{QUERY_TEXTBOX}    select
 
 TC-QRY-001 Engine Picker Buttons Appear Left To Right In A Fixed Order

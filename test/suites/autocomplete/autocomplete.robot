@@ -264,7 +264,7 @@ TC-AC-015 Escape Dismisses The Popup And Disables Autocomplete Until Re-Enabled
     # just that last glyph (e.g. back as "abcxyq"). The first five
     # characters landing correctly is already conclusive proof typing
     # reached the box.
-    Region Should Contain Text    @{QUERY_TEXTBOX}    abcxy
+    Query Box Should Contain Text    abcxy
     Type Query Text    .
     Suggest Popup Should Not Contain    object
     Toggle Autocomplete

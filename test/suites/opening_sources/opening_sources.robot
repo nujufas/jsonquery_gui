@@ -128,7 +128,7 @@ TC-OPEN-015 Loading A New Source Replaces The Old One And Cancels Any Query
     Load Via Url    ${base_url}/valid.json
     Wait Until Region Contains Text    @{STATUS_AREA}    valid.json    timeout=5
     Region Should Not Contain Text    @{STATUS_BAR}    Query error
-    Region Should Contain Text    @{QUERY_TEXTBOX}    does/not/exist
+    Query Box Should Contain Text    does/not/exist
     [Teardown]    Run Keywords    Stop Fixture Server    AND    Close Jsonquery App
 
 TC-OPEN-017 Clear Is Disabled When There's Nothing To Clear
@@ -161,7 +161,7 @@ TC-OPEN-016 Clear Resets State But Preserves Query Text And Engine
     Click Text In Region    @{TOOLBAR_ROW}    Clear
     Sleep    0.3s
     Region Should Contain Text    @{SOURCE_PANEL}    Paste JSON here
-    Region Should Contain Text    @{QUERY_TEXTBOX}    people
+    Query Box Should Contain Text    people
     ${after_clear_color}=    Get Pixel Color    ${x}    ${y}
     Colors Should Match    ${selected_color}    ${after_clear_color}
     ...    msg=JMESPath engine selection was not preserved across Clear

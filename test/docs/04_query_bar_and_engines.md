@@ -216,3 +216,47 @@ Expected: status bar shows the true total count and a `, {shown} shown (live
 preview capped at 50000)` clause with the literal number 50000; results tree
 only contains the capped subset; `Save…` on Results saves only the capped
 subset (cross-reference [09_saving.md](09_saving.md)).
+
+## Query highlighting
+
+The query box tints each step of the query on its own chip — the palette the
+tutorial window uses for its explained fragments — and leaves the glue between
+steps (`|`, `,`, operators, jq keywords) plain. The split is
+`jsonquery_query::highlight::segments` (unit-tested for every dialect and for
+half-typed input); these cases check the result on screen, by pixel colour
+rather than OCR, in the Dark theme's tints (orange `92,55,20`, blue `30,57,92`,
+green `30,73,47`, purple `70,47,92`).
+
+**OCR caveat this feature created:** Tesseract reads light text on a tinted
+chip as nothing at all, so any test that OCRs the query box's *text* must use
+`Query Box Should Contain Text` (which flattens the tints first), not a bare
+`Region Should Contain Text @{QUERY_TEXTBOX}`.
+
+### TC-QRY-070 — Each step of a jq pipeline is tinted, in palette order
+Priority: P2
+Steps: type `.members[] | select(.age > 30) | .name` (no document needed).
+Expected: `.members` orange, `[]` blue, `select(.age > 30)` green, `.name`
+purple — the tutorial's own colouring of the same query.
+
+### TC-QRY-071 — Pipes and operators between steps stay plain
+Priority: P2
+Steps: type the query above and check the `|` gaps; then type `.a > 1`.
+Expected: no tint behind either ` | `; for `.a > 1`, `.a` orange, the ` > `
+plain, `1` blue.
+
+### TC-QRY-072 — JSON Pointer segments are each tinted
+Priority: P2
+Steps: type `/store/book/0`.
+Expected: `/store` orange, `/book` blue, `/0` green.
+
+### TC-QRY-073 — A half-typed query is still tinted
+Priority: P2
+Steps: type `.a | select(.b == "x` (unclosed string and parenthesis).
+Expected: `.a` orange; the unfinished `select(…` runs to the end of the text as
+one blue chip.
+
+### TC-QRY-074 — The engine picker changes how the query is split
+Priority: P2
+Steps: type `end` (a jq keyword, so glue — untinted — under auto-detect);
+then pick JMESPath.
+Expected: no tint before; `end` orange after, as a plain JMESPath field name.

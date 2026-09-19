@@ -10,6 +10,7 @@ use jsonquery_core::{
 };
 use serde_json::Value;
 
+use crate::query_highlight;
 use crate::query_suggest::{apply_suggestion, QuerySuggest};
 use crate::tree_view::{RowAction, TreeView};
 use crate::tutorial::{LoadRequest, Tutorial};
@@ -1556,11 +1557,20 @@ impl App {
             }
         }
 
+        // Tints each step of the query, like the tutorial's examples. Reads
+        // the text from the widget (`self.query_text` is borrowed by it) and
+        // copies the engine choice out for the same reason.
+        let engine = self.query_engine;
+        let mut layouter = |ui: &egui::Ui, text: &dyn egui::TextBuffer, wrap_width: f32| {
+            query_highlight::galley(ui, engine, text.as_str(), wrap_width)
+        };
+
         let output = egui::TextEdit::multiline(&mut self.query_text)
             .id(id)
             .desired_rows(desired_rows)
             .desired_width(f32::INFINITY)
             .code_editor()
+            .layouter(&mut layouter)
             .hint_text(
                 "e.g. .[] | select(.age > 21) | .name\n\
                  (auto-detects jq / JSON Pointer / JSONPath / JMESPath — \

@@ -168,6 +168,15 @@ Type And Run Query
     Press Keys    ctrl    enter
     Wait Until Region Matches    @{STATUS_BAR}    result\\(s\\)|error    timeout=5
 
+Query Box Should Contain Text
+    [Documentation]    OCR check of the text in the query box. Use this, not a
+    ...    bare `Region Should Contain Text @{QUERY_TEXTBOX}`: the box tints
+    ...    each step of the query (query_highlight.robot), and Tesseract reads
+    ...    light text on a tinted chip as nothing at all. The tints are
+    ...    flattened to the box's black first (AppLibrary._flatten_tints).
+    [Arguments]    ${expected}
+    Region Should Contain Text    @{QUERY_TEXTBOX}    ${expected}    flatten_tints=${True}
+
 Select Engine
     [Documentation]    Clicks the named engine picker button (jq / Pointer /
     ...    JSONPath / JMESPath). Clicking an already-selected engine

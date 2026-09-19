@@ -34,7 +34,7 @@ import time
 import pyautogui
 import pyperclip
 import pytesseract
-from PIL import Image
+from PIL import Image, ImageChops
 from robot.api import logger
 from robot.api.deco import keyword, library
 from robot.libraries.BuiltIn import BuiltIn
@@ -380,10 +380,29 @@ class AppLibrary:
             )
         return words
 
+    @staticmethod
+    def _flatten_tints(img):
+        """Grayscale copy in which everything up to the query box's dimmest
+        tint is black and the text keeps its own (anti-aliased) brightness.
+
+        The query box lays each step of the query on a tinted chip (max
+        channel <= ~92 in the Dark theme) and Tesseract, given light text on
+        one, reads nothing at all -- confirmed on a real failing capture
+        (`.abcxyz` on orange came back as ''). Text is ~180, so a stretch from
+        100..180 to 0..255 erases the tint and keeps the glyph edges smooth."""
+        r, g, b = img.convert("RGB").split()
+        brightest = ImageChops.lighter(ImageChops.lighter(r, g), b)
+        return brightest.point(lambda v: 0 if v <= 100 else min(255, (v - 100) * 255 // 80))
+
     @keyword("Read Region Text")
-    def read_region_text(self, x, y, width, height, psm=6):
-        """OCRs the given app-relative region and returns the recognized text."""
+    def read_region_text(self, x, y, width, height, psm=6, flatten_tints=False):
+        """OCRs the given app-relative region and returns the recognized text.
+        `flatten_tints=True` first erases the query box's tinted step
+        backgrounds (see `_flatten_tints`); leave it off everywhere else --
+        it would drop dim text."""
         img = self.screenshot_region(x, y, width, height, label="ocr-read")
+        if flatten_tints:
+            img = self._flatten_tints(img)
         words = self._ocr_words(img, psm=int(psm))
         # Group by line so multi-word text reads back in natural order.
         lines = {}
@@ -432,8 +451,12 @@ class AppLibrary:
         return e2 in a2
 
     @keyword("Region Should Contain Text")
-    def region_should_contain_text(self, x, y, width, height, expected, psm=6, msg=None):
-        actual = self.read_region_text(x, y, width, height, psm=psm)
+    def region_should_contain_text(
+        self, x, y, width, height, expected, psm=6, msg=None, flatten_tints=False
+    ):
+        actual = self.read_region_text(
+            x, y, width, height, psm=psm, flatten_tints=flatten_tints
+        )
         if not self._text_contains(actual, expected):
             raise AssertionError(
                 msg or f"Expected region to contain {expected!r}, but OCR read: {actual!r}"
@@ -548,6 +571,43 @@ class AppLibrary:
             raise AssertionError(
                 msg or f"Colors are within tolerance {tolerance} (diff {diff}), "
                 f"expected a visible difference: {color_a} vs {color_b}"
+            )
+
+    def _pixels_near(self, x, y, width, height, r, g, b, tolerance):
+        """How many pixels of the app-relative region are within `tolerance`
+        (per channel) of (r, g, b)."""
+        img = self.screenshot_region(x, y, width, height, label="color-probe")
+        target = (int(r), int(g), int(b))
+        tol = int(tolerance)
+        return sum(
+            1
+            for px in img.convert("RGB").getdata()
+            if max(abs(a - c) for a, c in zip(px, target)) <= tol
+        )
+
+    @keyword("Region Should Contain Color")
+    def region_should_contain_color(
+        self, x, y, width, height, r, g, b, tolerance=6, msg=None
+    ):
+        """Passes if any pixel in the region is close to (r, g, b). For
+        colored *backgrounds behind text* (the query box's tinted steps): the
+        glyphs cover part of the region, so a single fixed pixel might land on
+        a stroke, but somewhere in a wide-enough strip the bare tint shows."""
+        if not self._pixels_near(x, y, width, height, r, g, b, tolerance):
+            raise AssertionError(
+                msg or f"No pixel near ({r}, {g}, {b}) in region "
+                f"({x},{y},{width},{height})"
+            )
+
+    @keyword("Region Should Not Contain Color")
+    def region_should_not_contain_color(
+        self, x, y, width, height, r, g, b, tolerance=6, msg=None
+    ):
+        count = self._pixels_near(x, y, width, height, r, g, b, tolerance)
+        if count:
+            raise AssertionError(
+                msg or f"{count} pixel(s) near ({r}, {g}, {b}) in region "
+                f"({x},{y},{width},{height}), expected none"
             )
 
     # -- clipboard -------------------------------------------------------------

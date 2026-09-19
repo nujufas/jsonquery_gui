@@ -129,6 +129,11 @@ a false expectation.
 | TC-QRY-060 | Run disabled with no doc | P2 | **Passing** | `suites/query_engines/` |
 | TC-QRY-061 | Ctrl+Enter global (cross-ref TC-KEY-001) | P2 | **Passing** | `suites/query_engines/` |
 | TC-QRY-062 | 50,000-item cap, true vs. shown count | P3 | Not implemented — constructing and iterating a 50,000+ item fixture through OCR-paced assertions is slow and adds a lot of suite runtime for one P3 case | `suites/query_engines/` |
+| TC-QRY-070 | Query highlighting: jq steps tinted in palette order | P2 | **Passing** | `suites/query_highlight/` |
+| TC-QRY-071 | Query highlighting: pipes and operators stay plain | P2 | **Passing** | `suites/query_highlight/` |
+| TC-QRY-072 | Query highlighting: Pointer segments each tinted | P2 | **Passing** | `suites/query_highlight/` |
+| TC-QRY-073 | Query highlighting: half-typed query still tinted | P2 | **Passing** | `suites/query_highlight/` |
+| TC-QRY-074 | Query highlighting: engine picker changes the split | P2 | **Passing** | `suites/query_highlight/` |
 
 **Confirmed during implementation, two OCR-specific limitations worth
 knowing before touching this suite again**: Tesseract sometimes reads the

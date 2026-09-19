@@ -55,6 +55,7 @@ a **cheat sheet** whose rows each have their own ▶.
 | `crates/query/src/tutorial/mod.rs` | The content model (`Topic` → `Lesson` → `Example`), the shared sample documents, and the pure helpers: running an example, formatting a result, splitting a query into highlighted segments, and the tiny inline-markup parser. No egui. |
 | `crates/query/src/tutorial/{jq,pointer,jsonpath,jmespath}.rs` | One `static TOPICS` per dialect — the lessons themselves. |
 | `crates/app/src/tutorial.rs` | The window: tabs, tree, lesson view, and the hand-off to the main window. |
+| `crates/app/src/query_highlight.rs` | The chip palette (`part_color`), shared with the main window's query box, which tints the query you type the same way — its steps come from `jsonquery_query::highlight` instead of a lesson's hand-written fragments. |
 | `App::apply_tutorial_request` in `app.rs` | Applies a load request. *▶ Try it* sets `run_after_load`, because loading a document is asynchronous and finishing a load cancels any query already running — so the query is started from the `Loaded` event. |
 
 The split mirrors `suggest.rs` / `query_suggest.rs`: pure, unit-tested logic
