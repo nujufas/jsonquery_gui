@@ -57,6 +57,14 @@ Load Many Numbers Fixture
     ${json}=    Get File    ${FIXTURES}/many_numbers.json
     Load Fixture Via Paste    ${json}
 
+Load Awkward Keys Fixture
+    [Documentation]    awkward_keys.json -- a root OBJECT whose first two
+    ...    keys ("first name", "my-key") aren't plain identifiers, so
+    ...    accepting them has to quote them for the dialect; the third
+    ...    ("plain") is an ordinary one.
+    ${json}=    Get File    ${FIXTURES}/awkward_keys.json
+    Load Fixture Via Paste    ${json}
+
 Type Query Text
     [Documentation]    Replaces the query box's contents with `text` and
     ...    waits for the suggestion popup to recompute. Deliberately does
@@ -387,3 +395,157 @@ TC-AC-041 Keyboard Navigation Past The Fold Auto-Expands And Scrolls
     Run Current Query
     Region Should Contain Text    @{STATUS_BAR}    1 result
     Region Should Not Contain Text    @{STATUS_BAR}    Query error
+
+TC-AC-050 Open Bracket Offers Indices Not Keywords
+    [Documentation]    Regression test: typing a lone "[" used to dump the
+    ...    jq keyword table (abs, add, all, ...) -- nonsense inside an index.
+    ...    people.json's root is a 3-object array, so "[" should offer
+    ...    indices 0/1/2 previewed as objects. Accepting one (Enter takes
+    ...    the default-selected first row) must index the root: jq reads a
+    ...    bare "[0]" at the start of a query as an array *literal*, so the
+    ...    accepted text has to be ".[0]". Checked by appending ".name"
+    ...    (same technique as TC-AC-013, since a whole-object result is a
+    ...    collapsed tree row OCR can't read a name from): ".[0].name" is
+    ...    Alice, whereas the array-literal misreading "[0].name" is an
+    ...    error.
+    [Tags]    p1
+    Load People Fixture
+    Toggle Autocomplete
+    Type Query Text    [
+    Suggest Popup Should Contain    object
+    Suggest Popup Should Contain    2
+    Suggest Popup Should Not Contain    abs
+    Press Key    enter
+    Type Text    .name
+    Sleep    0.4s
+    Run Current Query
+    Region Should Contain Text    @{STATUS_BAR}    1 result
+    Region Should Not Contain Text    @{STATUS_BAR}    Query error
+    Region Should Contain Text    @{RESULTS_PANEL}    Alice
+
+TC-AC-051 Key After A Closing Bracket Gets A Dot Separator
+    [Documentation]    Regression test: after ".[0]" the popup lists that
+    ...    element's keys, and accepting one used to splice it in bare --
+    ...    ".[0]name", a syntax error -- instead of ".[0].name". Accepts
+    ...    with Tab (the key the user actually pressed), then checks the
+    ...    *result* rather than OCR-reading the punctuation-heavy query.
+    [Tags]    p1
+    Load People Fixture
+    Toggle Autocomplete
+    Type Query Text    .[0]
+    Suggest Popup Should Contain    age
+    Suggest Popup Should Contain    role
+    Press Key    tab
+    Run Current Query
+    Region Should Contain Text    @{STATUS_BAR}    1 result
+    Region Should Not Contain Text    @{STATUS_BAR}    Query error
+    Region Should Contain Text    @{RESULTS_PANEL}    Alice
+
+TC-AC-052 Bracket Completion Swallows An Existing Closing Bracket
+    [Documentation]    With the cursor between an already-present "[" and
+    ...    "]" (".[]" then Left), accepting index 0 must not leave a second
+    ...    "]" behind (".[0]]" is a syntax error) -- and, as in TC-AC-050,
+    ...    ".[0]" must still index the root (checked via ".name", as in
+    ...    TC-AC-050).
+    [Tags]    p2
+    Load People Fixture
+    Toggle Autocomplete
+    Type Query Text    .[]
+    Press Key    left
+    Sleep    0.4s
+    Suggest Popup Should Contain    object
+    Press Key    enter
+    Press Key    end
+    Type Text    .name
+    Sleep    0.4s
+    Run Current Query
+    Region Should Contain Text    @{STATUS_BAR}    1 result
+    Region Should Not Contain Text    @{STATUS_BAR}    Query error
+    Region Should Contain Text    @{RESULTS_PANEL}    Alice
+
+TC-AC-053 Key After The JSONPath Root Gets A Dot
+    [Documentation]    Same bug class as TC-AC-051 for JSONPath's "$": the
+    ...    root is followed by no separator, so accepting "name" used to
+    ...    give "$name" instead of "$.name". simple_object.json's first
+    ...    key is "name" (value "jsonquery"), the default-selected row.
+    [Tags]    p2
+    Load Simple Object Fixture
+    Toggle Autocomplete
+    Type Query Text    $
+    Suggest Popup Should Contain    version
+    Press Key    enter
+    Run Current Query
+    Region Should Contain Text    @{STATUS_BAR}    1 result
+    Region Should Not Contain Text    @{STATUS_BAR}    Query error
+    Region Should Contain Text    @{RESULTS_PANEL}    jsonquery
+
+TC-AC-054 Key That Is Not An Identifier Is Quoted When Accepted
+    [Documentation]    Regression test: "first name" used to be spliced in
+    ...    raw (".first name" -- a syntax error) and "my-key" as ".my-key"
+    ...    (jq reads that as a subtraction). jq spells them ".[\"first
+    ...    name\"]" / ".[\"my-key\"]"; the first key is the default-
+    ...    selected row, so Enter accepts it and the result must be Ada.
+    [Tags]    p1
+    Load Awkward Keys Fixture
+    Toggle Autocomplete
+    Type Query Text    .
+    Suggest Popup Should Contain    my-key
+    Suggest Popup Should Contain    plain
+    Press Key    enter
+    Run Current Query
+    Region Should Contain Text    @{STATUS_BAR}    1 result
+    Region Should Not Contain Text    @{STATUS_BAR}    Query error
+    Region Should Contain Text    @{RESULTS_PANEL}    Ada
+
+TC-AC-055 No Keyword Suggestions Right After A Dot
+    [Documentation]    Regression test: ".n" used to list jq builtins
+    ...    (nan, not, now, ..., numbers) beneath the real fields, and
+    ...    accepting one gave ".numbers" -- a lookup of a field named
+    ...    "numbers", not the builtin. After a "." only fields belong.
+    ...    Pairs the absence check (on a builtin whose name can't be part
+    ...    of any field row) with a positive one, so a popup that simply
+    ...    failed to render can't pass it.
+    [Tags]    p2
+    Load Simple Object Fixture
+    Toggle Autocomplete
+    Type Query Text    .n
+    Suggest Popup Should Contain    notes
+    Suggest Popup Should Not Contain    numbers
+
+TC-AC-056 Wildcard Completes Keys Of Every Element
+    [Documentation]    ".[]." used to end completion (a wildcard isn't a
+    ...    plain path), so no field of the elements was offered. Now the
+    ...    popup lists the keys the elements share -- name/age/role for
+    ...    people.json's three objects -- and accepting one (Enter takes the
+    ...    default-selected first row) must give a query that runs against
+    ...    *every* element: three results, Alice/Bob/Carol.
+    [Tags]    p2
+    Load People Fixture
+    Toggle Autocomplete
+    Type Query Text    .[].
+    Suggest Popup Should Contain    age
+    Suggest Popup Should Contain    role
+    Press Key    enter
+    Run Current Query
+    Region Should Contain Text    @{STATUS_BAR}    3 result
+    Region Should Not Contain Text    @{STATUS_BAR}    Query error
+    Region Should Contain Text    @{RESULTS_PANEL}    Alice
+    Region Should Contain Text    @{RESULTS_PANEL}    Carol
+
+TC-AC-057 Negative Index Completes From The End
+    [Documentation]    ".[-1]." resolves to the *last* element (Carol) so its
+    ...    keys are offered, and typing the "-" itself must not pop the
+    ...    keyword table (the popup used to list abs/add/all/... at ".[-").
+    [Tags]    p2
+    Load People Fixture
+    Toggle Autocomplete
+    Type Query Text    .[-
+    Suggest Popup Should Not Contain    abs
+    Type Query Text    .[-1].
+    Suggest Popup Should Contain    age
+    Suggest Popup Should Contain    role
+    Press Key    enter
+    Run Current Query
+    Region Should Contain Text    @{STATUS_BAR}    1 result
+    Region Should Not Contain Text    @{STATUS_BAR}    Query error
+    Region Should Contain Text    @{RESULTS_PANEL}    Carol
