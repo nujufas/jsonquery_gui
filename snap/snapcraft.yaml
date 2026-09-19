@@ -1,7 +1,7 @@
 name: jsonquery-gui
 title: jsonquery
 base: core24
-version: '0.3.1'
+version: '0.4.0'
 summary: Browse and query large JSON files with jq, JSONPath, JMESPath & Pointer
 description: |
   jsonquery is a native desktop GUI for browsing and querying large JSON
@@ -10,8 +10,10 @@ description: |
   pick a query engine (or leave it on auto-detect) and see results update
   live in a tree or text view.
 
-  Open files by drag-and-drop, file picker, pasted text, or URL. Query-box
-  autocomplete is available for jq.
+  Open files by drag-and-drop, file picker, pasted text, or URL. The query
+  box can autocomplete functions and your document's own keys, colour-codes
+  each step of what you type, and a built-in tutorial teaches all four
+  query languages with examples you can run.
 grade: stable
 confinement: strict
 license: MIT
