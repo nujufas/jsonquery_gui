@@ -35,8 +35,12 @@ file (or paste JSON directly) and query it with **jq**, **JSON Pointer**,
 - **Tree or raw text views** — toggle either the source document or the
   query results between a virtualized, expand/collapse tree and
   plain, selectable/copyable pretty-printed text.
-- **Search** — case-insensitive substring or regex search across the source
-  or the results tree, with click-to-reveal on a hit.
+- **Search** — `Ctrl+F` opens a Notepad++-style Find dialog with the cursor
+  already in its field: a case-insensitive substring or regex search across
+  the source or the results tree. **Find** (or `Enter`) jumps to each match in
+  turn — expanded, scrolled to and highlighted — with a running "3 of 17",
+  wrapping past the last one; **Find All** lists every match in a panel below,
+  where a click reveals it.
 
   ![Search results panel showing a match in the source tree](docs/images/screenshot-search.png)
 - **Find in Source** — right-click a result row to see where it came from.

@@ -86,11 +86,11 @@ pub struct App {
     results_cap: usize,
     last_query_elapsed: Option<Duration>,
     last_query_cancelled: bool,
-    /// A "Search…" over Results arrived while `results_truncated` was still
-    /// true — deferred until the "Expand All" rerun it triggered finishes,
-    /// so the search covers the complete results rather than the capped
-    /// preview.
-    pending_results_search: bool,
+    /// A "Find"/"Find All" over Results arrived while `results_truncated`
+    /// was still true — deferred until the "Expand All" rerun it triggered
+    /// finishes, so the search covers the complete results rather than the
+    /// capped preview. Holds what the search is for.
+    pending_results_search: Option<SearchPurpose>,
     /// Same idea as `pending_results_search`, for "Save…" over Results: the
     /// destination path chosen while results were still truncated, applied
     /// once the "Expand All" rerun it triggered completes.
@@ -127,34 +127,85 @@ pub struct App {
     show_url_dialog: bool,
     url_input: String,
 
-    /// State for the "Search…" popup and the results panel it feeds.
+    /// State for the "Search…" popup, which stays open while "Find" steps
+    /// through the matches one at a time.
     show_search_dialog: bool,
     search_input: String,
     search_regex: bool,
     search_target: PanelKind,
+    /// Ctrl+F / "Search…" asked for the Find field to take keyboard focus
+    /// (with its text selected) the next time the popup is drawn.
+    focus_search_field: bool,
     search_gen: u64,
     searching: bool,
     search_error: Option<String>,
-    search_results: Vec<SearchMatch>,
-    /// Which entry of `search_results` is the one currently revealed in its
-    /// tree — drawn highlighted in the panel: the best guess of a "Find in
-    /// Source" (revealed as soon as it's found), then whatever was clicked.
-    search_selected: Option<usize>,
-    /// Whether the bottom search-results panel is shown; set when a search
-    /// starts, cleared by its "Close" button.
-    search_panel_open: bool,
-    /// `Some` while that panel lists "Find in Source" candidates (in
-    /// `search_results`) rather than "Search…" hits.
-    find_panel: Option<FindPanel>,
+    /// What the in-flight search (`searching`) was asked for.
+    search_request: Option<SearchRequest>,
+    /// The last completed search, and where "Find" has got to in it.
+    find_cursor: Option<FindCursor>,
+
+    /// The bottom panel — `Some` while it is shown: every match of a "Find
+    /// All", or the candidates of a "Find in Source".
+    hit_list: Option<HitList>,
 }
 
-/// What a "Find in Source" candidate list is a list of, for its heading.
-struct FindPanel {
-    /// The results row that was looked up, as a jq-style path.
-    row: String,
-    /// The text searched for when no node held an equal value (the row's
-    /// value was computed), so the list is only an approximation.
-    searched_for: Option<String>,
+/// What a "Search…" run looked for — "Find" and "Find All" re-search whenever
+/// the popup no longer matches the query the hits were found for.
+#[derive(Clone, PartialEq, Eq)]
+struct SearchQuery {
+    target: PanelKind,
+    text: String,
+    regex: bool,
+}
+
+/// The hits of the last completed search, in document order, and the one
+/// "Find" revealed last — Notepad++'s "Find Next" position.
+struct FindCursor {
+    query: SearchQuery,
+    hits: Vec<NodePath>,
+    /// Index into `hits`; `None` until the first hit has been revealed.
+    pos: Option<usize>,
+    /// The last step ran past the final hit and came back to the first.
+    wrapped: bool,
+}
+
+/// What a search from the dialog is for.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SearchPurpose {
+    /// "Find": reveal the first match, then step on through the rest.
+    Step,
+    /// "Find All": list every match in the bottom panel.
+    List,
+}
+
+/// A search that has been sent to the worker thread.
+struct SearchRequest {
+    query: SearchQuery,
+    purpose: SearchPurpose,
+}
+
+/// The bottom panel: tree nodes to pick from, and what they are a list of.
+struct HitList {
+    kind: HitListKind,
+    matches: Vec<SearchMatch>,
+    /// Which entry is the one currently revealed in its tree — drawn
+    /// highlighted in the panel: the best guess of a "Find in Source"
+    /// (revealed as soon as it's found), then whatever was clicked, or
+    /// stepped to with "Find".
+    selected: Option<usize>,
+}
+
+enum HitListKind {
+    /// Every match of a "Find All" for this query, in document order.
+    Search(SearchQuery),
+    /// The candidates of a "Find in Source" for the results row `row` (a
+    /// jq-style path), best first.
+    FindInSource {
+        row: String,
+        /// The text searched for when no node held an equal value (the row's
+        /// value was computed), so the list is only an approximation.
+        searched_for: Option<String>,
+    },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -230,7 +281,7 @@ impl App {
             results_cap: LIVE_PREVIEW_CAP,
             last_query_elapsed: None,
             last_query_cancelled: false,
-            pending_results_search: false,
+            pending_results_search: None,
             pending_save_results: None,
             source_tree: TreeView::default(),
             results_tree: TreeView::default(),
@@ -254,13 +305,13 @@ impl App {
             search_input: String::new(),
             search_regex: false,
             search_target: PanelKind::Source,
+            focus_search_field: false,
             search_gen: 0,
             searching: false,
             search_error: None,
-            search_results: Vec::new(),
-            search_selected: None,
-            search_panel_open: false,
-            find_panel: None,
+            search_request: None,
+            find_cursor: None,
+            hit_list: None,
         }
     }
 
@@ -290,7 +341,7 @@ impl App {
                     self.results_count_so_far = 0;
                     self.results_truncated = false;
                     self.results_cap = LIVE_PREVIEW_CAP;
-                    self.pending_results_search = false;
+                    self.pending_results_search = None;
                     self.pending_save_results = None;
                     self.last_query_elapsed = None;
                     self.last_resolved_engine = None;
@@ -357,11 +408,19 @@ impl App {
                     }
                     self.searching = false;
                     self.search_error = None;
-                    let root = match self.search_target {
-                        PanelKind::Source => self.doc.as_ref().map(|d| &d.root),
-                        PanelKind::Results => Some(&self.results),
+                    let Some(SearchRequest { query, purpose }) = self.search_request.take() else {
+                        continue;
                     };
-                    self.search_results = build_search_matches(self.search_target, root, matches);
+                    self.find_cursor = Some(FindCursor {
+                        query,
+                        hits: matches,
+                        pos: None,
+                        wrapped: false,
+                    });
+                    match purpose {
+                        SearchPurpose::Step => self.reveal_first_hit_if_current(),
+                        SearchPurpose::List => self.show_search_list(),
+                    }
                 }
                 Event::SearchError { gen, error } => {
                     if gen != self.search_gen {
@@ -369,7 +428,16 @@ impl App {
                     }
                     self.searching = false;
                     self.search_error = Some(error);
-                    self.search_results.clear();
+                    // Remembered like any other outcome, so "Find" doesn't
+                    // re-run a query that is known not to compile.
+                    if let Some(SearchRequest { query, .. }) = self.search_request.take() {
+                        self.find_cursor = Some(FindCursor {
+                            query,
+                            hits: Vec::new(),
+                            pos: None,
+                            wrapped: false,
+                        });
+                    }
                 }
                 Event::TextRendered {
                     target,
@@ -432,17 +500,15 @@ impl App {
                     // snapshot — not the complete set either was promised —
                     // so drop them rather than search/save that silently.
                     if cancelled {
-                        if self.pending_results_search {
-                            self.pending_results_search = false;
+                        if self.pending_results_search.take().is_some() {
                             self.searching = false;
                             self.search_error =
                                 Some("Cancelled while fetching full results.".to_string());
                         }
                         self.pending_save_results = None;
                     } else {
-                        if self.pending_results_search {
-                            self.pending_results_search = false;
-                            self.run_search();
+                        if let Some(purpose) = self.pending_results_search.take() {
+                            self.run_search(purpose);
                         }
                         if let Some(path) = self.pending_save_results.take() {
                             let _ = self.cmd_tx.send(Command::SaveResults {
@@ -462,8 +528,7 @@ impl App {
                     // waiting on failed outright — surface that instead of
                     // leaving the search panel spinning or the save silently
                     // dropped.
-                    if self.pending_results_search {
-                        self.pending_results_search = false;
+                    if self.pending_results_search.take().is_some() {
                         self.searching = false;
                         self.search_error = Some(error);
                     }
@@ -598,24 +663,46 @@ impl App {
     }
 
     /// List `paths` — Source nodes, best guess first — in the bottom panel as
-    /// the candidates for the results row `self.find_row`, in place of
-    /// whatever "Search…" hits it showed.
+    /// the candidates for the results row `self.find_row`, in place of any
+    /// list it showed before.
     fn show_find_list(&mut self, paths: Vec<NodePath>, searched_for: Option<String>) {
-        // Supersede any "Search…" still in flight, so its late hits can't
-        // overwrite this list under the wrong heading.
+        // Supersede any "Find" still in flight, so its late first hit can't
+        // pull the Source tree away from the candidate revealed here.
         self.search_gen += 1;
         self.searching = false;
         self.search_error = None;
         let root = self.doc.as_ref().map(|d| &d.root);
-        self.search_results = build_search_matches(PanelKind::Source, root, paths);
+        let matches = build_search_matches(PanelKind::Source, root, paths);
         // Only an exact match was revealed (see `Event::Found`), and it was
         // the first entry.
-        self.search_selected = searched_for.is_none().then_some(0);
-        self.find_panel = Some(FindPanel {
-            row: self.find_row.clone(),
-            searched_for,
+        let selected = searched_for.is_none().then_some(0);
+        self.hit_list = Some(HitList {
+            kind: HitListKind::FindInSource {
+                row: self.find_row.clone(),
+                searched_for,
+            },
+            matches,
+            selected,
         });
-        self.search_panel_open = true;
+    }
+
+    /// "Find All": list every hit of `self.find_cursor` in the bottom panel,
+    /// in place of any list it showed before — with the hit "Find" is at, if
+    /// it has been stepping, selected.
+    fn show_search_list(&mut self) {
+        let Some(cursor) = &self.find_cursor else {
+            return;
+        };
+        let root = match cursor.query.target {
+            PanelKind::Source => self.doc.as_ref().map(|d| &d.root),
+            PanelKind::Results => Some(&self.results),
+        };
+        let matches = build_search_matches(cursor.query.target, root, cursor.hits.clone());
+        self.hit_list = Some(HitList {
+            kind: HitListKind::Search(cursor.query.clone()),
+            matches,
+            selected: cursor.pos,
+        });
     }
 
     /// Ctrl+F (search) and Ctrl+S (save) act on `self.focused_panel` — the
@@ -672,28 +759,141 @@ impl App {
         }
     }
 
-    /// Open the "Search…" dialog for `target`'s tree, discarding whatever
-    /// text was left over from a previous search.
+    /// Open the "Search…" dialog for `target`'s tree with the Find field
+    /// ready to type into, discarding whatever text was left over from a
+    /// previous search. Asked again for the tree it is already searching
+    /// (Ctrl+F while it's open), it keeps the text — selected, so typing
+    /// replaces it — as Notepad++'s Find dialog does.
     fn open_search_dialog(&mut self, target: PanelKind) {
+        if !self.show_search_dialog || self.search_target != target {
+            self.search_target = target;
+            self.search_input.clear();
+        }
         self.show_search_dialog = true;
-        self.search_target = target;
-        self.search_input.clear();
+        self.focus_search_field = true;
+    }
+
+    /// What the dialog is asking for right now.
+    fn dialog_query(&self) -> SearchQuery {
+        SearchQuery {
+            target: self.search_target,
+            text: self.search_input.clone(),
+            regex: self.search_regex,
+        }
+    }
+
+    /// Whether `self.find_cursor` holds the outcome of the query the dialog
+    /// is asking for now, so "Find"/"Find All" can use it instead of searching
+    /// again.
+    fn find_cursor_is_current(&self) -> bool {
+        self.find_cursor
+            .as_ref()
+            .is_some_and(|c| c.query == self.dialog_query())
+    }
+
+    /// The dialog's "Find" (button or Enter) — Notepad++'s "Find Next": reveal
+    /// the match after the one revealed last, wrapping from the final match
+    /// back to the first. The first Find for a query searches the whole tree
+    /// on the worker thread and reveals the first match once that finishes
+    /// (`Event::SearchDone`); a changed query starts over from there.
+    fn find_next(&mut self) {
+        if self.search_input.trim().is_empty() || self.searching {
+            return;
+        }
+        if self.find_cursor_is_current() {
+            self.step_find();
+        } else {
+            self.run_search(SearchPurpose::Step);
+        }
+    }
+
+    /// The dialog's "Find All": list every match in the bottom panel, where
+    /// clicking one reveals it. Searches the tree first, unless "Find" has
+    /// already done so for this query.
+    fn find_all(&mut self) {
+        if self.search_input.trim().is_empty() || self.searching {
+            return;
+        }
+        if !self.find_cursor_is_current() {
+            self.run_search(SearchPurpose::List);
+        } else if self.search_error.is_none() {
+            self.show_search_list();
+        }
+    }
+
+    /// Reveal the next hit of `self.find_cursor` in its tree, moving the
+    /// cursor on to it.
+    fn step_find(&mut self) {
+        let Some(cursor) = &mut self.find_cursor else {
+            return;
+        };
+        let count = cursor.hits.len();
+        let (next, wrapped) = match cursor.pos {
+            None => (0, false),
+            Some(i) if i + 1 < count => (i + 1, false),
+            Some(_) => (0, true),
+        };
+        let Some(path) = cursor.hits.get(next).cloned() else {
+            return;
+        };
+        cursor.pos = Some(next);
+        cursor.wrapped = wrapped;
+        let target = cursor.query.target;
+        // Keep the highlight of a "Find All" list on the hit just revealed.
+        if let Some(HitList {
+            kind: HitListKind::Search(query),
+            selected,
+            ..
+        }) = &mut self.hit_list
+        {
+            if *query == cursor.query {
+                *selected = Some(next);
+            }
+        }
+        self.reveal_in_tree(target, path);
+    }
+
+    /// A search just finished: reveal its first hit, provided the dialog is
+    /// still open and still asking for that query — the user may have closed
+    /// it, or retyped, while the worker was searching.
+    fn reveal_first_hit_if_current(&mut self) {
+        let current = self.show_search_dialog
+            && self
+                .find_cursor
+                .as_ref()
+                .is_some_and(|c| c.query == self.dialog_query());
+        if current {
+            self.step_find();
+        }
+    }
+
+    /// Expand, scroll to and highlight `path` in `target`'s tree, switching
+    /// that panel to its Tree view if it was showing Text.
+    fn reveal_in_tree(&mut self, target: PanelKind, path: NodePath) {
+        match target {
+            PanelKind::Source => {
+                self.source_tree.reveal(path);
+                self.source_view = ViewMode::Tree;
+            }
+            PanelKind::Results => {
+                self.results_tree.reveal(path);
+                self.results_view = ViewMode::Tree;
+            }
+        }
     }
 
     /// Send the current search dialog's query to the worker thread, over
-    /// whichever tree it was opened for. Searching Results while the live
-    /// preview is still capped would silently miss matches beyond the cap,
-    /// so that case first re-runs the query unbounded (`expand_results`) and
-    /// retries the search once it completes (`pending_results_search`,
-    /// handled in `Event::QueryDone`).
-    fn run_search(&mut self) {
+    /// whichever tree it was opened for, for `purpose`. Searching Results
+    /// while the live preview is still capped would silently miss matches
+    /// beyond the cap, so that case first re-runs the query unbounded
+    /// (`expand_results`) and retries the search once it completes
+    /// (`pending_results_search`, handled in `Event::QueryDone`).
+    fn run_search(&mut self, purpose: SearchPurpose) {
         if self.search_target == PanelKind::Results && self.results_truncated {
             self.expand_results();
-            self.pending_results_search = true;
+            self.pending_results_search = Some(purpose);
             self.searching = true;
             self.search_error = None;
-            self.clear_hits();
-            self.search_panel_open = true;
             return;
         }
 
@@ -707,8 +907,10 @@ impl App {
         self.search_gen += 1;
         self.searching = true;
         self.search_error = None;
-        self.clear_hits();
-        self.search_panel_open = true;
+        self.search_request = Some(SearchRequest {
+            query: self.dialog_query(),
+            purpose,
+        });
         let _ = self.cmd_tx.send(Command::Search {
             root,
             text: self.search_input.clone(),
@@ -717,23 +919,21 @@ impl App {
         });
     }
 
-    /// Discard any in-flight or displayed search — the tree it was searching
-    /// just changed out from under it (a new document loaded, a new query
-    /// run, or the source cleared).
+    /// Discard any in-flight or completed search, and the bottom panel's
+    /// candidates — the tree they were found in just changed out from under
+    /// them (a new document loaded, a new query run, or the source cleared).
     fn invalidate_search(&mut self) {
         self.search_gen += 1;
         self.searching = false;
         self.search_error = None;
+        self.search_request = None;
+        self.find_cursor = None;
         self.clear_hits();
-        self.search_panel_open = false;
     }
 
-    /// Empty the bottom panel's hit list, along with everything that
-    /// describes it (which entry is selected, and what it's a list of).
+    /// Hide the bottom panel, dropping its list.
     fn clear_hits(&mut self) {
-        self.search_results.clear();
-        self.search_selected = None;
-        self.find_panel = None;
+        self.hit_list = None;
     }
 
     /// Discard any in-flight or displayed source "Text" render — the
@@ -779,7 +979,7 @@ impl App {
         self.results_count_so_far = 0;
         self.results_truncated = false;
         self.results_cap = LIVE_PREVIEW_CAP;
-        self.pending_results_search = false;
+        self.pending_results_search = None;
         self.pending_save_results = None;
         self.last_query_elapsed = None;
         self.last_query_cancelled = false;
@@ -834,7 +1034,7 @@ impl App {
         self.results_count_so_far = 0;
         self.results_truncated = false;
         self.results_cap = cap;
-        self.pending_results_search = false;
+        self.pending_results_search = None;
         self.pending_save_results = None;
         self.query_error = None;
         self.last_query_elapsed = None;
@@ -1008,16 +1208,18 @@ impl App {
     }
 
     /// Popup prompting for a search query; shown when `show_search_dialog`
-    /// is set by a row's "Search…" context-menu item. Runs over the whole
-    /// tree it was opened for (`self.search_target`), not just the row that
-    /// was right-clicked.
+    /// is set by Ctrl+F or a row's "Search…" context-menu item. Searches the
+    /// whole tree it was opened for (`self.search_target`), not just the row
+    /// that was right-clicked. Like Notepad++'s Find dialog it stays open:
+    /// "Find" steps through the matches one at a time, "Find All" lists them
+    /// all in the bottom panel; Cancel or Escape closes it.
     fn search_dialog(&mut self, ctx: &egui::Context) {
         if !self.show_search_dialog {
             return;
         }
 
+        let field_id = egui::Id::new("search_find_field");
         let mut open = true;
-        let mut submit = false;
         let mut cancel = false;
         egui::Window::new(format!("Search — {}", self.search_target.label()))
             .id(egui::Id::new("search_dialog"))
@@ -1025,90 +1227,145 @@ impl App {
             .resizable(false)
             .open(&mut open)
             .show(ctx, |ui| {
+                ui.set_max_width(340.0);
                 ui.label("Find:");
-                let resp = ui.add(
+                // Focus (and select) the field before it is added, so it is
+                // typable from the frame the dialog first shows. Not during
+                // the window's invisible first "sizing pass": egui drops the
+                // focus of every widget it lays out there.
+                if !ui.is_sizing_pass() && std::mem::take(&mut self.focus_search_field) {
+                    let len = self.search_input.chars().count();
+                    select_text_edit_range(ui.ctx(), field_id, 0, len);
+                }
+                let field = ui.add(
                     egui::TextEdit::singleline(&mut self.search_input)
+                        .id(field_id)
                         .desired_width(320.0)
                         .hint_text("text to find…"),
                 );
-                let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                ui.checkbox(&mut self.search_regex, "Regex");
+                // Enter and Escape each take the focus out of a single-line
+                // field, which is how they're told apart from other keys.
+                let enter = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                let escape = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape));
+                let regex = ui.checkbox(&mut self.search_regex, "Regex");
+                if field.changed() || regex.changed() {
+                    self.search_error = None;
+                }
+                if regex.changed() {
+                    // So Enter still means "Find" after ticking the box.
+                    field.request_focus();
+                }
+                let mut find = enter;
+                let mut find_all = false;
                 ui.horizontal(|ui| {
-                    let find_clicked = ui
-                        .add_enabled(
-                            !self.search_input.trim().is_empty(),
-                            egui::Button::new("Find All"),
-                        )
+                    let has_text = !self.search_input.trim().is_empty();
+                    find |= ui
+                        .add_enabled(has_text, egui::Button::new("Find"))
                         .clicked();
-                    submit = find_clicked || enter;
-                    cancel = ui.button("Cancel").clicked();
+                    find_all = ui
+                        .add_enabled(has_text, egui::Button::new("Find All"))
+                        .clicked();
+                    cancel = ui.button("Cancel").clicked() || escape;
                 });
+                if find {
+                    self.find_next();
+                } else if find_all {
+                    self.find_all();
+                }
+                if find || find_all {
+                    // Keep typing, or pressing Enter for the next match,
+                    // possible right after either.
+                    field.request_focus();
+                }
+                self.find_status(ui);
             });
 
         if cancel || !open {
             self.show_search_dialog = false;
-        } else if submit && !self.search_input.trim().is_empty() {
-            self.show_search_dialog = false;
-            self.run_search();
         }
     }
 
-    /// The bottom "Search results" panel, populated by the last completed
-    /// search — a Notepad++-style "Find All" list rather than jumping
-    /// straight to one hit. Clicking a match reveals it in its owning tree.
-    /// It doubles as the candidate list of a "Find in Source" that had more
-    /// than one answer (`self.find_panel`).
-    fn search_results_panel(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            let heading = match &self.find_panel {
-                Some(find) => format!("Find in Source — {}", find.row),
-                None => {
-                    let mut heading = format!("Search results — {}", self.search_target.label());
-                    if !self.search_input.is_empty() {
-                        heading.push_str(&format!(" \"{}\"", self.search_input));
-                    }
-                    if self.search_regex {
-                        heading.push_str(" (regex)");
-                    }
-                    heading
-                }
-            };
-            ui.strong(heading);
-            if self.searching {
+    /// The dialog's bottom line: where "Find" stands for the query in the
+    /// field. Always takes a line's height, so the dialog doesn't jump as the
+    /// message comes and goes.
+    fn find_status(&self, ui: &mut egui::Ui) {
+        let red = egui::Color32::from_rgb(220, 80, 80);
+        let cursor = self
+            .find_cursor
+            .as_ref()
+            .filter(|c| c.query == self.dialog_query());
+        if self.searching {
+            ui.horizontal(|ui| {
                 ui.spinner();
-            } else if self.search_error.is_none() {
-                let mut count = format!("{} match(es)", self.search_results.len());
-                match &self.find_panel {
-                    Some(FindPanel {
-                        searched_for: Some(text),
-                        ..
-                    }) => count.push_str(&format!(" — no exact match, text search for \"{text}\"")),
-                    Some(_) => count.push_str(" — best match first"),
-                    None => {}
-                }
-                ui.weak(count);
+                ui.label("Searching…");
+            });
+        } else if let Some(err) = &self.search_error {
+            ui.colored_label(red, format!("Search error: {err}"));
+        } else if cursor.is_some_and(|c| c.hits.is_empty()) {
+            ui.colored_label(red, "No matches found.");
+        } else if let Some((cursor, pos)) = cursor.and_then(|c| Some((c, c.pos?))) {
+            let mut text = format!("{} of {}", pos + 1, cursor.hits.len());
+            if cursor.wrapped {
+                text.push_str(" — wrapped around to the top");
             }
+            ui.label(text);
+        } else if let Some(cursor) = cursor {
+            // Searched, but "Find" hasn't stepped to any of them: a "Find All".
+            let n = cursor.hits.len();
+            ui.label(format!("{n} match{}", if n == 1 { "" } else { "es" }));
+        } else {
+            ui.label(" ");
+        }
+    }
+
+    /// The bottom panel (`self.hit_list`): every match of a "Find All", or the
+    /// candidates of a "Find in Source" that had more than one answer. Clicking
+    /// an entry reveals it in its tree.
+    fn hit_list_panel(&mut self, ui: &mut egui::Ui) {
+        let Some(list) = &self.hit_list else {
+            return;
+        };
+        let heading = match &list.kind {
+            HitListKind::FindInSource { row, .. } => format!("Find in Source — {row}"),
+            HitListKind::Search(query) => {
+                let mut heading = format!("Search results — {}", query.target.label());
+                if !query.text.is_empty() {
+                    heading.push_str(&format!(" \"{}\"", query.text));
+                }
+                if query.regex {
+                    heading.push_str(" (regex)");
+                }
+                heading
+            }
+        };
+        let mut count = format!("{} match(es)", list.matches.len());
+        match &list.kind {
+            HitListKind::FindInSource {
+                searched_for: Some(text),
+                ..
+            } => count.push_str(&format!(" — no exact match, text search for \"{text}\"")),
+            HitListKind::FindInSource { .. } => count.push_str(" — best match first"),
+            HitListKind::Search(_) => {}
+        }
+
+        let mut close = false;
+        ui.horizontal(|ui| {
+            ui.strong(heading);
+            ui.weak(count);
 
             ui.allocate_ui_with_layout(
                 egui::vec2(ui.available_width(), ui.spacing().interact_size.y),
                 egui::Layout::right_to_left(egui::Align::Center),
-                |ui| {
-                    if ui.button("Close").clicked() {
-                        self.search_panel_open = false;
-                    }
-                },
+                |ui| close = ui.button("Close").clicked(),
             );
         });
-        ui.separator();
-
-        if let Some(err) = &self.search_error {
-            ui.colored_label(
-                egui::Color32::from_rgb(220, 80, 80),
-                format!("Search error: {err}"),
-            );
+        if close {
+            self.clear_hits();
             return;
         }
-        if !self.searching && self.search_results.is_empty() {
+        ui.separator();
+
+        if list.matches.is_empty() {
             ui.weak("No matches found.");
             return;
         }
@@ -1117,7 +1374,7 @@ impl App {
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                for (i, m) in self.search_results.iter().enumerate() {
+                for (i, m) in list.matches.iter().enumerate() {
                     let text = format!(
                         "[{}]  {}   {}",
                         m.target.label(),
@@ -1133,7 +1390,7 @@ impl App {
                         egui::Label::new(egui::RichText::new(text).monospace())
                             .sense(egui::Sense::click()),
                     );
-                    if self.search_selected == Some(i) {
+                    if list.selected == Some(i) {
                         let row = egui::Rect::from_min_size(
                             resp.rect.min,
                             egui::vec2(full_width.max(resp.rect.width()), resp.rect.height()),
@@ -1154,17 +1411,20 @@ impl App {
             });
 
         if let Some((i, target, path)) = reveal {
-            self.search_selected = Some(i);
-            match target {
-                PanelKind::Source => {
-                    self.source_tree.reveal(path);
-                    self.source_view = ViewMode::Tree;
-                }
-                PanelKind::Results => {
-                    self.results_tree.reveal(path);
-                    self.results_view = ViewMode::Tree;
+            if let Some(list) = &mut self.hit_list {
+                list.selected = Some(i);
+                // "Find" carries on from the entry picked, as Notepad++'s
+                // Find Next carries on from where the caret was left.
+                if let (HitListKind::Search(query), Some(cursor)) =
+                    (&list.kind, &mut self.find_cursor)
+                {
+                    if cursor.query == *query {
+                        cursor.pos = Some(i);
+                        cursor.wrapped = false;
+                    }
                 }
             }
+            self.reveal_in_tree(target, path);
         }
     }
 
@@ -1762,13 +2022,20 @@ impl App {
 /// cursor after a programmatic edit means writing that state back directly
 /// rather than through anything `TextEdit`'s own builder exposes.
 fn set_text_edit_cursor(ctx: &egui::Context, id: egui::Id, char_idx: usize) {
+    select_text_edit_range(ctx, id, char_idx, char_idx);
+}
+
+/// Like [`set_text_edit_cursor`], selecting the chars from `start` to `end`
+/// (both char offsets) — an empty range is just a cursor.
+fn select_text_edit_range(ctx: &egui::Context, id: egui::Id, start: usize, end: usize) {
     use egui::text::{CCursor, CCursorRange};
     use egui::widgets::text_edit::TextEditState;
 
     let mut state = TextEditState::load(ctx, id).unwrap_or_default();
-    state
-        .cursor
-        .set_char_range(Some(CCursorRange::one(CCursor::new(char_idx))));
+    state.cursor.set_char_range(Some(CCursorRange::two(
+        CCursor::new(start),
+        CCursor::new(end),
+    )));
     state.store(ctx, id);
     ctx.memory_mut(|m| m.request_focus(id));
 }
@@ -1830,9 +2097,11 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.drain_events();
         let hovering_drop = self.handle_drag_and_drop(ui);
+        // Shortcuts first, so Ctrl+F's dialog is drawn (and focused) in the
+        // frame it was pressed rather than the one after.
+        self.handle_shortcuts(ui.ctx());
         self.url_dialog(ui.ctx());
         self.search_dialog(ui.ctx());
-        self.handle_shortcuts(ui.ctx());
 
         egui::Panel::top("toolbar").show(ui, |ui| self.toolbar(ui));
         egui::Panel::top("query_bar")
@@ -1841,11 +2110,11 @@ impl eframe::App for App {
             .min_size(60.0)
             .show(ui, |ui| self.query_bar(ui));
         egui::Panel::bottom("status_bar").show(ui, |ui| self.status_bar(ui));
-        if self.search_panel_open {
+        if self.hit_list.is_some() {
             egui::Panel::bottom("search_results_panel")
                 .resizable(true)
                 .default_size(180.0)
-                .show(ui, |ui| self.search_results_panel(ui));
+                .show(ui, |ui| self.hit_list_panel(ui));
         }
 
         // Matches `CentralPanel`'s inner margin (`Frame::central_panel` uses
