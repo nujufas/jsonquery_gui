@@ -2077,7 +2077,8 @@ fn autocomplete_toggle_button(ui: &mut egui::Ui, suggest: &mut QuerySuggest) {
     };
     let tooltip = if enabled {
         "Autocomplete suggestions — experimental\n\
-         On: click to turn off, or press Esc while a suggestion is showing."
+         On: click to turn off. Esc closes the list that's showing; the next \
+         keystroke brings suggestions back."
     } else {
         "Autocomplete suggestions — experimental\n\
          Off: click to turn on."

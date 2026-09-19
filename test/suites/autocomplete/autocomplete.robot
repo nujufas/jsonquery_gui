@@ -243,8 +243,10 @@ TC-AC-014 Clicking A Suggestion Row Accepts It And Closes The Popup
     Region Should Contain Text    @{STATUS_BAR}    1 result
     Region Should Contain Text    @{RESULTS_PANEL}    Carol
 
-TC-AC-015 Escape Dismisses The Popup And Disables Autocomplete Until Re-Enabled
-    [Documentation]    Also a regression check for the egui-Memory
+TC-AC-015 Escape Closes Only The Current Popup
+    [Documentation]    Escape puts away the list that's showing -- it must NOT
+    ...    switch autocomplete off (it used to, and stayed off until the 💡
+    ...    was clicked again). Also a regression check for the egui-Memory
     ...    global-focus-clear-on-Escape bug documented in query_suggest.rs:
     ...    typing immediately after Escape (with no intervening click) must
     ...    still land in the query box.
@@ -256,6 +258,9 @@ TC-AC-015 Escape Dismisses The Popup And Disables Autocomplete Until Re-Enabled
     Press Key    escape
     Sleep    0.3s
     Suggest Popup Should Not Contain    object
+    # Nothing changed, so it stays put -- it doesn't just pop straight back.
+    Sleep    1s
+    Suggest Popup Should Not Contain    object
     Type Text    abcxyz
     # Checked against "abcxy" (dropping the trailing "z"), not the full
     # "abcxyz": the box's own text cursor sits right after the last typed
@@ -265,10 +270,25 @@ TC-AC-015 Escape Dismisses The Popup And Disables Autocomplete Until Re-Enabled
     # characters landing correctly is already conclusive proof typing
     # reached the box.
     Query Box Should Contain Text    abcxy
+    # Autocomplete is still on: the very next fresh query suggests again,
+    # with no toggle click in between.
     Type Query Text    .
-    Suggest Popup Should Not Contain    object
+    Suggest Popup Should Contain    object
+
+TC-AC-016 Suggestions Return At The Next Keystroke After Escape
+    [Documentation]    The other half of TC-AC-015: after Escape the list comes
+    ...    back by itself as soon as there is something to suggest -- typing
+    ...    "[" after the dismissed "." offers the root array's indices again.
+    [Tags]    p1
+    Load People Fixture
     Toggle Autocomplete
     Type Query Text    .
+    Suggest Popup Should Contain    object
+    Press Key    escape
+    Sleep    0.3s
+    Suggest Popup Should Not Contain    object
+    Type Text    [
+    Sleep    0.4s
     Suggest Popup Should Contain    object
 
 TC-AC-020 Explicit Engine Selection Restricts Suggestions To That Engine
@@ -549,3 +569,42 @@ TC-AC-057 Negative Index Completes From The End
     Region Should Contain Text    @{STATUS_BAR}    1 result
     Region Should Not Contain Text    @{STATUS_BAR}    Query error
     Region Should Contain Text    @{RESULTS_PANEL}    Carol
+
+TC-AC-058 Function After A Finished Operand Is Piped In
+    [Documentation]    Regression test: inside "map(.age ", accepting "abs"
+    ...    used to give "map(.age abs" -- two terms side by side, a syntax
+    ...    error. A name that follows a finished operand can only be the next
+    ...    pipeline stage, so accepting it must insert "| abs". Checked by the
+    ...    run outcome (the piped query runs: three ages, no "Query error"),
+    ...    since "| abs" vs "abs" is too short and punctuation-heavy to OCR
+    ...    reliably (see TC-AC-011). The rest of the query is typed after the
+    ...    accept; the leading ". |" pins the engine to jq.
+    [Tags]    p1
+    Load People Fixture
+    Toggle Autocomplete
+    Type Query Text    . | map(.age ab
+    Suggest Popup Should Contain    abs
+    Press Key    enter
+    Type Text    ) | .[]
+    Sleep    0.4s
+    Run Current Query
+    Region Should Contain Text    @{STATUS_BAR}    3 result
+    Region Should Not Contain Text    @{STATUS_BAR}    Query error
+
+TC-AC-059 Continuing Keyword After A Finished Operand Stays Bare
+    [Documentation]    The counterpart of TC-AC-058: "and" is the one kind of
+    ...    word that *does* follow an operand directly (".age > 20 and ..."),
+    ...    so it must not get a pipe -- "| and" would be a syntax error.
+    ...    Continuations also lead the list after an operand, so the default
+    ...    first row is the right one to accept.
+    [Tags]    p2
+    Load People Fixture
+    Toggle Autocomplete
+    Type Query Text    .[] | .age > 20 an
+    Suggest Popup Should Contain    and
+    Press Key    enter
+    Type Text    ${SPACE}.age > 30
+    Sleep    0.4s
+    Run Current Query
+    Region Should Contain Text    @{STATUS_BAR}    3 result
+    Region Should Not Contain Text    @{STATUS_BAR}    Query error
