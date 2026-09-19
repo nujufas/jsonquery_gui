@@ -13,8 +13,11 @@ file (or paste JSON directly) and query it with **jq**, **JSON Pointer**,
   embedded [jaq](https://github.com/01mf02/jaq)), JSON Pointer (RFC 6901),
   JSONPath (RFC 9535), and JMESPath. Pick one from the toolbar or let the app
   auto-detect it from what you type.
-- **Inline autocomplete** — as-you-type suggestions for jq's built-in
-  functions, each with a short doc string, toggleable from the toolbar.
+- **Inline autocomplete** — as-you-type suggestions for each dialect's
+  built-in functions (with a short doc string) and for the loaded document's
+  own keys and array indices — type `.` or `[` to see what's there. Accepted
+  text is spelled for the dialect (`.["first name"]` in jq, `$["first name"]`
+  in JSONPath, `."first name"` in JMESPath). Toggleable from the toolbar.
 
   ![Autocomplete suggestions in the query box](docs/images/screenshot-autocomplete.png)
 - **Built-in tutorial** — the 📖 icon in the toolbar (or `F1`) opens a
