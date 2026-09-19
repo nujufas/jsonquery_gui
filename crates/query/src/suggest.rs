@@ -53,6 +53,13 @@
 //! Static keywords are likewise only offered where a name could actually
 //! start: never right after a `.` (that's a field, `.first` is not the
 //! builtin), after a closing bracket, or inside a string literal.
+//!
+//! Where a name comes *after a finished operand* (`map(.name ` + `abs`) it
+//! can't just sit beside it, so it is inserted as `| abs`
+//! ([`operand_ended_before`]). The few words that do continue an operand
+//! (`and`, `or`, `as`, `then`, `else`, `end`, ..., JMESPath's `&&`/`||`) stay
+//! bare and lead the list, and JSONPath, which has no pipe, offers nothing
+//! there.
 
 use std::collections::HashSet;
 use std::ops::Range;
@@ -160,12 +167,50 @@ pub fn suggest(
     }
 
     if keywords_wanted(before, word, word_start, !out.is_empty()) {
-        let mut kw = keyword_candidates(&scope, word, word_start..cursor);
+        let after_operand = operand_ended_before(&before[..word_start]);
+        let mut kw = keyword_candidates(&scope, word, word_start..cursor, after_operand);
         kw.truncate(KEYWORD_CANDIDATE_CAP);
         out.extend(kw);
     }
 
     out
+}
+
+/// jq keywords that are followed by an expression (or, for `def`, a name being
+/// defined), so a name right after one starts something new rather than
+/// following an operand.
+const OPERAND_EXPECTING_WORDS: [&str; 11] = [
+    "if", "then", "elif", "else", "try", "catch", "and", "or", "reduce", "foreach", "def",
+];
+
+/// Whether the (whitespace-trimmed) query text just before a name being typed
+/// ends a complete operand — `.name`, `)`, `"x"`, `1`, `$x`, `.` — as opposed to
+/// an operator, an opener or a keyword that still wants one (`|`, `(`, `,`,
+/// `+`, `then`, ...). A name that follows an operand can't just sit beside it
+/// (`map(.name abs` is two terms, not a call), so it needs a joiner — see
+/// [`keyword_candidates`].
+fn operand_ended_before(text: &str) -> bool {
+    let text = text.trim_end();
+    let Some(last) = text.chars().next_back() else {
+        return false;
+    };
+    match last {
+        ')' | ']' | '}' | '"' | '\'' | '`' | '@' | '$' | '.' => true,
+        // jq's try-suffix `.a?` ends an operand; JMESPath's `[?` opens one.
+        '?' => !text.ends_with("[?"),
+        // JMESPath/JSONPath's `.*` wildcard is a step, jq's `*` a multiply.
+        '*' => text.ends_with(".*"),
+        c if is_word_char(c) => {
+            let word_start = text
+                .char_indices()
+                .rev()
+                .take_while(|(_, c)| is_word_char(*c))
+                .last()
+                .map_or(0, |(i, _)| i);
+            !OPERAND_EXPECTING_WORDS.contains(&&text[word_start..])
+        }
+        _ => false,
+    }
 }
 
 /// Whether static keyword/function names make sense at the cursor, where
@@ -240,13 +285,45 @@ fn is_word_char(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
 }
 
-fn keyword_candidates(scope: &[Kind], word: &str, replace: Range<usize>) -> Vec<Suggestion> {
+/// Whether `cand` is one of the few words that can directly follow a finished
+/// operand (`.a and .b`, `if . then`, `x as $y`, JMESPath's `&&`), where every
+/// other name needs a joiner first.
+fn continues_operand(cand: &Candidate) -> bool {
+    matches!(
+        (cand.kind, cand.text),
+        (
+            Kind::Jq,
+            "and" | "or" | "as" | "then" | "elif" | "else" | "end" | "catch"
+        ) | (Kind::JmesPath, "&&" | "||")
+    )
+}
+
+/// Keyword/function candidates matching `word`, replacing `replace`.
+///
+/// `after_operand` says the name would land right after a finished operand
+/// (see [`operand_ended_before`]). Then a name that isn't a continuation is
+/// inserted as `| name`, since it can only be the next stage of a pipeline
+/// (jq and JMESPath both have `|`) — and JSONPath, which has none, offers
+/// nothing there. Continuations go first, being the only things that fit
+/// without a pipe: an alphabetical dump would push `then` and `or` past the row
+/// cap.
+fn keyword_candidates(
+    scope: &[Kind],
+    word: &str,
+    replace: Range<usize>,
+    after_operand: bool,
+) -> Vec<Suggestion> {
     let tag_engines = scope.len() > 1;
     let word_lower = word.to_lowercase();
 
-    let mut matches: Vec<(u8, &Candidate)> = Vec::new();
+    // (match score, needs a pipe, candidate)
+    let mut matches: Vec<(u8, bool, &Candidate)> = Vec::new();
     for kind in scope {
         for cand in builtins(*kind) {
+            let piped = after_operand && !continues_operand(cand);
+            if piped && *kind == Kind::JsonPath {
+                continue;
+            }
             let text_lower = cand.text.to_lowercase();
             let score = if word.is_empty() || text_lower.starts_with(&word_lower) {
                 Some(0)
@@ -256,18 +333,26 @@ fn keyword_candidates(scope: &[Kind], word: &str, replace: Range<usize>) -> Vec<
                 None
             };
             if let Some(score) = score {
-                matches.push((score, cand));
+                matches.push((score, piped, cand));
             }
         }
     }
-    matches.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.text.cmp(b.1.text)));
-    matches.dedup_by(|a, b| a.1.text == b.1.text && a.1.detail == b.1.detail);
+    matches.sort_by(|a, b| {
+        (a.0, a.1)
+            .cmp(&(b.0, b.1))
+            .then_with(|| a.2.text.cmp(b.2.text))
+    });
+    matches.dedup_by(|a, b| a.2.text == b.2.text && a.2.detail == b.2.detail);
 
     matches
         .into_iter()
-        .map(|(_, cand)| Suggestion {
+        .map(|(_, piped, cand)| Suggestion {
             replace: replace.clone(),
-            insert: cand.text.to_string(),
+            insert: if piped {
+                format!("| {}", cand.text)
+            } else {
+                cand.text.to_string()
+            },
             label: if tag_engines {
                 format!("{}  [{}]", cand.text, cand.kind.label())
             } else {
@@ -1871,6 +1956,222 @@ mod tests {
         }
         // An empty word after a pipe still lists the keywords as a fallback.
         assert!(!suggest(".a | ", 5, Some(Kind::Jq), None).is_empty());
+    }
+
+    // ---- keywords after a finished operand need a pipe ----------------------
+
+    /// Text after accepting the keyword `word` in `marked` (no document).
+    fn accepting_keyword(marked: &str, explicit: Option<Kind>, word: &str) -> String {
+        let (text, cursor) = split_cursor(marked);
+        let items = suggest(&text, cursor, explicit, None);
+        let s = items
+            .iter()
+            .find(|s| s.label.split_whitespace().next() == Some(word))
+            .unwrap_or_else(|| panic!("{marked:?}: no {word:?} in {:?}", labels(&items)));
+        accept(&text, s)
+    }
+
+    #[test]
+    fn a_function_after_a_finished_operand_is_piped_in() {
+        // The reported bug: inside `map(...)`, accepting `abs` right after
+        // `.name` gave `map(.name abs` — two terms side by side.
+        let jq = Some(Kind::Jq);
+        assert_eq!(
+            accepting_keyword(".members | map(.name ", jq, "abs"),
+            ".members | map(.name | abs"
+        );
+        // A partly typed word is replaced, not kept in front of the pipe.
+        assert_eq!(
+            accepting_keyword(".members | map(.name ab", jq, "abs"),
+            ".members | map(.name | abs"
+        );
+        // Same with no engine picked: the leading `.` says jq.
+        assert_eq!(
+            accepting_keyword(".members | map(.name ", None, "abs"),
+            ".members | map(.name | abs"
+        );
+    }
+
+    #[test]
+    fn every_kind_of_finished_operand_gets_a_pipe() {
+        let jq = Some(Kind::Jq);
+        for (marked, want) in [
+            // a field, an index, a call, an object, a string, a number, a
+            // variable, the identity, a try-suffix, a bare builtin
+            (".a ‸", ".a | abs"),
+            (".a[0] ‸", ".a[0] | abs"),
+            ("map(.a) ‸", "map(.a) | abs"),
+            ("{a: 1} ‸", "{a: 1} | abs"),
+            (".a == \"x\" ‸", ".a == \"x\" | abs"),
+            (".a + 1 ‸", ".a + 1 | abs"),
+            (". as $x ‸", ". as $x | abs"),
+            (". ‸", ". | abs"),
+            (".. ‸", ".. | abs"),
+            (".a? ‸", ".a? | abs"),
+            (".a | length ‸", ".a | length | abs"),
+            ("  .a   ‸", "  .a   | abs"),
+            // a partly typed name after one
+            (".a ab‸", ".a | abs"),
+            // ...and with text already after the cursor
+            (".a ‸)", ".a | abs)"),
+        ] {
+            assert_eq!(accepting_keyword(marked, jq, "abs"), want, "{marked:?}");
+        }
+    }
+
+    #[test]
+    fn a_function_where_an_expression_starts_is_not_piped() {
+        let jq = Some(Kind::Jq);
+        for (marked, want) in [
+            ("ab", "abs"),
+            ("  ab", "  abs"),
+            (".a | ‸", ".a | abs"),
+            (".a |ab", ".a |abs"),
+            ("map(‸", "map(abs"),
+            (".a, ‸", ".a, abs"),
+            ("[ab", "[abs"),
+            ("{a: ‸", "{a: abs"),
+            (".a + ‸", ".a + abs"),
+            (".a == ‸", ".a == abs"),
+            (".a // ‸", ".a // abs"),
+            (".a and ‸", ".a and abs"),
+            (".a or ‸", ".a or abs"),
+            ("if . then ‸", "if . then abs"),
+            ("if . then . else ‸", "if . then . else abs"),
+            ("try ‸", "try abs"),
+            ("reduce ‸", "reduce abs"),
+            ("reduce .[] as $x (0; ‸", "reduce .[] as $x (0; abs"),
+            (".a | .b; ‸", ".a | .b; abs"),
+        ] {
+            assert_eq!(accepting_keyword(marked, jq, "abs"), want, "{marked:?}");
+        }
+    }
+
+    #[test]
+    fn jmespath_pipes_a_function_after_an_operand_too() {
+        let jm = Some(Kind::JmesPath);
+        assert_eq!(accepting_keyword("people ‸", jm, "abs"), "people | abs");
+        assert_eq!(
+            accepting_keyword("people[0].age ab‸", jm, "abs"),
+            "people[0].age | abs"
+        );
+        assert_eq!(accepting_keyword("@ ‸", jm, "abs"), "@ | abs");
+        // A filter's `?` opens an expression, it doesn't end one.
+        assert_eq!(accepting_keyword("people[? ‸", jm, "abs"), "people[? abs");
+        assert_eq!(
+            accepting_keyword("people[?age > `1` && ‸", jm, "abs"),
+            "people[?age > `1` && abs"
+        );
+        assert_eq!(accepting_keyword("people | ‸", jm, "abs"), "people | abs");
+        // The bare-word (auto) scope is jq *or* JMESPath, and both have `|`.
+        let (text, items) = suggest_at("people ab‸", None, &json!({}));
+        assert!(items.iter().any(|s| accept(&text, s) == "people | abs"));
+    }
+
+    #[test]
+    fn continuing_keywords_after_an_operand_stay_bare_and_come_first() {
+        let jq = Some(Kind::Jq);
+        for word in ["and", "or", "as", "then", "elif", "else", "end", "catch"] {
+            assert_eq!(
+                accepting_keyword(".a ‸", jq, word),
+                format!(".a {word}"),
+                "{word}"
+            );
+        }
+        assert_eq!(
+            accepting_keyword("people ‸", Some(Kind::JmesPath), "&&"),
+            "people &&"
+        );
+        assert_eq!(
+            accepting_keyword("people ‸", Some(Kind::JmesPath), "||"),
+            "people ||"
+        );
+        // They lead the list — an alphabetical dump would push `then` and `or`
+        // past the row cap, leaving only things that need a pipe.
+        let items = suggest(".a ", 3, jq, None);
+        assert_eq!(
+            labels(&items)[..8],
+            ["and", "as", "catch", "elif", "else", "end", "or", "then"]
+        );
+        // Typing narrows as usual: `a` prefers `and`/`as` over `abs`.
+        let items = suggest(".a a", 4, jq, None);
+        assert_eq!(labels(&items)[..3], ["and", "as", "abs"]);
+        // Where an expression starts, alphabetical order is untouched.
+        let items = suggest(".a | ", 5, jq, None);
+        assert_eq!(labels(&items)[0], "abs");
+    }
+
+    #[test]
+    fn jsonpath_has_no_pipe_so_nothing_is_offered_after_an_operand() {
+        let jp = Some(Kind::JsonPath);
+        for q in [
+            "$.a ",
+            "$.a le",
+            "$ ",
+            "$..book[?@.price < 10 ",
+            "$.a[0] ct",
+        ] {
+            assert!(
+                suggest(q, q.len(), jp, None).is_empty(),
+                "{q:?}: {:?}",
+                labels(&suggest(q, q.len(), jp, None))
+            );
+        }
+        // Where an operand *starts* inside a filter, functions are still on.
+        for q in ["$..book[?len", "$..book[?@.price < 10 && len", "$..book[? "] {
+            assert!(!suggest(q, q.len(), jp, None).is_empty(), "{q:?}");
+        }
+    }
+
+    /// The strongest check on the joiner rules: accept a keyword after a
+    /// spread of query starts and require the real engine to *parse* the
+    /// result. (Closers are appended by hand since the popup doesn't close
+    /// what the user opened, and a zero-argument builtin stands in for the
+    /// call so that only the joining is under test.)
+    #[test]
+    fn an_accepted_keyword_joins_the_query_into_valid_syntax() {
+        use jsonquery_core::engine::QueryEvent;
+        use std::sync::atomic::AtomicBool;
+
+        let doc = json!({"members": [{"name": "Ada", "age": -3}], "n": -5});
+        let jq = Some(Kind::Jq);
+        let jm = Some(Kind::JmesPath);
+        let cases: Vec<(&str, Option<Kind>, &str, &str)> = vec![
+            // (query so far, engine, keyword to accept, closers to append)
+            (".members | map(.name ", jq, "length", ")"),
+            (".members | map(.age ", jq, "abs", ")"),
+            (".n ", jq, "abs", ""),
+            (".n | abs ", jq, "tostring", ""),
+            (".members[0] ", jq, "keys", ""),
+            (".members[0].name == \"Ada\" ", jq, "not", ""),
+            ("[.members[] | .age ", jq, "abs", "]"),
+            ("{a: .n ", jq, "abs", "}"),
+            (".n as $x ", jq, "abs", ""),
+            (".n ", jq, "and", " true"),
+            ("if .n then .n ", jq, "abs", " else 0 end"),
+            ("if .n ", jq, "then", " 1 else 0 end"),
+            ("members ", jm, "length", "(@)"),
+            ("members[0].age ", jm, "abs", "(@)"),
+            ("members[0].name == 'Ada' ", jm, "&&", " `true`"),
+        ];
+        for (marked, explicit, word, closers) in cases {
+            // As a user would: type the start of the name (an empty word only
+            // lists the first few alphabetically), or nothing for a symbol.
+            let typed: String = word.chars().filter(|c| is_word_char(*c)).take(2).collect();
+            let (text, cursor) = split_cursor(&format!("{marked}{typed}"));
+            let items = suggest(&text, cursor, explicit, None);
+            let s = items
+                .iter()
+                .find(|s| s.label == word)
+                .unwrap_or_else(|| panic!("{marked:?}: no {word:?} in {:?}", labels(&items)));
+            let accepted = format!("{}{closers}", accept(&text, s));
+            let kind = explicit.unwrap_or_else(|| Kind::detect(&accepted));
+            kind.engine()
+                .run(&doc, &accepted, &AtomicBool::new(false), &mut |ev| {
+                    if let QueryEvent::Item(_) = ev {}
+                })
+                .unwrap_or_else(|e| panic!("{marked:?} + {word:?} -> {accepted:?}: {e}"));
+        }
     }
 
     // ---- which dialect a path belongs to ----------------------------------

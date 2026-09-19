@@ -20,16 +20,18 @@ pub struct QuerySuggest {
     /// more" row, or implicitly once keyboard navigation selects past the
     /// preview (see `App::query_text_edit`).
     pub expanded: bool,
-    /// The feature's on/off switch — the query bar's toggle button and
-    /// Escape both drive this (see `set_enabled`). Unlike `dismissed`
-    /// below, this does *not* clear itself on the next keystroke: once
-    /// off, suggestions stay off until the user explicitly turns them back
-    /// on. Experimental, so off by default.
+    /// The feature's on/off switch — driven only by the query bar's toggle
+    /// button (see `set_enabled`). Unlike `dismissed` below, this does *not*
+    /// clear itself on the next keystroke: once off, suggestions stay off
+    /// until the user explicitly turns them back on. Experimental, so off by
+    /// default.
     pub enabled: bool,
-    /// Set right after accepting a candidate; cleared as soon as the text
-    /// or cursor changes again, so accepting doesn't disable the feature
-    /// for the rest of the query — just suppresses the immediate
-    /// re-suggestion of the thing just accepted (see `accepted`).
+    /// Set right after accepting a candidate, and by Escape; cleared as soon
+    /// as the text or cursor changes again. So neither disables the feature
+    /// for the rest of the query — accepting just suppresses the immediate
+    /// re-suggestion of the thing just accepted (see `accepted`), and Escape
+    /// just puts away the list that's showing until there's something new to
+    /// suggest (see `dismiss`).
     dismissed: bool,
     last_cursor: Option<usize>,
     /// The row count the popup's `egui::Area` was last sized for (see
@@ -61,8 +63,8 @@ impl QuerySuggest {
     /// it sees an Escape keypress, as part of its own frame-start
     /// processing — before this method (or anything else in `App::update`)
     /// ever runs, so `consume_key` here is too late to prevent it. Handling
-    /// Escape as "turn suggestions off" rather than "leave the query box"
-    /// means we have to explicitly ask for that focus back afterwards.
+    /// Escape as "close this list" rather than "leave the query box" means
+    /// we have to explicitly ask for that focus back afterwards.
     pub fn intercept_keys(&mut self, ctx: &egui::Context, text_edit_id: egui::Id) -> Option<usize> {
         if !self.open || self.items.is_empty() {
             return None;
@@ -76,9 +78,7 @@ impl QuerySuggest {
                 self.selected = (self.selected + self.items.len() - 1) % self.items.len();
             }
             if i.consume_key(egui::Modifiers::NONE, egui::Key::Escape) {
-                self.enabled = false;
-                self.open = false;
-                self.items.clear();
+                self.dismiss();
                 escaped = true;
             }
             let accept = i.consume_key(egui::Modifiers::NONE, egui::Key::Enter)
@@ -146,11 +146,23 @@ impl QuerySuggest {
         self.items.clear();
     }
 
+    /// Put away the list that's showing (Escape), without turning the
+    /// feature off: it stays closed while the text and cursor stay put, and
+    /// the next keystroke or cursor move computes a fresh list — which shows
+    /// as soon as there is anything to suggest. Same suppression as
+    /// `accepted`, minus the cursor bookkeeping: nothing moved, so
+    /// `last_cursor` (set by the `recompute` that opened the list) is
+    /// already where the cursor is.
+    pub fn dismiss(&mut self) {
+        self.close();
+        self.dismissed = true;
+    }
+
     /// Turn the whole feature on or off — the query bar's toggle button
-    /// calls this directly; Escape (in `intercept_keys`) calls the `false`
-    /// half of it. Re-enabling also clears any lingering `dismissed` state
-    /// so suggestions resume immediately, reflecting the query as it
-    /// stands right now, rather than waiting for the next keystroke.
+    /// calls this directly. Re-enabling also clears any lingering
+    /// `dismissed` state so suggestions resume immediately, reflecting the
+    /// query as it stands right now, rather than waiting for the next
+    /// keystroke.
     pub fn set_enabled(&mut self, enabled: bool) {
         self.enabled = enabled;
         if enabled {
@@ -188,4 +200,82 @@ fn byte_offset_for_char_index(s: &str, char_idx: usize) -> usize {
         .nth(char_idx)
         .map(|(b, _)| b)
         .unwrap_or(s.len())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn suggesting() -> QuerySuggest {
+        QuerySuggest {
+            enabled: true,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn dismiss_puts_the_list_away_without_turning_the_feature_off() {
+        let mut s = suggesting();
+        s.recompute(".a | so", Some(7), true, None, None);
+        assert!(s.open);
+
+        s.dismiss();
+        assert!(s.enabled, "Escape must not switch autocomplete off");
+        assert!(!s.open && s.items.is_empty());
+
+        // Frames while the box just sits there — same text, same cursor — must
+        // not bring the list straight back.
+        for _ in 0..3 {
+            s.recompute(".a | so", Some(7), false, None, None);
+            assert!(!s.open);
+        }
+    }
+
+    #[test]
+    fn typing_after_a_dismiss_brings_suggestions_back() {
+        let mut s = suggesting();
+        s.recompute(".a | so", Some(7), true, None, None);
+        s.dismiss();
+
+        s.recompute(".a | sor", Some(8), true, None, None);
+        assert!(s.open, "the next keystroke should suggest again");
+        assert!(s.items.iter().any(|i| i.label.starts_with("sort")));
+    }
+
+    #[test]
+    fn a_dismiss_lasts_only_until_something_can_be_suggested_again() {
+        let mut s = suggesting();
+        s.recompute(".a | so", Some(7), true, None, None);
+        s.dismiss();
+
+        // Nothing matches yet — still closed, and no longer "dismissed"...
+        s.recompute(".a | soz", Some(8), true, None, None);
+        assert!(!s.open);
+        // ...so as soon as there is a match, it opens.
+        s.recompute(".a | so", Some(7), true, None, None);
+        assert!(s.open);
+    }
+
+    #[test]
+    fn moving_the_cursor_after_a_dismiss_suggests_again() {
+        let mut s = suggesting();
+        s.recompute(".a | so ", Some(7), true, None, None);
+        s.dismiss();
+
+        s.recompute(".a | so ", Some(6), false, None, None);
+        assert!(s.open);
+    }
+
+    #[test]
+    fn the_toggle_stays_the_only_way_to_turn_it_off() {
+        let mut s = suggesting();
+        s.recompute(".a | so", Some(7), true, None, None);
+        s.set_enabled(false);
+        assert!(!s.enabled && !s.open);
+        s.recompute(".a | sor", Some(8), true, None, None);
+        assert!(!s.open, "off means off, whatever is typed");
+        s.set_enabled(true);
+        s.recompute(".a | sor", Some(8), false, None, None);
+        assert!(s.open);
+    }
 }
