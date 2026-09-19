@@ -20,6 +20,11 @@ file (or paste JSON directly) and query it with **jq**, **JSON Pointer**,
   in JSONPath, `."first name"` in JMESPath). Toggleable from the toolbar.
 
   ![Autocomplete suggestions in the query box](docs/images/screenshot-autocomplete.png)
+- **Colour-coded queries** — the query box tints each step of what you type
+  (`.members`, `[]`, `select(…)`, `.name`; a Pointer's `/segments`) in the same
+  palette the tutorial uses, leaving pipes, commas and operators plain, so a
+  long query's structure is visible at a glance. It follows the selected
+  dialect and copes with half-typed queries.
 - **Built-in tutorial** — the 📖 icon in the toolbar (or `F1`) opens a
   separate window with a lesson tree for each dialect. Every lesson has short
   examples with the query broken down piece by piece and a live result;

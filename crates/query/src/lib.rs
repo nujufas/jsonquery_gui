@@ -20,6 +20,7 @@
 //! lower-level function.
 
 mod convert;
+pub mod highlight;
 pub mod jmespath_engine;
 pub mod jq;
 pub mod json_pointer;
