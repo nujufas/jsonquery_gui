@@ -17,7 +17,8 @@ file (or paste JSON directly) and query it with **jq**, **JSON Pointer**,
   built-in functions (with a short doc string) and for the loaded document's
   own keys and array indices — type `.` or `[` to see what's there. Accepted
   text is spelled for the dialect (`.["first name"]` in jq, `$["first name"]`
-  in JSONPath, `."first name"` in JMESPath). Toggleable from the toolbar.
+  in JSONPath, `."first name"` in JMESPath). Off by default — switch it on
+  with the 💡 button in the toolbar.
 
   ![Autocomplete suggestions in the query box](docs/images/screenshot-autocomplete.png)
 - **Colour-coded queries** — the query box tints each step of what you type
@@ -50,7 +51,7 @@ file (or paste JSON directly) and query it with **jq**, **JSON Pointer**,
   wrapping past the last one; **Find All** lists every match in a panel below,
   where a click reveals it.
 
-  ![Search results panel showing a match in the source tree](docs/images/screenshot-search.png)
+  ![The Find dialog and its Find All list, with the selected match revealed in the source tree](docs/images/screenshot-search.png)
 - **Find in Source** — right-click a result row to see where it came from.
   The row's key and value are matched against the source, and for array
   elements their position: one hit is revealed directly, several are listed
