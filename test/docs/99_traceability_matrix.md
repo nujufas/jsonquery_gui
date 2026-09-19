@@ -224,28 +224,45 @@ visible, rather than assuming one right-click always opens it.
 
 | ID | Title | Priority | Status | Suite |
 |---|---|---|---|---|
-| TC-SRCH-001 | Dialog fields/buttons | P2 | **Passing** | `suites/search/` |
-| TC-SRCH-002 | Case-insensitive substring over keys+values | P1 | **Passing** | `suites/search/` |
+| TC-SRCH-001 | Dialog fields/buttons (Find, Find All, Cancel) | P2 | **Passing** | `suites/search/` |
+| TC-SRCH-002 | Case-insensitive substring over keys+values (found, stepped, highlighted) | P1 | **Passing** | `suites/search/` |
 | TC-SRCH-003 | Regex mode + invalid-pattern error | P2 | **Passing** (split into TC-SRCH-003a/003b) | `suites/search/` |
-| TC-SRCH-004 | Results header format/states/Close | P2 | **Passing** (zero-hit case checked via absence of a hit line, not the weak-styled "No matches found." text itself — see note) | `suites/search/` |
+| TC-SRCH-004 | Results panel header format/states/Close (Find All; zero-hit case checked via absence of a hit line, not the weak-styled "No matches found." text itself — see note) | P2 | **Passing** | `suites/search/` |
 | TC-SRCH-005 | Hit line format + click-to-reveal | P1 | **Passing** | `suites/search/` |
 | TC-SRCH-006 | 5,000-match cap, no notice shown | P3 | Not implemented — constructing a 5,000+-match fixture for one P3 case wasn't worth the added suite runtime | `suites/search/` |
-| TC-SRCH-007 | Search invalidated by new load/query/Clear | P3 | **Passing** (Clear sub-case only, as TC-SRCH-007c — the new-load/new-query sub-cases weren't implemented: distinguishing "invalidated" from "just not re-shown yet" reliably needs more than this harness's coarse OCR checks) | `suites/search/` |
+| TC-SRCH-007 | Search invalidated by new load/query/Clear | P3 | **Passing** (Clear sub-case only, as TC-SRCH-007c for the list and 007d for the dialog status — the new-load/new-query sub-cases weren't implemented: distinguishing "invalidated" from "just not re-shown yet" reliably needs more than this harness's coarse OCR checks) | `suites/search/` |
 | TC-SRCH-020 | Find in Source: single exact hit revealed directly | P1 | **Passing** | `suites/search/` |
 | TC-SRCH-021 | Find in Source: not-found (non-error) | P1 | **Passing** | `suites/search/` |
 | TC-SRCH-022 | Unavailable on Source rows — cross-ref TC-CTX-001 | P2 | **Passing** (covered by TC-CTX-001 — duplicate by design, no separate test) | `suites/context_menus/` |
 | TC-SRCH-023 | Find in Source: several hits listed, best selected + revealed | P1 | **Passing** | `suites/search/` |
 | TC-SRCH-024 | Find in Source: clicking another candidate moves selection + reveal | P1 | **Passing** | `suites/search/` |
 | TC-SRCH-025 | Find in Source: transformed string falls back to text search, listed only | P1 | **Passing** | `suites/search/` |
-| TC-SRCH-026 | A new Search replaces a Find in Source list | P3 | **Passing** | `suites/search/` |
+| TC-SRCH-026 | A new Search (Find All) replaces a Find in Source list | P3 | **Passing** | `suites/search/` |
 | TC-SRCH-027 | Find in Source: nested key/value row lists its same-key matches, nth selected | P1 | **Passing** | `suites/search/` |
 | TC-SRCH-028 | Find in Source: nested row's other match picked from the list | P1 | **Passing** | `suites/search/` |
 | TC-SRCH-029 | Find in Source: nested row whose key picks out one node jumps to it | P1 | **Passing** | `suites/search/` |
+| TC-SRCH-030 | Ctrl+F puts the cursor in the Find field | P1 | **Passing** | `suites/search/` |
+| TC-SRCH-031 | Search… from a row's context menu focuses the field too | P1 | **Passing** | `suites/search/` |
+| TC-SRCH-032 | Find steps through matches one by one, and wraps | P1 | **Passing** | `suites/search/` |
+| TC-SRCH-033 | Enter repeats Find, field keeps focus | P1 | **Passing** | `suites/search/` |
+| TC-SRCH-034 | Changing the text starts again at the first match | P2 | **Passing** | `suites/search/` |
+| TC-SRCH-035 | Escape closes the dialog | P2 | **Passing** | `suites/search/` |
+| TC-SRCH-036 | Ctrl+F on an open dialog selects its text | P2 | **Passing** | `suites/search/` |
+| TC-SRCH-037 | The Find in Source panel closes | P3 | **Passing** | `suites/search/` |
+| TC-SRCH-038 | Enter still finds after ticking the Regex box | P2 | **Passing** | `suites/search/` |
+| TC-SRCH-039 | Find with no match reported in the dialog (not an error) | P2 | **Passing** | `suites/search/` |
+| TC-SRCH-040 | Find reveals the match in its tree | P1 | **Passing** | `suites/search/` |
+| TC-SRCH-041 | Find leaves a Find in Source list in place | P3 | **Passing** | `suites/search/` |
+| TC-SRCH-042 | Find All lists every match, dialog stays open, nothing revealed | P1 | **Passing** | `suites/search/` |
+| TC-SRCH-043 | Clicking a Find All entry reveals it; Find carries on from it | P1 | **Passing** | `suites/search/` |
+| TC-SRCH-044 | Find moves the highlight in a Find All list | P2 | **Passing** | `suites/search/` |
+| TC-SRCH-045 | Find All over Results lists Results rows | P2 | **Passing** | `suites/search/` |
+| TC-SRCH-046 | Find All with an invalid regex reported in the dialog | P2 | **Passing** | `suites/search/` |
 
 **Confirmed during implementation, the two biggest findings in this whole
-second pass**: (1) the search-results panel **sizes itself to its content**
-rather than staying a fixed height — a panel showing one hit renders its
-header at a visibly different y-position (~609) than a bare "No matches
+second pass**: (1) the bottom search-results panel **sizes itself to its
+content** rather than staying a fixed height — a panel showing one hit renders
+its header at a visibly different y-position (~609) than a bare "No matches
 found." panel (~739). Every fixed-y-coordinate region/click point for this
 panel was replaced with one wide `@{SEARCH_RESULTS_AREA}` region (OCR'd as a
 whole) plus `Click Text In Region`-based lookups for "Close" and hit lines,
@@ -264,6 +281,23 @@ itself: the heading above it echoes the search term in the same wide
 region ("Search results — Source "Alice""), so clicking the first
 OCR-found "Alice" can land on that (non-clickable) heading instead of the
 hit line below it — clicking ".name" (unique to the hit line) instead.
+
+**Find dialog (TC-SRCH-001–003, 007d, 030–040, 042–046)**: `Find` reports in the
+dialog itself, so its checks read the status line under the buttons ("N of M",
+"N matches", "No matches found.", "Search error") — deliberately normal-contrast,
+not weak — and check *which* tree row is highlighted by pixel (a revealed row is
+exactly where OCR drops text). The status crop is 22px, no taller than its one
+line: a crop reaching the dialog's bottom border read "1 of 4" as "oF 4 |"
+(missing digit), while the tight one reads "10f 4", which the library's 0/O and
+whitespace fallbacks still match. `Search For` (Find) waits on *any digit or
+word* for the same reason — a retry after a Find that had in fact registered
+presses Find again and steps on to the next match. `Find All For` has no such
+hazard (repeating a Find All lists the same matches again), and waits on the
+panel's "Search results" heading. List-entry highlights are checked by pixel at
+fixed row positions (637, 655, 673, 691 — 18px stride) against a plain point at
+y=750. Reading the Find field itself is unreliable (the text cursor after the
+last character garbles it), so TC-SRCH-030/031 use the Find button un-dimming as
+the sign that the text landed.
 
 ## Saving — [09_saving.md](09_saving.md)
 
@@ -295,17 +329,17 @@ hit line below it — clicking ".name" (unique to the hit line) instead.
 
 ## Coverage summary
 
-- Total test cases defined: **131** distinct IDs (counting `TC-TOOL-007a-d`
+- Total test cases defined: **149** distinct IDs (counting `TC-TOOL-007a-d`
   as one row of four data-driven variants) across 10 feature areas. (107 from
   the original requirements pass, plus 17 query-correctness cases —
   TC-QRY-023–027, 034–036, 042–045, 052–056 — added in the third
   implementation pass to broaden per-engine query coverage beyond the
   original auto-detect/error-semantics focus.)
-- P1 (release-blocking core correctness): 26.
-- **98 test cases actually implemented and run**, across 10 suites under
+- P1 (release-blocking core correctness): 33.
+- **116 test cases actually implemented and run**, across 10 suites under
   `test/suites/` — `launch_and_window` (4), `opening_sources` (12),
   `query_engines` (39), `toolbar_and_status` (5), `tree_view` (4),
-  `text_view` (7), `context_menus` (5), `search` (16), `keyboard_shortcuts`
+  `text_view` (7), `context_menus` (5), `search` (34), `keyboard_shortcuts`
   (4), `saving` (2) — **all passing**, confirmed green across multiple
   consecutive full-suite runs via `test/run.sh` during implementation (see
   00_test_strategy.md's flakiness note for the residual, mitigated-not-
@@ -313,7 +347,7 @@ hit line below it — clicking ".name" (unique to the hit line) instead.
   under TC-QRY-044). A further 8 requirement IDs are marked Passing by
   cross-reference to one of those 91 (same underlying code path, deliberately
   not re-implemented as a separate test — see each area's own note above),
-  for **106 of the 131 IDs covered**.
+  for **124 of the 149 IDs covered**.
 - **Blocked: 12** — every case needing the native Open File or Save dialog to
   actually complete (TC-OPEN-001/002, TC-CTX-004, TC-SAVE-001/003/004/006/
   007/008/009/010, TC-KEY-003). Root cause confirmed and documented in

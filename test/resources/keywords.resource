@@ -57,25 +57,38 @@ ${SEARCH_FIND_FIELD_X}    183
 ${SEARCH_FIND_FIELD_Y}    84
 ${SEARCH_REGEX_CHECKBOX_X}    30
 ${SEARCH_REGEX_CHECKBOX_Y}    106
-${SEARCH_FIND_ALL_X}      48
+${SEARCH_FIND_X}          39
+${SEARCH_FIND_Y}          127
+${SEARCH_FIND_ALL_X}      89
 ${SEARCH_FIND_ALL_Y}      127
-${SEARCH_CANCEL_X}        104
+${SEARCH_CANCEL_X}        146
 ${SEARCH_CANCEL_Y}        127
+# The dialog's status line, directly under the buttons: "N of M" (plus " --
+# wrapped around to the top" after the last match), "N matches" after a Find
+# All, "No matches found.", or "Search error: ...". Cropped to that first line
+# and no more -- an error message runs to several lines and grows the dialog
+# downward, and anything further down would OCR the tree rows behind it -- and
+# no taller: a
+# crop reaching the dialog's bottom border read "1 of 4" as "oF 4 |", while
+# this one reads it as "10f 4", which the library's 0/O and whitespace
+# fallbacks still match against "1 of 4".
+@{SEARCH_STATUS_AREA}     20     136    330    22
 ${URL_FIELD_X}            183
 ${URL_FIELD_Y}            84
 ${URL_LOAD_X}             40
 ${URL_LOAD_Y}             106
 ${URL_CANCEL_X}           90
 ${URL_CANCEL_Y}           106
-# The bottom search-results panel sizes itself to its content rather than
-# staying a fixed height (confirmed during implementation: a 0-match "No
-# matches found." panel and a 1-hit panel render their header at visibly
-# different y-positions, ~739 vs ~609) -- so header and hit-list share one
-# region wide enough to catch either, rather than two fixed-position crops
-# that only work for one particular content size. Also tall enough on its
-# own for reliable OCR: a too-short crop (the original 26px-tall header-only
-# region) was confirmed to make Tesseract's layout analysis fail outright,
-# producing pure noise rather than a bad-but-legible read.
+# The bottom panel -- a "Find All" hit list or a "Find in Source" candidate
+# list -- sizes itself to its content rather than staying a fixed height
+# (confirmed during implementation: a 0-match "No matches found." panel and a
+# 1-hit panel render their header at visibly different y-positions, ~739 vs
+# ~609) -- so header and hit-list share one region wide enough to catch
+# either, rather than two fixed-position crops that only work for one
+# particular content size. Also tall enough on its own for reliable OCR: a
+# too-short crop (the original 26px-tall header-only region) was confirmed to
+# make Tesseract's layout analysis fail outright, producing pure noise rather
+# than a bad-but-legible read.
 @{SEARCH_RESULTS_AREA}    0      595    1200    205
 # Engine-picker buttons, left to right (calibrated at the default 1200x800
 # window size -- see ENGINE_PICKER_ROW above for the row they sit in).

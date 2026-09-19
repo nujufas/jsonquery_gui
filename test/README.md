@@ -57,7 +57,7 @@ The short version:
     on the first attempt. The shared keywords (`Open Row Context Menu`,
     `Load Via Url`, `Search For`) all retry-and-verify rather than assuming
     one attempt always works.
-  - Some panels (confirmed: the search-results panel) size themselves to
+  - Some panels (confirmed: the bottom hit-list panel) size themselves to
     their content rather than staying a fixed height/position — don't
     calibrate a fixed y-coordinate against only one content size; use one
     wide region plus OCR-based lookups (`Click Text In Region`) instead.
@@ -129,11 +129,14 @@ test/
     context_menus/               — 5 tests: Source vs. Results row menu
                                 contents, Copy JSON Path, Search... scoping,
                                 no menu outside rows
-    search/                       — 9 tests: dialog fields, case-insensitive
-                                substring (incl. bool/null), regex mode +
-                                invalid pattern, results header/close,
-                                hit-line format + reveal-on-click, Find in
-                                Source (success + not-found)
+    search/                       — 34 tests: Find dialog (fields, focus on
+                                open, Find/Enter stepping + wrap, status
+                                line, Esc, Regex), Find All list (contents,
+                                click-to-reveal, Find carrying on from it,
+                                Close), case-insensitive substring (incl.
+                                bool/null), regex mode + invalid pattern,
+                                Find in Source (success, not-found,
+                                candidate list)
     keyboard_shortcuts/           — 4 tests: Ctrl+F panel scoping, Ctrl+Enter
                                 paste (incl. focus-gating), Enter submits
                                 Open URL/Search

@@ -60,7 +60,7 @@ Type Search And Press Enter
     Type Text    ${text}
     Sleep    0.3s
     Press Key    enter
-    Wait Until Region Matches    @{SEARCH_RESULTS_AREA}    results|error    timeout=3
+    Wait Until Region Matches    @{SEARCH_STATUS_AREA}    \\d|of|found|error    timeout=3
 
 *** Test Cases ***
 TC-KEY-000 And TC-KEY-002 Ctrl+F Opens Search Scoped To The Last-Clicked Panel
@@ -106,4 +106,4 @@ TC-KEY-006a Enter Submits The Open URL Popup
 TC-KEY-006b Enter Submits The Search Popup
     [Tags]    p3
     Search For Via Enter    Alice
-    Region Should Contain Text    @{SEARCH_RESULTS_AREA}    Alice
+    Region Should Contain Text    @{SEARCH_STATUS_AREA}    1 of 1

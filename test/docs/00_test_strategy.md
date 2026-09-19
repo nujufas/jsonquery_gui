@@ -341,7 +341,7 @@ still showing the *first* document with no error of any kind, easy to
 misread as an unrelated flake.
 
 **A click immediately after typing into a field can land on a still-disabled
-button.** The Search dialog's "Find All" and the Open URL dialog's "Load"
+button.** The Search dialog's "Find"/"Find All" and the Open URL dialog's "Load"
 are both disabled while their field is blank, and re-enable on the next
 frame after typing finishes. Clicking immediately after `pyautogui.typewrite`
 returns leaves essentially no gap for that frame to render, so the click can

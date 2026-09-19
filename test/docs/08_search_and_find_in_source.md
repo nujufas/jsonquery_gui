@@ -1,20 +1,47 @@
 # Search and Find in Source — test requirements
 
-Source: `crates/app/src/app.rs` (Search popup §, Search-results panel §,
-Find-in-Source §), `crates/core/src/tree.rs`. These are two distinct
-features that happen to share the word "find" — keep them in separate test
-groups (`TC-SRCH-0xx` for Search, `TC-SRCH-02x` for Find in Source) to avoid
-conflating them, per the source inventory's explicit warning that they're
-unrelated.
+Source: `crates/app/src/app.rs` (Search dialog §, bottom hit-list panel §,
+Find-in-Source §), `crates/core/src/tree.rs`. These are two distinct features
+that happen to share the word "find" (and the bottom panel) — keep them in
+separate test groups (`TC-SRCH-00x`, `TC-SRCH-03x`, `TC-SRCH-04x` for Search,
+`TC-SRCH-02x` and `TC-SRCH-037` for Find in Source) to avoid conflating them,
+per the source inventory's explicit warning that they're unrelated.
 
-## A. "Search…" (search-panel dialog + results panel)
+## A. "Search…" (the Find dialog)
+
+`Ctrl+F`, or a row's `Search…` context-menu item, opens a small
+Notepad++-style Find dialog over the tree it was opened for (Source or
+Results — the whole tree, not just the right-clicked row). The **Find field is
+focused at once**, so typing needs no click. The dialog stays open and has two
+ways to see the matches:
+
+- **`Find`** (or Enter) — Notepad++'s Find Next. It reveals the matches **one at
+  a time** (ancestors expanded, scrolled to, highlighted), stepping to the next
+  on each press and wrapping from the last back to the first. The first Find
+  for a query searches the whole tree on the worker thread; changing the text,
+  the `Regex` box or the target tree starts over at the first match.
+- **`Find All`** — lists **every** match in the bottom panel, headed
+  `Search results — {Source|Results} "{query}"` (plus ` (regex)`), one
+  `[Source] {path}   {preview}` line each. Nothing is revealed until a line is
+  clicked. It shares its search with Find, so either can follow the other
+  without searching again.
+
+A status line under the buttons says where the dialog stands: `N of M` (plus
+` — wrapped around to the top` after stepping past the last match) while
+stepping, `N matches` after a Find All, red `No matches found.`, red
+`Search error: {details}`, or a spinner and `Searching…`. It goes blank as soon
+as the text changes. `Esc` or `Cancel` closes the dialog (the panel stays).
+
+When a Find All list is showing and Find steps, the list's highlight follows
+the revealed match; clicking a list line makes Find carry on from that match —
+as Notepad++'s Find Next carries on from where the caret was left.
 
 ### TC-SRCH-001 — Dialog fields and buttons
 Priority: P2
 Steps: open Search (via context menu or Ctrl+F) on either tree.
-Expected: title `Search — {Source|Results}` per which tree; `Find:` field
-with hint `text to find…`; `Regex` checkbox (unchecked by default); `Find
-All` (disabled while the field is blank) and `Cancel` buttons.
+Expected: title `Search — {Source|Results}` per which tree; `Find:` field with
+hint `text to find…`; `Regex` checkbox (unchecked by default); `Find`,
+`Find All` (both disabled while the field is blank) and `Cancel` buttons.
 
 ### TC-SRCH-002 — Plain (non-regex) search is case-insensitive substring
 match over keys and values
@@ -22,8 +49,9 @@ Priority: P1
 Steps: search for a substring that matches a key in one place and a string
 value in another (mixed case relative to the actual fixture content), with
 `Regex` unchecked.
-Expected: both the key-match and the value-match appear as hits, regardless
-of case; number/bool/null values match against their string form (e.g.
+Expected: both the key-match and the value-match are found (`N of M`, the
+first revealed and highlighted; Find steps on to the other), regardless of
+case; number/bool/null values match against their string form (e.g.
 searching `true` matches a boolean `true` value, searching `null` matches a
 null value) — include a sub-case for this since it's an easy thing to miss
 if search were naively "only string values".
@@ -33,28 +61,27 @@ error
 Priority: P2
 Steps: (a) check `Regex`, search a valid pattern (e.g. an alternation or
 anchor); (b) search a syntactically invalid pattern (e.g. `(unclosed`).
-Expected: (a) matches per regex semantics against the same key/value texts;
-(b) Search-results panel shows red `Search error: {details}` (message is the
+Expected: (a) matches per regex semantics against the same key/value texts
+(a hit for `^Ali` proves it — no node contains that as plain text); (b) the
+dialog's status line shows red `Search error: {details}` (message is the
 underlying regex-crate parse error — treat as "non-empty error shown", not an
 exact string match, since the crate's wording isn't part of this app's own
-contract).
+contract). Editing the text or the `Regex` box clears the error. (Find All:
+TC-SRCH-046.)
 
-### TC-SRCH-004 — Results panel: header format, states, and Close behavior
+### TC-SRCH-004 — Results panel: header format, states, and Close
 Priority: P2
-Steps: run a search that produces hits; observe header. Then run one that
-produces none. Then click `Close`.
+Steps: `Find All` for text that occurs; then for text that occurs nowhere; then
+click the panel's `Close`.
 Expected: header reads `Search results — {Source|Results} "{query}"` (regex
-mode appends ` (regex)`); hit count as weak `{N} match(es)` once done, or a
-spinner while running; zero-hit case shows weak `No matches found.`
-(distinct from the red error case in TC-SRCH-003 — don't conflate "0 matches"
-with "search error"); `Close` hides the panel without clearing search state
-(re-triggering Ctrl+F or a menu Search… reopens the popup fresh, but the
-prior results panel's hidden state vs. cleared state is worth a quick check
-if easy to distinguish at implementation time — low priority nuance).
+mode appends ` (regex)`); hit count as weak `{N} match(es)`; the zero-hit case
+shows weak `No matches found.` (distinct from the red `Search error` of
+TC-SRCH-003 — don't conflate "0 matches" with "search error"); `Close` hides
+the panel.
 
 ### TC-SRCH-005 — Each hit line's format and click-to-reveal behavior
 Priority: P1
-Steps: produce a hit, inspect its line, click it.
+Steps: `Find All` for a value that occurs once, inspect its line, click it.
 Expected: line reads `[{Source|Results}]  {jq-style path}   {one-line value
 preview}` (preview format matches tree-row rendering rules from
 [05_tree_view.md](05_tree_view.md) TC-TREE-001); clicking it reveals/expands/
@@ -64,19 +91,117 @@ highlights that node in its owning tree and switches that panel to Tree view
 ### TC-SRCH-006 — 5,000-match cap
 Priority: P3
 Steps: search a term matching more than 5,000 keys/values in a large fixture.
-Expected: results stop accumulating at 5,000, with **no** truncation notice
-shown (unlike the Text-view 20,000-node budget, which does show a notice —
-this is a deliberate asymmetry worth its own assertion so a future "helpful"
-UI change that adds a notice here doesn't get treated as a false positive
-regression without someone noticing the doc needs updating too).
+Expected: Find and Find All see at most the first 5,000 matches (the core
+search stops collecting there), with **no** truncation notice shown (unlike
+the Text-view 20,000-node budget, which does show a notice — this is a
+deliberate asymmetry worth its own assertion so a future "helpful" UI change
+that adds a notice here doesn't get treated as a false positive regression
+without someone noticing the doc needs updating too).
 
 ### TC-SRCH-007 — Search is invalidated by a new load, new query, or Clear
 Priority: P3
-Steps: open a search results panel with hits showing, then (a) load a new
-document, or (b) run a new query, or (c) click `Clear` — three sub-cases.
-Expected: in all three, the search results panel/state no longer reflects
-the stale search (either cleared or hidden — confirm exact behavior at
-implementation time and tighten this assertion accordingly).
+Steps: complete a search (a Find All list, or `N of M` showing), then (a) load
+a new document, or (b) run a new query (Results search), or (c) click `Clear` —
+three sub-cases.
+Expected: in all three, the completed search is discarded: the panel closes
+(TC-SRCH-007c), the status line goes blank (TC-SRCH-007d), and the next Find
+searches afresh instead of stepping on through stale matches.
+
+### TC-SRCH-030 — Ctrl+F puts the cursor in the Find field
+Priority: P1
+Steps: click into a panel, press Ctrl+F, and type without clicking anything.
+Expected: the text lands in the Find field (and `Find`/`Find All` un-dim).
+
+### TC-SRCH-031 — Search… from a row's context menu focuses the field too
+Priority: P1
+Steps: right-click a row → `Search…`, then type without clicking.
+Expected: as TC-SRCH-030.
+
+### TC-SRCH-032 — Find steps through the matches one by one, and wraps
+Priority: P1
+Steps: `people.json`, search `age` (four matches, in document order: the three
+`age` keys, then `.[2].role` = "manager"); press Find four more times.
+Expected: `1 of 4` … `4 of 4`, each revealing and highlighting exactly that
+row (only one row is highlighted at a time); the fifth press wraps to
+`1 of 4 — wrapped around to the top`, highlighting the first match again.
+
+### TC-SRCH-033 — Enter repeats Find and leaves the cursor in the field
+Priority: P1
+Steps: Ctrl+F, type `age`, press Enter twice — no mouse.
+Expected: `1 of 4`, then `2 of 4`: the field keeps keyboard focus after each
+Find, so Enter goes on finding the next match.
+
+### TC-SRCH-034 — Changing the text starts again at the first match
+Priority: P2
+Steps: search `age`, Find once more (`2 of 4`), then search `role`.
+Expected: `1 of 3` — the first `role` match, not a continuation of the `age`
+stepping.
+
+### TC-SRCH-035 — Escape closes the dialog
+Priority: P2
+Steps: open the dialog, press Esc.
+Expected: the dialog closes (Cancel and the title-bar ✕ do too).
+
+### TC-SRCH-036 — Ctrl+F on an already-open dialog selects its text
+Priority: P2
+Steps: open the dialog, type `zzz`, press Ctrl+F again, type `Alice`, press
+Enter.
+Expected: `1 of 1` — the second Ctrl+F re-focused the field with its text
+selected, so typing replaced it (rather than `zzzAlice`, which matches
+nothing). Ctrl+F aimed at the *other* tree instead retargets the dialog and
+clears the field.
+
+### TC-SRCH-038 — Enter still finds after ticking the Regex box
+Priority: P2
+Steps: open the dialog, type `^Ali`, click the `Regex` checkbox, press Enter.
+Expected: `1 of 1` — ticking the box hands the keyboard focus back to the
+field, so Enter means Find without a click on the field first.
+
+### TC-SRCH-039 — Find with no match is reported in the dialog, not as an error
+Priority: P2
+Steps: `Find` for text that occurs nowhere.
+Expected: red `No matches found.` in the status line; the dialog stays open; no
+tree row is highlighted.
+
+### TC-SRCH-040 — Find reveals the match in its tree
+Priority: P1
+Steps: `Find` for a value that occurs once.
+Expected: `1 of 1`; the node is expanded into view, scrolled to and highlighted
+in its owning tree.
+
+### TC-SRCH-042 — Find All lists every match and leaves the dialog open
+Priority: P1
+Steps: `people.json`, `Find All` for `age`.
+Expected: the bottom panel lists all four matches in document order; the status
+line reads `4 matches`; the dialog stays open; **nothing** is revealed or
+highlighted in the tree, and no list entry is selected.
+
+### TC-SRCH-043 — Clicking a Find All entry reveals it; Find carries on from it
+Priority: P1
+Steps: as TC-SRCH-042, click the third entry (`.[2].age`), then `Find`.
+Expected: the entry is highlighted and its row revealed in Source; Find then
+reads `4 of 4` (`.[2].role`) — it continued from the entry clicked rather than
+starting at `1 of 4`.
+
+### TC-SRCH-044 — Find moves the highlight in a Find All list
+Priority: P2
+Steps: as TC-SRCH-042, then `Find` twice.
+Expected: after the first, the first entry is highlighted (`1 of 4`); after the
+second, the second entry is and the first is not — the list and the tree never
+disagree about which match is current.
+
+### TC-SRCH-045 — Find All over Results lists Results rows
+Priority: P2
+Steps: run `.[]` over `people.json`, click into the Results panel, Ctrl+F,
+`Find All` for `bob`, click the hit line.
+Expected: the dialog is titled `Search — Results`; the hit line is tagged
+`[Results]`; clicking it reveals and highlights the row in the Results tree.
+
+### TC-SRCH-046 — Find All with an invalid regex is reported in the dialog
+Priority: P2
+Steps: `Regex` checked, `Find All` for `(unclosed`.
+Expected: red `Search error` in the dialog's status line, as for Find
+(TC-SRCH-003); no list opens.
 
 ## B. "Find in Source"
 
@@ -155,8 +280,15 @@ Expected: nothing equals "ann", so the panel opens with the one text-search hit
 
 ### TC-SRCH-026 — A new Search replaces a Find in Source list
 Priority: P3
-Steps: with a Find in Source list showing, run a `Search…` over Source.
-Expected: the panel is headed `Search results …`, not `Find in Source …`.
+Steps: with a Find in Source list showing, `Find All` over Source.
+Expected: the panel is headed `Search results …`, not `Find in Source …` — the
+two features share the one bottom panel.
+
+### TC-SRCH-041 — Find leaves a Find in Source list in place
+Priority: P3
+Steps: with a Find in Source list showing, `Find` over Source.
+Expected: the panel is still headed `Find in Source …`; Find reports in its own
+dialog (`1 of 1`) and reveals in the tree. Only Find All replaces the list.
 
 ### TC-SRCH-027 — A nested key/value row lists its same-key matches, nth selected
 Priority: P1
@@ -178,3 +310,8 @@ Steps: `sites.json`, query `.sites[1]`; expand result row 0 (Rome) and
 right-click its `zip` child (00100) → `Find in Source`.
 Expected: `sites[1].zip` is revealed directly with no list, although `hq.code`
 (listed first) holds the same value — under another key.
+
+### TC-SRCH-037 — The Find in Source panel closes
+Priority: P3
+Steps: with a Find in Source list showing, click the panel's `Close`.
+Expected: the panel disappears.

@@ -42,7 +42,8 @@ a document loaded, Source focused, press Ctrl+F; (c) Results focused (per
 TC-KEY-000), press Ctrl+F.
 Expected: (a) nothing happens (no dialog opens — since Source has no doc to
 search); (b) Search dialog opens titled `Search — Source`; (c) titled
-`Search — Results`. Full dialog behavior is
+`Search — Results`. In both (b) and (c) the Find field is focused at once —
+typing needs no click (TC-SRCH-030). Full dialog behavior is
 [08_search_and_find_in_source.md](08_search_and_find_in_source.md).
 
 ### TC-KEY-003 — Ctrl+S saves the focused panel's "whole panel" save target
@@ -77,6 +78,8 @@ Cross-reference [02_opening_sources.md](02_opening_sources.md) TC-OPEN-003
 and [08_search_and_find_in_source.md](08_search_and_find_in_source.md)
 TC-SRCH-001+ — implement as a parametrized "press Enter instead of clicking
 the primary button" variant of those existing cases rather than a new case.
+In the Search dialog Enter is `Find`: it steps to the next match and the
+dialog stays open (TC-SRCH-033), where Enter in Open URL loads and closes.
 
 ### TC-KEY-007 — Standard text-editing keys behave natively in every text
 field
