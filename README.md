@@ -15,10 +15,11 @@ file (or paste JSON directly) and query it with **jq**, **JSON Pointer**,
   auto-detect it from what you type.
 - **Inline autocomplete** — as-you-type suggestions for each dialect's
   built-in functions (with a short doc string) and for the loaded document's
-  own keys and array indices — type `.` or `[` to see what's there. Accepted
-  text is spelled for the dialect (`.["first name"]` in jq, `$["first name"]`
-  in JSONPath, `."first name"` in JMESPath). Off by default — switch it on
-  with the 💡 button in the toolbar.
+  own keys and array indices — type `.` or `[` to see what's there. In jq it
+  follows pipes and calls too: inside `.members | map(select(.` it offers the
+  fields of each member. Accepted text is spelled for the dialect
+  (`.["first name"]` in jq, `$["first name"]` in JSONPath, `."first name"` in
+  JMESPath). Off by default — switch it on with the 💡 button in the toolbar.
 
   ![Autocomplete suggestions in the query box](docs/images/screenshot-autocomplete.png)
 - **Colour-coded queries** — the query box tints each step of what you type
