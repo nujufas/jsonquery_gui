@@ -1,0 +1,7 @@
+{
+  "members": [
+    {"name": "Ada", "active": true, "age": 36},
+    {"name": "Bo", "active": false, "age": 41},
+    {"name": "Cy", "active": true, "age": 29}
+  ]
+}

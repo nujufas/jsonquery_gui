@@ -25,11 +25,17 @@
 //! a simple field/index path (see [`parse_dotted_path`] and
 //! [`parse_pointer_path`]) and, if it parses and a document is loaded,
 //! follows it through the loaded document to offer the real field names or
-//! array indices found there. A query that has moved past a plain path — a
-//! pipe, a function call, a filter, ... — falls back to keyword-only
-//! suggestions; this is a deliberate scope limit (correctly tracking "where
-//! am I" through arbitrary jq/JMESPath expressions is a much bigger
-//! undertaking), not an oversight.
+//! array indices found there.
+//!
+//! A jq query that has moved past a plain path — after a pipe, inside a call's
+//! parentheses — is followed by [`scope`], which works out what the `.` at the
+//! cursor refers to (`.members | map(select(.` is a member, not the root) and
+//! completes from there. Where it can't tell — a function it doesn't know, a
+//! stage that builds something new, `reduce`, a string — the query falls back
+//! to keyword-only suggestions rather than guess. JMESPath filters
+//! (`members[?na`), JSONPath filters and any other expression past a plain
+//! path still get keywords only: modelling "where am I" in those dialects
+//! isn't done.
 //!
 //! "Plain path" includes the steps that fan out or index from the end:
 //! `[]`, `[*]`, `.*`, slices and negative indices. After a wildcard the
@@ -67,6 +73,8 @@ use std::ops::Range;
 use serde_json::Value;
 
 use crate::Kind;
+
+mod scope;
 
 /// Markers that mean "this is JMESPath" even without JSON Pointer's `/` or
 /// JSONPath's `$` — see [`crate::Kind::detect`], which this mirrors.
@@ -379,11 +387,20 @@ fn doc_candidates(
     };
     let before = &query_text[..cursor];
     let body_start = before.len() - before.trim_start().len();
+    let body = &before[body_start..];
 
-    let Some((syntax, parsed)) = parse_for_scope(scope, &before[body_start..]) else {
-        return Vec::new();
-    };
-    let parents = resolve_steps(root, &parsed.steps, syntax);
+    // A query that is one plain path completes from the document root. Past
+    // that — after a pipe, inside a call's parentheses — a jq `.` may mean
+    // something else, which the scope tracker works out.
+    let (syntax, parsed, parents, term_start) =
+        if let Some((syntax, parsed)) = parse_for_scope(scope, body) {
+            let parents = resolve_steps(root, &parsed.steps, syntax);
+            (syntax, parsed, parents, body_start)
+        } else if let Some((parsed, parents, term_start)) = scoped_jq_term(scope, body, root) {
+            (Syntax::Jq, parsed, parents, body_start + term_start)
+        } else {
+            return Vec::new();
+        };
     if parents.is_empty() {
         return Vec::new();
     }
@@ -395,12 +412,34 @@ fn doc_candidates(
         before,
         after: &query_text[cursor..],
         cursor,
-        body_start,
+        body_start: term_start,
     };
     match site.parsed.slot {
         Slot::Token => site.token_candidates(),
         Slot::Bracket { quote } => site.bracket_candidates(quote),
     }
+}
+
+/// The path being typed after a pipe or inside a jq call — `.members | map(.na`
+/// — with the values its leading `.` refers to and its offset in `body`.
+/// `None` unless jq is in scope and the term is a `.`-led path whose input is
+/// known (see [`scope`]); a bare word there is a function call, not a key.
+fn scoped_jq_term<'a>(
+    scope: &[Kind],
+    body: &str,
+    root: &'a Value,
+) -> Option<(ParsedPath, Vec<&'a Value>, usize)> {
+    if !scope.contains(&Kind::Jq) {
+        return None;
+    }
+    let found = scope::scope_at(body, root)?;
+    let term = &body[found.term_start..];
+    if !term.starts_with('.') {
+        return None;
+    }
+    let (syntax, parsed) = parse_for_scope(&[Kind::Jq], term)?;
+    let parents = resolve_steps_from(found.inputs, &parsed.steps, syntax);
+    Some((parsed, parents, found.term_start))
 }
 
 /// Where the cursor sits inside a resolved path, shared by the two candidate
@@ -416,7 +455,9 @@ struct Site<'a> {
     before: &'a str,
     after: &'a str,
     cursor: usize,
-    /// Byte offset of the query's first non-whitespace character.
+    /// Byte offset where the path being completed starts: the query's first
+    /// non-whitespace character, or — after a pipe or inside a call — the
+    /// start of that term.
     body_start: usize,
 }
 
@@ -528,7 +569,13 @@ impl Site<'_> {
 /// none if some step doesn't apply. Bounded by [`NODE_CAP`] per step, so a
 /// wildcard over a huge array only samples its first elements.
 fn resolve_steps<'a>(root: &'a Value, steps: &[Step], syntax: Syntax) -> Vec<&'a Value> {
-    let mut nodes = vec![root];
+    resolve_steps_from(vec![root], steps, syntax)
+}
+
+/// [`resolve_steps`] from several starting values rather than one root — the
+/// values a `.` refers to inside a pipeline or a call.
+fn resolve_steps_from<'a>(start: Vec<&'a Value>, steps: &[Step], syntax: Syntax) -> Vec<&'a Value> {
+    let mut nodes = start;
     for step in steps {
         let mut next: Vec<&Value> = Vec::new();
         for node in &nodes {
@@ -2695,6 +2742,387 @@ mod tests {
                     kind.label(),
                     s.detail
                 );
+            }
+        }
+    }
+
+    // ---- scope: pipes and call arguments ----------------------------------
+
+    /// Members that differ in their keys, with a nested object, for completion
+    /// inside pipelines and calls.
+    fn team_doc() -> Value {
+        json!({
+            "members": [
+                {"name": "Ada", "active": true, "age": 36,
+                 "address": {"city": "Oslo", "zip": "0150"}},
+                {"name": "Bo", "active": false, "age": 41,
+                 "address": {"city": "Rome"}, "nick": "b"}
+            ],
+            "title": "team",
+            "tags": ["x", "y"]
+        })
+    }
+
+    /// Every key a member has, in first-seen order.
+    const MEMBER_KEYS: [&str; 5] = ["name", "active", "age", "address", "nick"];
+
+    #[test]
+    fn a_dot_inside_select_completes_the_fields_of_the_element_it_tests() {
+        // The gap this closes: `.members | map(select(.` offered nothing.
+        let doc = team_doc();
+        let (text, items) = suggest_at(".members | map(select(.", None, &doc);
+        assert_eq!(labels(&items), MEMBER_KEYS);
+        // Previewed from the first member that has the key.
+        assert_eq!(items[1].detail, "true");
+        assert_eq!(items[4].detail, "\"b\"");
+        assert_eq!(accept(&text, &items[1]), ".members | map(select(.active");
+    }
+
+    #[test]
+    fn a_partly_typed_name_inside_a_call_narrows_the_list() {
+        let doc = team_doc();
+        let (_, items) = suggest_at(".members | map(select(.a", None, &doc);
+        assert_eq!(labels(&items), ["active", "age", "address"]);
+        assert_eq!(
+            accepting(".members | map(select(.a", None, &doc, "age"),
+            ".members | map(select(.age"
+        );
+    }
+
+    #[test]
+    fn a_stage_after_select_inside_map_still_sees_the_elements() {
+        // `.members | map(select(.active) | .name)`, typed a piece at a time.
+        let doc = team_doc();
+        let (_, items) = suggest_at(".members | map(select(.active) | .", None, &doc);
+        assert_eq!(labels(&items), MEMBER_KEYS);
+        let (_, items) = suggest_at(".members | map(select(.active) | .na", None, &doc);
+        assert_eq!(labels(&items), ["name"]);
+        // With the closing parenthesis already there, the cursor before it.
+        assert_eq!(
+            accepting(".members | map(select(.active) | .na‸)", None, &doc, "name"),
+            ".members | map(select(.active) | .name)"
+        );
+    }
+
+    #[test]
+    fn a_pipe_hands_the_next_stage_what_the_previous_one_reached() {
+        let doc = team_doc();
+        for (marked, want) in [
+            (".members[] | select(.", MEMBER_KEYS.to_vec()),
+            (".members[] | .address | .", vec!["city", "zip"]),
+            (".members[0].address | .c", vec!["city"]),
+            (
+                ".members | .[0] | .",
+                vec!["name", "active", "age", "address"],
+            ),
+            // Three stages deep.
+            (".members | .[1] | .address | .", vec!["city"]),
+        ] {
+            let (_, items) = suggest_at(marked, None, &doc);
+            assert_eq!(labels(&items), want, "{marked:?}");
+        }
+    }
+
+    #[test]
+    fn every_per_element_function_scopes_its_argument_to_the_elements() {
+        let doc = team_doc();
+        for f in [
+            "map",
+            "map_values",
+            "sort_by",
+            "group_by",
+            "unique_by",
+            "min_by",
+            "max_by",
+        ] {
+            let marked = format!(".members | {f}(.");
+            let (_, items) = suggest_at(&marked, None, &doc);
+            assert_eq!(labels(&items), MEMBER_KEYS, "{marked:?}");
+        }
+    }
+
+    #[test]
+    fn a_function_that_reads_the_input_itself_keeps_the_scope() {
+        let doc = team_doc();
+        for (marked, want) in [
+            // A call where a query starts: no leading `.` to say it is jq.
+            ("select(.", vec!["members", "title", "tags"]),
+            (
+                ".members[0] | del(.",
+                vec!["name", "active", "age", "address"],
+            ),
+            // `first` keeps the array, and `.[]` inside it reaches the members.
+            (".members | first(.[] | select(.", MEMBER_KEYS.to_vec()),
+            // Each `;` argument starts over from the call's input.
+            (".members[] | limit(1; .", MEMBER_KEYS.to_vec()),
+            (
+                ".members[] | limit(.age; .a",
+                vec!["active", "age", "address"],
+            ),
+            // ...even after a pipe inside the first one.
+            (
+                ".members[] | limit(.address | .zip; .",
+                MEMBER_KEYS.to_vec(),
+            ),
+        ] {
+            let (_, items) = suggest_at(marked, None, &doc);
+            assert_eq!(labels(&items), want, "{marked:?}");
+        }
+    }
+
+    #[test]
+    fn operators_and_separators_keep_the_input() {
+        let doc = team_doc();
+        for marked in [
+            ".members | map(.name, .",
+            ".members | map(.age > 30 and .",
+            ".members | map(.age + .",
+            ".members | map(.age - .",
+            ".members | map(if .active then .",
+            ".members | map(if .active then .name else .",
+            ".members | map({n: .name, a: .",
+            ".members | map([.name, .",
+            ".members | map(.name // .",
+            ".members | map((.",
+        ] {
+            let (_, items) = suggest_at(marked, None, &doc);
+            assert_eq!(labels(&items), MEMBER_KEYS, "{marked:?}");
+        }
+    }
+
+    #[test]
+    fn an_as_binding_leaves_the_input_alone() {
+        let doc = team_doc();
+        // The body after `as $m |` runs on the input of the whole expression.
+        let (_, items) = suggest_at(".members[] as $m | .", None, &doc);
+        assert_eq!(labels(&items), ["members", "title", "tags"]);
+        let (_, items) = suggest_at(".members as $m | .members[] | .", None, &doc);
+        assert_eq!(labels(&items), MEMBER_KEYS);
+    }
+
+    #[test]
+    fn paths_and_pipes_dig_into_nested_objects_within_a_scope() {
+        let doc = team_doc();
+        for (marked, want) in [
+            (".members | map(.address.", vec!["city", "zip"]),
+            (".members | map(.address | .", vec!["city", "zip"]),
+            (".members | map(select(.address.c", vec!["city"]),
+        ] {
+            let (_, items) = suggest_at(marked, None, &doc);
+            assert_eq!(labels(&items), want, "{marked:?}");
+        }
+    }
+
+    #[test]
+    fn stages_that_keep_the_shape_keep_the_scope() {
+        let doc = team_doc();
+        let ada = vec!["name", "active", "age", "address"];
+        for (marked, want) in [
+            (".members | sort_by(.age) | map(.", MEMBER_KEYS.to_vec()),
+            (".members | map(select(.active)) | .[0].", ada.clone()),
+            (
+                ".members | map(select(.age > 3) | select(.active)) | .[0].",
+                ada.clone(),
+            ),
+            (".members | reverse | .[].", MEMBER_KEYS.to_vec()),
+            (".members | unique_by(.name) | .[0].", ada),
+            // One element out of the array.
+            (".members | first | .", MEMBER_KEYS.to_vec()),
+            (".members | last | .", MEMBER_KEYS.to_vec()),
+            (".members | max_by(.age) | .", MEMBER_KEYS.to_vec()),
+        ] {
+            let (_, items) = suggest_at(marked, None, &doc);
+            assert_eq!(labels(&items), want, "{marked:?}");
+        }
+    }
+
+    #[test]
+    fn an_unknown_input_offers_nothing_rather_than_the_wrong_fields() {
+        let doc = team_doc();
+        for marked in [
+            // Stages that build something new.
+            ".members | map(.name) | .",
+            ".members | map(.address) | .[0].",
+            ".members | length | .",
+            ".members | keys | .",
+            ".members | to_entries | .[].",
+            // A function the tables don't know: it may be the user's own.
+            ".members | frobnicate(.",
+            ".members | with_entries(.",
+            ".members | walk(.",
+            ".members | any(.",
+            // Things that change what `.` is in ways not modelled.
+            ".members | reduce .[] as $m (0; .",
+            ".members | foreach .[] as $m (0; .",
+            "def f: .; .",
+            ".members[] |= .",
+            // Nothing there, or nothing with fields.
+            ".missing | .",
+            ".title | .",
+            // The cursor is inside a string or a comment.
+            ".members | map(select(.name == \"Ad",
+            ".members | map(select(.name == \"a.",
+            ".members | map(select(.name == \"a \\(.",
+            ".members | map(.name # then .",
+        ] {
+            let (_, items) = suggest_at(marked, None, &doc);
+            assert!(items.is_empty(), "{marked:?}: {:?}", labels(&items));
+        }
+    }
+
+    #[test]
+    fn scoped_completion_is_jq_only() {
+        let doc = team_doc();
+        let marked = ".members | map(select(.";
+        for kind in [Kind::JmesPath, Kind::JsonPath, Kind::JsonPointer] {
+            let (_, items) = suggest_at(marked, Some(kind), &doc);
+            assert!(
+                items.iter().all(|s| s.label != "active"),
+                "{kind:?}: {:?}",
+                labels(&items)
+            );
+        }
+        // Inside a jq call a bare word is a function, not a field of the
+        // element: no `name` from the document.
+        let (_, items) = suggest_at(".members | map(select(na", None, &team_doc());
+        assert!(items.iter().all(|s| s.label != "name"));
+    }
+
+    #[test]
+    fn a_scoped_key_is_spelled_for_jq_like_any_other() {
+        let doc = awkward_doc();
+        // A key that isn't an identifier goes in brackets, after the dot.
+        assert_eq!(
+            accepting(".list | map(.", None, &doc, "first name"),
+            ".list | map(.[\"first name\"]"
+        );
+        assert_eq!(
+            accepting(".members | map(.[", None, &doc, "name"),
+            ".members | map(.[\"name\"]"
+        );
+        assert_eq!(
+            accepting(".members | map(.skills[", None, &doc, "0"),
+            ".members | map(.skills[0]"
+        );
+        // A key after a bracket gets its dot back.
+        assert_eq!(
+            accepting(".members | .[0]na", None, &team_doc(), "name"),
+            ".members | .[0].name"
+        );
+    }
+
+    #[test]
+    fn a_dash_inside_a_word_is_part_of_the_key_but_a_spaced_one_is_a_minus() {
+        let doc = json!({"h": [{"content-type": 1, "age": 2}]});
+        // Typing a key that has a dash still finds it (and brackets it).
+        assert_eq!(
+            accepting(".h | map(.content-t", None, &doc, "content-type"),
+            ".h | map(.[\"content-type\"]"
+        );
+        // A minus with blanks around it starts a new term.
+        let (_, items) = suggest_at(".h | map(.age - .", None, &doc);
+        assert_eq!(labels(&items), ["content-type", "age"]);
+    }
+
+    #[test]
+    fn a_pipe_inside_a_string_is_not_a_pipe() {
+        let doc = team_doc();
+        // `"a | b"` is one string: the `.` after it is still in the member.
+        let (_, items) = suggest_at(".members | map(select(.name == \"a | b\") | .", None, &doc);
+        assert_eq!(labels(&items), MEMBER_KEYS);
+        // And a cursor inside the string offers nothing, pipe or no pipe.
+        let (_, items) = suggest_at(".members[] | select(.name == \"a | .", None, &doc);
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn the_cursor_may_sit_before_text_that_is_already_there() {
+        let doc = team_doc();
+        let marked = ".members | map(select(.a‸) | .name)";
+        let (_, items) = suggest_at(marked, None, &doc);
+        assert_eq!(labels(&items), ["active", "age", "address"]);
+        assert_eq!(
+            accepting(marked, None, &doc, "age"),
+            ".members | map(select(.age) | .name)"
+        );
+    }
+
+    #[test]
+    fn multibyte_text_before_the_cursor_is_read_on_char_boundaries() {
+        let doc = team_doc();
+        for marked in [
+            ".members | map(select(.name == \"名前\") | .",
+            ".members | map(select(.名前 == 1) | .",
+            ".members | map(select(.name == \"é\\(1)\") | .",
+        ] {
+            let (_, items) = suggest_at(marked, None, &doc);
+            assert_eq!(labels(&items), MEMBER_KEYS, "{marked:?}");
+        }
+    }
+
+    #[test]
+    fn absurd_nesting_is_cut_off_instead_of_recursing_forever() {
+        let doc = team_doc();
+        let marked = format!(".members | {}.", "map(".repeat(500));
+        let (_, items) = suggest_at(&marked, None, &doc);
+        assert!(items.is_empty());
+        // Deep but sensible nesting still works.
+        let marked = format!(".members | map({}.", "(".repeat(10));
+        let (_, items) = suggest_at(&marked, None, &doc);
+        assert_eq!(labels(&items), MEMBER_KEYS);
+    }
+
+    /// Accept every scoped candidate, close whatever the position leaves open,
+    /// and require the real jq engine to run the result — the check that what
+    /// the popup inserts joins into a valid query, not just a plausible one.
+    #[test]
+    fn every_accepted_scoped_candidate_closes_into_a_query_that_runs() {
+        use jsonquery_core::engine::QueryEvent;
+        use std::sync::atomic::AtomicBool;
+
+        let team = team_doc();
+        let awkward = awkward_doc();
+        let cases: Vec<(&Value, &str, &str)> = vec![
+            (&team, ".members | map(select(.", "))"),
+            (&team, ".members | map(select(.a", "))"),
+            (&team, ".members | map(select(.active) | .", ")"),
+            (&team, ".members | map(select(.active) | .na", ")"),
+            (&team, ".members | map(.address.", ")"),
+            (&team, ".members | map(.address | .", ")"),
+            (&team, ".members[] | select(.", ")"),
+            (&team, ".members[] | .address | .", ""),
+            (&team, ".members | sort_by(.", ")"),
+            (&team, ".members | group_by(.", ")"),
+            (&team, ".members | map(.[", ")"),
+            (&team, ".members | map(.name, .", ")"),
+            (&team, ".members | map(if .active then .", " else . end)"),
+            (&team, ".members | map({n: .", "})"),
+            (&team, ".members | map([.name, .", "])"),
+            (&team, ".members | map(select(.age > 30 and .", "))"),
+            (&team, ".members[] as $m | .", ""),
+            (&team, ".members | map(select(.active)) | .[0].", ""),
+            (&team, ".members | first | .", ""),
+            (&team, "select(.", ")"),
+            (&team, ".members[0] | del(.", ")"),
+            (&awkward, ".list | map(.", ")"),
+            (&awkward, ".members | map(.skills[", ")"),
+            (&awkward, ".members | map(.", ")"),
+        ];
+
+        for (doc, marked, closers) in cases {
+            let (text, cursor) = split_cursor(marked);
+            let scope = engines_in_scope(None, &text[..cursor]);
+            let items = doc_candidates(&scope, &text, cursor, Some(doc));
+            assert!(!items.is_empty(), "{marked:?}: no candidates at all");
+
+            for s in &items {
+                let accepted = format!("{}{closers}", accept(&text, s));
+                Kind::Jq
+                    .engine()
+                    .run(doc, &accepted, &AtomicBool::new(false), &mut |ev| {
+                        let _ = matches!(ev, QueryEvent::Item(_));
+                    })
+                    .unwrap_or_else(|e| panic!("{marked:?} + {:?} -> {accepted:?}: {e}", s.label));
             }
         }
     }

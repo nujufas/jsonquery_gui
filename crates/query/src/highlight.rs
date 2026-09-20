@@ -247,7 +247,7 @@ fn skip_group(kind: Kind, b: &[u8], at: usize) -> usize {
 /// The position of the closer matching the `[`, `(` or `{` at `at`, or `None`
 /// if it is never closed. Strings inside are skipped so a bracket in a string
 /// doesn't count.
-fn matching_close(kind: Kind, b: &[u8], at: usize) -> Option<usize> {
+pub(crate) fn matching_close(kind: Kind, b: &[u8], at: usize) -> Option<usize> {
     let mut depth = 0usize;
     let mut i = at;
     while i < b.len() {
@@ -275,7 +275,7 @@ fn matching_close(kind: Kind, b: &[u8], at: usize) -> Option<usize> {
 }
 
 /// A jq `# comment`: up to (not including) the end of the line.
-fn skip_comment(b: &[u8], at: usize) -> usize {
+pub(crate) fn skip_comment(b: &[u8], at: usize) -> usize {
     b[at..]
         .iter()
         .position(|&c| c == b'\n')
@@ -286,7 +286,7 @@ fn skip_comment(b: &[u8], at: usize) -> usize {
 /// text). A backslash escapes the next byte; in jq, `\(` opens an
 /// interpolation, which is skipped as a group so quotes inside it don't end
 /// the string.
-fn skip_string(kind: Kind, b: &[u8], at: usize) -> usize {
+pub(crate) fn skip_string(kind: Kind, b: &[u8], at: usize) -> usize {
     let quote = b[at];
     let mut i = at + 1;
     while i < b.len() {
@@ -305,7 +305,7 @@ fn skip_string(kind: Kind, b: &[u8], at: usize) -> usize {
 /// A number: digits, an optional fraction, an optional exponent letter and
 /// digits (`30`, `3.14`, `1e5`). A `.` only belongs to it when a digit
 /// follows, so `0.name` isn't swallowed.
-fn skip_number(b: &[u8], at: usize) -> usize {
+pub(crate) fn skip_number(b: &[u8], at: usize) -> usize {
     let mut i = skip_word(b, at);
     if b.get(i) == Some(&b'.') && b.get(i + 1).is_some_and(u8::is_ascii_digit) {
         i = skip_word(b, i + 1);
@@ -313,7 +313,7 @@ fn skip_number(b: &[u8], at: usize) -> usize {
     i
 }
 
-fn skip_word(b: &[u8], mut i: usize) -> usize {
+pub(crate) fn skip_word(b: &[u8], mut i: usize) -> usize {
     while i < b.len() && is_word(b[i]) {
         i += 1;
     }
@@ -322,7 +322,7 @@ fn skip_word(b: &[u8], mut i: usize) -> usize {
 
 /// Identifier characters, including every byte of a non-ASCII character so
 /// `.名前` is one step.
-fn is_word(c: u8) -> bool {
+pub(crate) fn is_word(c: u8) -> bool {
     c.is_ascii_alphanumeric() || c == b'_' || c >= 0x80
 }
 

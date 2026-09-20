@@ -65,6 +65,14 @@ Load Awkward Keys Fixture
     ${json}=    Get File    ${FIXTURES}/awkward_keys.json
     Load Fixture Via Paste    ${json}
 
+Load Team Fixture
+    [Documentation]    team.json -- a root OBJECT with a "members" array of
+    ...    three objects (name/active/age: Ada/true/36, Bo/false/41,
+    ...    Cy/true/29) -- for completion *inside* pipelines and calls, where
+    ...    a "." means one member rather than the root.
+    ${json}=    Get File    ${FIXTURES}/team.json
+    Load Fixture Via Paste    ${json}
+
 Type Query Text
     [Documentation]    Replaces the query box's contents with `text` and
     ...    waits for the suggestion popup to recompute. Deliberately does
@@ -608,3 +616,51 @@ TC-AC-059 Continuing Keyword After A Finished Operand Stays Bare
     Run Current Query
     Region Should Contain Text    @{STATUS_BAR}    3 result
     Region Should Not Contain Text    @{STATUS_BAR}    Query error
+
+TC-AC-060 Dot Inside select Offers The Members' Fields
+    [Documentation]    Regression test: in ".members | map(select(." the "."
+    ...    is one *member*, but completion only followed plain paths from the
+    ...    root, so a pipe or an open call left the popup empty. Now the
+    ...    popup lists the members' keys (name/active/age). OCR can't read
+    ...    the highlighted first row ("name"), so the other two are what is
+    ...    asserted. Narrowing to ".act" leaves "active", and accepting it
+    ...    gives a query that runs -- checked by finishing it into
+    ...    ".members | map(select(.active) | .name) | .[]": two results
+    ...    (Ada and Cy, the active members; Tesseract can't read a two-letter
+    ...    name like "Cy", so only "Ada" is read back).
+    [Tags]    p1
+    Load Team Fixture
+    Toggle Autocomplete
+    Type Query Text    .members | map(select(.
+    Suggest Popup Should Contain    active
+    Suggest Popup Should Contain    age
+    Type Query Text    .members | map(select(.act
+    Press Key    enter
+    Type Text    ) | .name) | .[]
+    Sleep    0.4s
+    Run Current Query
+    Region Should Contain Text    @{STATUS_BAR}    2 result
+    Region Should Not Contain Text    @{STATUS_BAR}    Query error
+    Region Should Contain Text    @{RESULTS_PANEL}    Ada
+
+TC-AC-061 Field Completion Continues After A Pipe Inside map
+    [Documentation]    The other half of ".members | map(select(.active) |
+    ...    .name)": after "select(.active) | " the "." is still a member, so
+    ...    ".a" offers "active" and "age" (from the members, not the root,
+    ...    which has neither). Down then Enter accepts "age"; closing the
+    ...    call must give a query that runs and returns the active members'
+    ...    ages, 36 and 29.
+    [Tags]    p1
+    Load Team Fixture
+    Toggle Autocomplete
+    Type Query Text    .members | map(select(.active) | .a
+    Suggest Popup Should Contain    age
+    Press Key    down
+    Press Key    enter
+    Type Text    ) | .[]
+    Sleep    0.4s
+    Run Current Query
+    Region Should Contain Text    @{STATUS_BAR}    2 result
+    Region Should Not Contain Text    @{STATUS_BAR}    Query error
+    Region Should Contain Text    @{RESULTS_PANEL}    36
+    Region Should Contain Text    @{RESULTS_PANEL}    29
