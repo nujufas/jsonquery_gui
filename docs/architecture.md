@@ -118,7 +118,7 @@ differently from the source tree:
 | `jsonpath-rust` | JSONPath (RFC 9535) engine. |
 | `jmespath` | JMESPath engine. |
 | `crossbeam-channel` | UI ⇄ worker-thread messaging. |
-| `rfd` | Native "Open File" dialog, alongside OS-level drag-and-drop (handled directly by egui/winit). |
+| `rfd` | Native "Open File" / "Save" dialogs on desktop (the `desktop` feature), alongside OS-level drag-and-drop (handled directly by egui/winit). On Android the same calls go through the `platform::Platform` seam to the system document picker. |
 | `ureq` | Loading a document from a URL. |
 | `anyhow` / `thiserror` | Error handling — typed errors at API boundaries, contextual errors in the app layer. |
 
@@ -135,9 +135,25 @@ jsonquery/
 │   ├── core/                 # file ingest, the tree data layer
 │   ├── query/                # the four query engines + suggest.rs (autocomplete) + highlight.rs (query colouring)
 │   └── app/                  # eframe app: panels, virtualized tree widget, worker thread
+│                             #   (a library + the desktop binary; `platform.rs` is the seam a shell plugs into)
+├── android/                  # the Android app: its own Cargo workspace, Gradle project, Docker toolchain, tests
 ├── docs/                     # this site
 └── benches/                  # criterion benchmarks against synthetic large files
 ```
+
+### Android
+
+`crates/app` builds as a library (`jsonquery_gui`) as well as the desktop
+binary. The Android app is a thin shell around the *same* `App`: a
+`NativeActivity` (Kotlin) hosts a cdylib that runs eframe, and everything
+the phone has to do differently — the document picker, the clipboard, the
+on-screen keyboard, "Open with"/share intents, system-bar insets — is behind
+the small `platform::Platform` trait, which the desktop implements with `rfd`
+and the Android shell implements over JNI. Below 600 points wide the UI switches
+to a compact layout (☰ menu, Source/Results tabs); wider windows, tablets included,
+get the desktop's two panels. Everything Android-specific
+— including its build, tests and Google Play release tooling — lives in
+[`android/`](../android/README.md), isolated from the desktop build.
 
 ## Scaling beyond in-memory
 

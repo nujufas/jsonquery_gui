@@ -4,19 +4,34 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[lib]
+name = "jsonquery_gui"
+path = "src/lib.rs"
+
 [[bin]]
 name = "jsonquery_gui"
 path = "src/main.rs"
+required-features = ["desktop"]
+
+[features]
+default = ["desktop"]
+# A desktop window: eframe's stock features (wgpu, X11/Wayland, accesskit, ...)
+# and the native open/save dialogs.
+desktop = ["eframe/default", "dep:rfd"]
+# Built by `android/rust` (never enable both): the NativeActivity glue and an
+# OpenGL ES renderer. There is no native dialog crate on Android; the shell
+# implements `platform::Platform` instead (see `platform.rs`).
+android = ["eframe/android-native-activity", "eframe/glow"]
 
 [dependencies]
 anyhow = "1.0.104"
 crossbeam-channel = "0.5.16"
-eframe = "0.36.1"
+eframe = { version = "0.36.1", default-features = false, features = ["default_fonts"] }
 egui = "0.36.1"
 egui_extras = "0.36.1"
 jsonquery-core = { path = "../core" }
 jsonquery-query = { path = "../query" }
-rfd = "0.17.2"
+rfd = { version = "0.17.2", optional = true }
 serde_json = { version = "1.0.151", features = ["arbitrary_precision", "preserve_order"] }
 thiserror = "2.0.20"
 ureq = "3.3.0"

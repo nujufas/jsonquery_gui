@@ -57,6 +57,9 @@ pub struct Tutorial {
     /// index): its fragment is drawn brighter in the query. Read a frame
     /// late, which is imperceptible.
     hovered: Option<(usize, usize)>,
+    /// On a narrow screen the lesson list replaces the lesson (there is no
+    /// room for both): whether it is showing.
+    lessons_open: bool,
     icon: Option<Arc<egui::IconData>>,
 }
 
@@ -72,10 +75,15 @@ impl Default for Tutorial {
             scroll_to_top: false,
             reveal: None,
             hovered: None,
+            lessons_open: false,
             icon: None,
         }
     }
 }
+
+/// Narrower than this (in points), the lesson list and the lesson don't fit
+/// side by side: one shows at a time.
+const NARROW_WIDTH: f32 = 640.0;
 
 fn viewport_id() -> egui::ViewportId {
     egui::ViewportId::from_hash_of("jsonquery_tutorial_window")
@@ -101,6 +109,10 @@ impl Tutorial {
     pub fn show(&mut self, ctx: &egui::Context) -> Option<LoadRequest> {
         if !self.open {
             return None;
+        }
+
+        if ctx.embed_viewports() {
+            return self.show_embedded(ctx);
         }
 
         let icon = self
@@ -130,17 +142,47 @@ impl Tutorial {
         request
     }
 
+    /// Where a second native window isn't possible (a phone, where egui
+    /// embeds it in the main one and offers no way to close it), the tutorial
+    /// fills the screen as a closable window of its own — and closes itself
+    /// after "▶ Try it", so the result it loaded is what the reader sees.
+    fn show_embedded(&mut self, ctx: &egui::Context) -> Option<LoadRequest> {
+        let mut open = true;
+        let mut request = None;
+        egui::Window::new("Tutorial")
+            .id(egui::Id::new(viewport_id()))
+            .open(&mut open)
+            .collapsible(false)
+            .fixed_rect(ctx.content_rect().shrink(4.0))
+            .show(ctx, |ui| request = self.contents(ui));
+        if !open || request.is_some() {
+            self.open = false;
+        }
+        request
+    }
+
     fn contents(&mut self, ui: &mut egui::Ui) -> Option<LoadRequest> {
         let mut request = None;
+        let narrow = ui.available_width() < NARROW_WIDTH;
 
-        egui::Panel::top("tutorial_tabs").show(ui, |ui| self.tab_bar(ui));
-        egui::Panel::bottom("tutorial_status").show(ui, |ui| self.status_bar(ui));
-        egui::Panel::left("tutorial_topics")
-            .resizable(true)
-            .default_size(270.0)
-            .min_size(190.0)
-            .show(ui, |ui| self.topic_tree(ui));
-        egui::CentralPanel::default().show(ui, |ui| request = self.lesson_view(ui));
+        egui::Panel::top("tutorial_tabs").show(ui, |ui| self.tab_bar(ui, narrow));
+        if narrow {
+            egui::CentralPanel::default().show(ui, |ui| {
+                if self.lessons_open {
+                    self.topic_tree(ui);
+                } else {
+                    request = self.lesson_view(ui);
+                }
+            });
+        } else {
+            egui::Panel::bottom("tutorial_status").show(ui, |ui| self.status_bar(ui));
+            egui::Panel::left("tutorial_topics")
+                .resizable(true)
+                .default_size(270.0)
+                .min_size(190.0)
+                .show(ui, |ui| self.topic_tree(ui));
+            egui::CentralPanel::default().show(ui, |ui| request = self.lesson_view(ui));
+        }
 
         if let Some(r) = &request {
             let what = match (r.data.is_some(), r.query.is_some(), r.run) {
@@ -154,16 +196,27 @@ impl Tutorial {
         request
     }
 
-    fn tab_bar(&mut self, ui: &mut egui::Ui) {
+    fn tab_bar(&mut self, ui: &mut egui::Ui, narrow: bool) {
         ui.add_space(6.0);
-        ui.horizontal(|ui| {
-            ui.spacing_mut().button_padding = egui::vec2(14.0, 6.0);
+        // Wrapping is a no-op on a wide window and keeps the four tabs and
+        // the lessons toggle on screen on a narrow one.
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().button_padding = egui::vec2(if narrow { 8.0 } else { 14.0 }, 6.0);
             for kind in Kind::ALL {
                 let text = RichText::new(content::title(kind)).size(15.0);
                 if ui.selectable_label(self.tab == kind, text).clicked() && self.tab != kind {
                     self.tab = kind;
                     self.scroll_to_top = true;
                 }
+            }
+            if narrow {
+                ui.separator();
+                let label = if self.lessons_open {
+                    "Back to the lesson"
+                } else {
+                    "All lessons"
+                };
+                ui.toggle_value(&mut self.lessons_open, label);
             }
         });
         ui.add_space(2.0);
@@ -238,6 +291,9 @@ impl Tutorial {
                                 {
                                     self.selected[slot] = (t, l);
                                     self.scroll_to_top = true;
+                                    // (Only a narrow window hides the lesson
+                                    // behind the list.)
+                                    self.lessons_open = false;
                                 }
                             }
                         });

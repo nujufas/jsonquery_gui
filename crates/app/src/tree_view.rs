@@ -104,7 +104,11 @@ impl TreeView {
     ) -> Option<RowAction> {
         self.refresh(root);
 
-        let row_height = ui.text_style_height(&egui::TextStyle::Monospace).max(18.0);
+        // 18.0 is egui's own default minimum height for a clickable thing, so this
+        // is unchanged on a desktop; a touch style raises it to a finger's size.
+        let row_height = ui
+            .text_style_height(&egui::TextStyle::Monospace)
+            .max(ui.spacing().interact_size.y);
         let total_rows = self.rows.len();
 
         if total_rows == 0 {

@@ -10,6 +10,7 @@ use jsonquery_core::{
 };
 use serde_json::Value;
 
+use crate::platform::{self, Incoming, PathRequest};
 use crate::query_highlight;
 use crate::query_suggest::{apply_suggestion, QuerySuggest};
 use crate::tree_view::{RowAction, TreeView};
@@ -127,6 +128,9 @@ pub struct App {
     /// State for the "Open URL…" popup.
     show_url_dialog: bool,
     url_input: String,
+    /// The URL field should take keyboard focus the next time the popup is
+    /// drawn (touch only: a phone's user expects the keyboard to appear).
+    focus_url_field: bool,
 
     /// State for the "Search…" popup, which stays open while "Find" steps
     /// through the matches one at a time.
@@ -148,6 +152,36 @@ pub struct App {
     /// The bottom panel — `Some` while it is shown: every match of a "Find
     /// All", or the candidates of a "Find in Source".
     hit_list: Option<HitList>,
+
+    /// A file picker the platform is still showing. Desktop dialogs block, so
+    /// theirs are answered before the click that opened them returns; a
+    /// phone's picker is another app, whose answer arrives frames later.
+    pending_open: Option<PathRequest>,
+    pending_save: Option<(SaveIntent, PathRequest)>,
+
+    /// Touch-first device (see `Platform::is_touch`): bigger targets, and the
+    /// on-screen keyboard follows the focused text field.
+    touch: bool,
+    /// The window is too narrow for two panels side by side (see
+    /// `COMPACT_WIDTH`); set at the start of every frame.
+    compact: bool,
+    /// What the platform was last told about the on-screen keyboard and the
+    /// theme, so it is only told again when one changes.
+    keyboard_shown: bool,
+    dark_told: Option<bool>,
+}
+
+/// What a save picker that hasn't been answered yet is going to save.
+enum SaveIntent {
+    /// The source document, or one node of it.
+    Source {
+        doc: Arc<Document>,
+        node_path: Option<NodePath>,
+    },
+    /// The whole result set (fetched in full first if the preview is capped).
+    Results,
+    /// One node of the results.
+    ResultsNode(Value),
 }
 
 /// What a "Search…" run looked for — "Find" and "Find All" re-search whenever
@@ -252,6 +286,13 @@ impl App {
         let ctx = cc.egui_ctx.clone();
         worker::spawn(cmd_rx, evt_tx, move || ctx.request_repaint());
 
+        let platform = platform::current();
+        platform.attach(&cc.egui_ctx);
+        let touch = platform.is_touch();
+        if touch {
+            apply_touch_style(&cc.egui_ctx);
+        }
+
         Self {
             cmd_tx,
             evt_rx,
@@ -302,6 +343,7 @@ impl App {
             focused_panel: PanelKind::Source,
             show_url_dialog: false,
             url_input: String::new(),
+            focus_url_field: false,
             show_search_dialog: false,
             search_input: String::new(),
             search_regex: false,
@@ -313,6 +355,12 @@ impl App {
             search_request: None,
             find_cursor: None,
             hit_list: None,
+            pending_open: None,
+            pending_save: None,
+            touch,
+            compact: false,
+            keyboard_shown: false,
+            dark_told: None,
         }
     }
 
@@ -371,6 +419,7 @@ impl App {
                 }
                 Event::Saved(path) => {
                     self.save_error = None;
+                    platform::current().file_saved(&path);
                     self.last_saved = Some(path);
                 }
                 Event::SaveError(e) => {
@@ -547,28 +596,30 @@ impl App {
         let _ = self.cmd_tx.send(Command::OpenText(text));
     }
 
+    /// Show the "Open URL…" popup.
+    fn open_url_dialog(&mut self) {
+        self.show_url_dialog = true;
+        self.focus_url_field = self.touch;
+    }
+
     fn open_url(&mut self, url: String) {
         let _ = self.cmd_tx.send(Command::OpenUrl(url));
     }
 
-    /// Prompt for a destination and write the currently loaded source data
-    /// to it as pretty-printed JSON — how pasted, edited, or
-    /// URL-downloaded data (which otherwise only lives in memory or a temp
-    /// file) gets made permanent.
+    /// Ask where to save the currently loaded source data and write it there
+    /// as pretty-printed JSON — how pasted, edited, or URL-downloaded data
+    /// (which otherwise only lives in memory or a temp file) gets made
+    /// permanent.
     fn save_source(&mut self) {
         let Some(doc) = self.doc.clone() else { return };
         let default_name = default_filename_for_source(&doc.source);
-        if let Some(path) = rfd::FileDialog::new()
-            .set_file_name(&default_name)
-            .add_filter("JSON", &["json"])
-            .save_file()
-        {
-            let _ = self.cmd_tx.send(Command::SaveFile {
+        self.begin_save(
+            &default_name,
+            SaveIntent::Source {
                 doc,
                 node_path: None,
-                path,
-            });
-        }
+            },
+        );
     }
 
     /// Like `save_source`, but for one row of the source tree (a right-click
@@ -576,40 +627,22 @@ impl App {
     fn save_source_node(&mut self, node_path: NodePath) {
         let Some(doc) = self.doc.clone() else { return };
         let default_name = default_filename_for_node(&node_path, "data.json");
-        if let Some(path) = rfd::FileDialog::new()
-            .set_file_name(&default_name)
-            .add_filter("JSON", &["json"])
-            .save_file()
-        {
-            let _ = self.cmd_tx.send(Command::SaveFile {
+        self.begin_save(
+            &default_name,
+            SaveIntent::Source {
                 doc,
                 node_path: Some(node_path),
-                path,
-            });
-        }
+            },
+        );
     }
 
-    /// Prompt for a destination and write the current results to it as
+    /// Ask where to save the current results and write them there as
     /// pretty-printed JSON. If the live preview is still capped, this first
     /// re-runs the query unbounded (`expand_results`) and defers the actual
     /// save until that completes, so the file gets the complete results, not
     /// just the up-to-`LIVE_PREVIEW_CAP` preview.
     fn save_results(&mut self) {
-        if let Some(path) = rfd::FileDialog::new()
-            .set_file_name("results.json")
-            .add_filter("JSON", &["json"])
-            .save_file()
-        {
-            if self.results_truncated {
-                self.expand_results();
-                self.pending_save_results = Some(path);
-            } else {
-                let _ = self.cmd_tx.send(Command::SaveResults {
-                    results: self.results.clone(),
-                    path,
-                });
-            }
-        }
+        self.begin_save("results.json", SaveIntent::Results);
     }
 
     /// Like `save_results`, but for one row of the results tree.
@@ -619,15 +652,75 @@ impl App {
         };
         let value = value.clone();
         let default_name = default_filename_for_node(&node_path, "results.json");
-        if let Some(path) = rfd::FileDialog::new()
-            .set_file_name(&default_name)
-            .add_filter("JSON", &["json"])
-            .save_file()
-        {
-            let _ = self.cmd_tx.send(Command::SaveResults {
-                results: value,
-                path,
-            });
+        self.begin_save(&default_name, SaveIntent::ResultsNode(value));
+    }
+
+    /// Show the platform's "where to save" picker for `intent`. The save
+    /// itself happens in `finish_save`, once the picker has been answered —
+    /// straight away on desktop, a few frames later on a phone.
+    fn begin_save(&mut self, default_name: &str, intent: SaveIntent) {
+        let request = platform::current().pick_file_to_save(default_name);
+        self.pending_save = Some((intent, request));
+        self.poll_pickers();
+    }
+
+    /// Show the platform's "which file" picker; the file is opened once it
+    /// has been answered (see `poll_pickers`).
+    fn begin_open(&mut self) {
+        self.pending_open = Some(platform::current().pick_file_to_open());
+        self.poll_pickers();
+    }
+
+    /// Collect the answer of any picker that has been answered since last
+    /// asked.
+    fn poll_pickers(&mut self) {
+        if let Some(answer) = self.pending_open.as_ref().and_then(PathRequest::poll) {
+            self.pending_open = None;
+            if let Some(path) = answer {
+                self.open_file(path);
+            }
+        }
+        if let Some(answer) = self.pending_save.as_ref().and_then(|(_, r)| r.poll()) {
+            if let Some((intent, _)) = self.pending_save.take() {
+                if let Some(path) = answer {
+                    self.finish_save(intent, path);
+                }
+            }
+        }
+    }
+
+    fn finish_save(&mut self, intent: SaveIntent, path: PathBuf) {
+        match intent {
+            SaveIntent::Source { doc, node_path } => {
+                let _ = self.cmd_tx.send(Command::SaveFile {
+                    doc,
+                    node_path,
+                    path,
+                });
+            }
+            SaveIntent::Results if self.results_truncated => {
+                self.expand_results();
+                self.pending_save_results = Some(path);
+            }
+            SaveIntent::Results => {
+                let _ = self.cmd_tx.send(Command::SaveResults {
+                    results: self.results.clone(),
+                    path,
+                });
+            }
+            SaveIntent::ResultsNode(results) => {
+                let _ = self.cmd_tx.send(Command::SaveResults { results, path });
+            }
+        }
+    }
+
+    /// Whatever other apps have asked us to open ("Open with", "Share").
+    fn take_incoming(&mut self) {
+        while let Some(incoming) = platform::current().take_incoming() {
+            match incoming {
+                Incoming::File(path) => self.open_file(path),
+                Incoming::Text(text) => self.open_text(text),
+            }
         }
     }
 
@@ -765,6 +858,15 @@ impl App {
     /// previous search. Asked again for the tree it is already searching
     /// (Ctrl+F while it's open), it keeps the text — selected, so typing
     /// replaces it — as Notepad++'s Find dialog does.
+    /// Whether "Search…" has anything to search: the Source panel needs a
+    /// document, the Results panel is always searchable.
+    fn search_available(&self) -> bool {
+        match self.focused_panel {
+            PanelKind::Source => self.doc.is_some(),
+            PanelKind::Results => true,
+        }
+    }
+
     fn open_search_dialog(&mut self, target: PanelKind) {
         if !self.show_search_dialog || self.search_target != target {
             self.search_target = target;
@@ -1000,6 +1102,11 @@ impl App {
     /// means a new query intent, not a continuation of a previous "Expand
     /// All".
     fn run_query(&mut self) {
+        // On a phone the results are a tab away: show them, as the desktop
+        // shows them beside the source as soon as they arrive.
+        if self.compact {
+            self.focused_panel = PanelKind::Results;
+        }
         self.run_query_capped(LIVE_PREVIEW_CAP);
     }
 
@@ -1098,15 +1205,10 @@ impl App {
     fn toolbar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             if ui.button("Open File…").clicked() {
-                if let Some(path) = rfd::FileDialog::new()
-                    .add_filter("JSON", &["json", "ndjson", "jsonl", "log", "txt"])
-                    .pick_file()
-                {
-                    self.open_file(path);
-                }
+                self.begin_open();
             }
             if ui.button("Open URL…").clicked() {
-                self.show_url_dialog = true;
+                self.open_url_dialog();
             }
             if ui
                 .add_enabled(
@@ -1117,6 +1219,16 @@ impl App {
             {
                 self.clear_source();
             }
+            if self.touch {
+                // Ctrl+F is how a desktop finds; a touch screen has no Ctrl (and
+                // the phone's ☰ menu, which has this, is not in this layout).
+                if ui
+                    .add_enabled(self.search_available(), egui::Button::new("Search…"))
+                    .clicked()
+                {
+                    self.open_search_dialog(self.focused_panel);
+                }
+            }
             ui.separator();
 
             if let Some(doc) = &self.doc {
@@ -1124,7 +1236,7 @@ impl App {
                 // a read-only field: selectable and copyable with the mouse,
                 // but typing into it has no effect and nothing is written
                 // back to `doc`.
-                let label = doc.source.label();
+                let label = source_label(&doc.source);
                 let mut label_ref = label.as_str();
                 // Give the path the whole row minus a modest reserve for
                 // what follows it (the byte size, an occasional NDJSON
@@ -1146,8 +1258,24 @@ impl App {
                 ui.spinner();
                 ui.label("Loading…");
             } else {
-                ui.weak(
-                    "No document loaded — drag & drop a JSON file anywhere, use Open File, or paste JSON on the left.",
+                let hint = if self.touch {
+                    "No document loaded — open a file, paste JSON, or share it to this app."
+                } else {
+                    "No document loaded — drag & drop a JSON file anywhere, use Open File, or paste JSON on the left."
+                };
+                // Leave the icon buttons at the right their room, and cut the hint
+                // short instead: in a narrow window (a tablet held upright, a phone
+                // on its side) it used to run on underneath them, hiding the theme
+                // and autocomplete toggles.
+                ui.allocate_ui_with_layout(
+                    egui::vec2(
+                        (ui.available_width() - TOOLBAR_ICONS_WIDTH).max(0.0),
+                        ui.spacing().interact_size.y,
+                    ),
+                    egui::Layout::left_to_right(egui::Align::Center),
+                    |ui| {
+                        ui.add(egui::Label::new(egui::RichText::new(hint).weak()).truncate());
+                    },
                 );
             }
 
@@ -1183,11 +1311,17 @@ impl App {
             .open(&mut open)
             .show(ctx, |ui| {
                 ui.label("URL:");
+                // (Not during the window's invisible first "sizing pass": egui
+                // drops the focus of every widget it lays out there.)
+                let focus = !ui.is_sizing_pass() && std::mem::take(&mut self.focus_url_field);
                 let resp = ui.add(
                     egui::TextEdit::singleline(&mut self.url_input)
                         .desired_width(360.0)
                         .hint_text("https://example.com/data.json"),
                 );
+                if focus {
+                    resp.request_focus();
+                }
                 let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                 ui.horizontal(|ui| {
                     let load_clicked = ui
@@ -1440,7 +1574,23 @@ impl App {
             return;
         }
 
-        ui.weak("Drag & drop a file anywhere, or use Open File.");
+        if self.touch {
+            ui.weak("Open a file, paste JSON, or share JSON to this app from another one.");
+            ui.add_space(4.0);
+            ui.horizontal_wrapped(|ui| {
+                if ui.button("Open file").clicked() {
+                    self.begin_open();
+                }
+                if ui.button("Paste from clipboard").clicked() {
+                    self.paste_from_clipboard();
+                }
+                if ui.button("Open URL").clicked() {
+                    self.open_url_dialog();
+                }
+            });
+        } else {
+            ui.weak("Drag & drop a file anywhere, or use Open File.");
+        }
         ui.add_space(4.0);
 
         // Fill whatever space is left in the panel rather than a fixed row
@@ -1482,6 +1632,32 @@ impl App {
 
     fn query_bar(&mut self, ui: &mut egui::Ui) {
         ui.add_space(4.0);
+        if self.compact {
+            self.query_row_compact(ui);
+        } else {
+            self.query_row_wide(ui);
+        }
+        // Ties the box's minimum height to whatever room the (now resizable)
+        // "query_bar" panel above has for it this frame, so dragging the
+        // panel's bottom edge visibly grows/shrinks the box even when the
+        // query itself is short. `desired_rows` is still just a *minimum* —
+        // a query with more lines than fit still grows the box further, same
+        // as before. Wrapping this in a `ScrollArea` instead (so oversized
+        // queries would scroll rather than grow) was tried and reverted: the
+        // cursor's scroll-into-view request on every keystroke fights the
+        // panel's own content-based auto-sizing and the two feed back into
+        // each other, ballooning the panel to the full window height after
+        // typing as little as a second line.
+        let line_height = ui.text_style_height(&egui::TextStyle::Monospace)
+            + ui.spacing().extra_text_line_spacing;
+        let desired_rows = ((ui.available_height() / line_height).floor() as usize).max(1);
+        self.query_text_edit(ui, desired_rows);
+        ui.add_space(4.0);
+    }
+
+    /// The query bar's top row on a desktop: label, Run, and the engine
+    /// picker pinned to the right.
+    fn query_row_wide(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.label("Query:");
             if self.query_running {
@@ -1491,7 +1667,14 @@ impl App {
                 }
             } else {
                 let clicked = ui
-                    .add_enabled(self.doc.is_some(), egui::Button::new("Run  (Ctrl+Enter)"))
+                    .add_enabled(
+                        self.doc.is_some(),
+                        egui::Button::new(if self.touch {
+                            "Run"
+                        } else {
+                            "Run  (Ctrl+Enter)"
+                        }),
+                    )
                     .clicked();
                 let shortcut = ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Enter));
                 if (clicked || shortcut) && self.doc.is_some() {
@@ -1519,22 +1702,38 @@ impl App {
                 ui.weak(egui::RichText::new("Engine:").small());
             });
         });
-        // Ties the box's minimum height to whatever room the (now resizable)
-        // "query_bar" panel above has for it this frame, so dragging the
-        // panel's bottom edge visibly grows/shrinks the box even when the
-        // query itself is short. `desired_rows` is still just a *minimum* —
-        // a query with more lines than fit still grows the box further, same
-        // as before. Wrapping this in a `ScrollArea` instead (so oversized
-        // queries would scroll rather than grow) was tried and reverted: the
-        // cursor's scroll-into-view request on every keystroke fights the
-        // panel's own content-based auto-sizing and the two feed back into
-        // each other, ballooning the panel to the full window height after
-        // typing as little as a second line.
-        let line_height = ui.text_style_height(&egui::TextStyle::Monospace)
-            + ui.spacing().extra_text_line_spacing;
-        let desired_rows = ((ui.available_height() / line_height).floor() as usize).max(1);
-        self.query_text_edit(ui, desired_rows);
-        ui.add_space(4.0);
+    }
+
+    /// The query bar's top row on a phone: Run, then the engine chips —
+    /// wrapping rather than overflowing a narrow screen.
+    fn query_row_compact(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal_wrapped(|ui| {
+            if self.query_running {
+                ui.spinner();
+                if ui.button("Cancel").clicked() {
+                    self.cancel_query();
+                }
+            } else {
+                let clicked = ui
+                    .add_enabled(self.doc.is_some(), egui::Button::new("▶ Run"))
+                    .clicked();
+                let shortcut = ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Enter));
+                if (clicked || shortcut) && self.doc.is_some() {
+                    self.run_query();
+                }
+            }
+            ui.separator();
+            // Small chips with tight padding, so all four fit beside Run on a
+            // typical phone (a narrower one wraps them to a second line).
+            ui.spacing_mut().button_padding.x = 6.0;
+            for kind in jsonquery_query::Kind::ALL {
+                let selected = self.query_engine == Some(kind);
+                let label = egui::RichText::new(kind.label()).small();
+                if ui.selectable_label(selected, label).clicked() {
+                    self.query_engine = if selected { None } else { Some(kind) };
+                }
+            }
+        });
     }
 
     /// The query box itself, plus its autocomplete popup
@@ -1571,11 +1770,15 @@ impl App {
             .desired_width(f32::INFINITY)
             .code_editor()
             .layouter(&mut layouter)
-            .hint_text(
+            .hint_text(if self.compact {
                 "e.g. .[] | select(.age > 21) | .name\n\
                  (auto-detects jq / JSON Pointer / JSONPath / JMESPath — \
-                 or pick one at top right)",
-            )
+                 or pick one above)"
+            } else {
+                "e.g. .[] | select(.age > 21) | .name\n\
+                 (auto-detects jq / JSON Pointer / JSONPath / JMESPath — \
+                 or pick one at top right)"
+            })
             .show(ui);
 
         // Captured *before* the focus check below: clicking anywhere on the
@@ -1755,7 +1958,7 @@ impl App {
                 );
                 ui.separator();
             } else if let Some(path) = &self.last_saved {
-                ui.weak(format!("Saved to {}", path.display()));
+                ui.weak(format!("Saved to {}", path_label(path)));
                 ui.separator();
             }
 
@@ -1837,8 +2040,10 @@ impl App {
     fn results_panel(&mut self, ui: &mut egui::Ui) {
         let has_results = self.results.as_array().is_some_and(|a| !a.is_empty());
         ui.horizontal(|ui| {
-            ui.heading("Results");
-            ui.add_space(12.0);
+            if !self.compact {
+                ui.heading("Results");
+                ui.add_space(12.0);
+            }
             ui.selectable_value(&mut self.results_view, ViewMode::Tree, "Tree");
             ui.selectable_value(&mut self.results_view, ViewMode::Text, "Text");
 
@@ -2104,16 +2309,95 @@ fn tutorial_button(ui: &mut egui::Ui, tutorial: &mut Tutorial) {
     }
 }
 
+/// Narrower than this (in points) and the two panels no longer fit side by
+/// side: the phone layout shows one at a time behind tabs instead. The
+/// desktop window's minimum width is wider, so a desktop is never "compact".
+const COMPACT_WIDTH: f32 = 600.0;
+
+/// Room (in points) the toolbar keeps at its right end for the tutorial,
+/// autocomplete and theme buttons: three touch-sized buttons and their gaps.
+const TOOLBAR_ICONS_WIDTH: f32 = 160.0;
+
+/// On a touch screen, the least width (in points) a side-by-side panel is
+/// given: what its header needs (title, Tree | Text, Save…) with some margin.
+const MIN_PANEL_WIDTH: f32 = 280.0;
+
 impl eframe::App for App {
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        platform::current().hook_raw_input(ctx, raw_input);
+    }
+
+    /// The window's background is the panels' own colour. (eframe's default is
+    /// a translucent near-black: invisible on a desktop, where panels cover
+    /// everything, but it is what shows through behind a phone's status and
+    /// gesture bars, where the UI deliberately does not draw.)
+    fn clear_color(&self, visuals: &egui::Visuals) -> [f32; 4] {
+        visuals.panel_fill.to_normalized_gamma_f32()
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.drain_events();
+        self.poll_pickers();
+        self.take_incoming();
         let hovering_drop = self.handle_drag_and_drop(ui);
+        self.compact = ui.ctx().content_rect().width() < COMPACT_WIDTH;
         // Shortcuts first, so Ctrl+F's dialog is drawn (and focused) in the
         // frame it was pressed rather than the one after.
         self.handle_shortcuts(ui.ctx());
         self.url_dialog(ui.ctx());
         self.search_dialog(ui.ctx());
 
+        // On Android the first pass runs before egui has the window's real size
+        // (it lays out into a ~8700 pt placeholder, then the touch zoom
+        // lands). Panels remember what they were given, so a half-width
+        // Source panel computed from that stays wider than the screen for
+        // good, and the Results panel is never shown. Wait for a real pass.
+        if self.touch && ui.ctx().cumulative_pass_nr() == 0 {
+            ui.ctx().request_repaint();
+            return;
+        }
+
+        // egui's root `Ui` covers the whole window, including the parts under a
+        // phone's status bar, notch and gesture bar (`Context::content_rect` is
+        // the window minus those, and the platform reports them). The UI
+        // belongs inside; on a desktop the two rectangles are the same.
+        let safe_area = ui.ctx().content_rect();
+        ui.scope_builder(egui::UiBuilder::new().max_rect(safe_area), |ui| {
+            if self.compact {
+                self.compact_layout(ui, hovering_drop);
+            } else {
+                self.wide_layout(ui, hovering_drop);
+            }
+        });
+
+        if let Some(request) = self.tutorial.show(ui.ctx()) {
+            self.apply_tutorial_request(request);
+        }
+        self.sync_platform(ui.ctx());
+    }
+}
+
+impl App {
+    /// The Source panel remembers its width in points, so on a device that
+    /// turns, the width it had upright would squeeze the Results panel when
+    /// it lies down (and the other way round). Each way up therefore keeps
+    /// its own split, and the first time in one it is half and half. The window
+    /// (not the area left by the keyboard) decides which way up it is.
+    fn source_panel_id(&self, ctx: &egui::Context) -> egui::Id {
+        if !self.touch {
+            return egui::Id::new("source_panel");
+        }
+        let window = ctx.viewport_rect();
+        egui::Id::new(if window.width() > window.height() {
+            "source_panel_landscape"
+        } else {
+            "source_panel_portrait"
+        })
+    }
+
+    /// The desktop layout: toolbar, query bar, the Source and Results panels
+    /// side by side, and the status bar.
+    fn wide_layout(&mut self, ui: &mut egui::Ui, hovering_drop: bool) {
         egui::Panel::top("toolbar").show(ui, |ui| self.toolbar(ui));
         egui::Panel::top("query_bar")
             .resizable(true)
@@ -2135,54 +2419,19 @@ impl eframe::App for App {
         let source_frame =
             egui::Frame::side_top_panel(ui.style()).inner_margin(egui::Margin::same(8));
 
-        let source_resp = egui::Panel::left("source_panel")
+        let width = ui.available_width();
+        let mut source_panel = egui::Panel::left(self.source_panel_id(ui.ctx()))
             .resizable(true)
-            .default_size(ui.available_width() * 0.5)
-            .frame(source_frame)
-            .show(ui, |ui| match self.doc.clone() {
-                Some(doc) => {
-                    ui.horizontal(|ui| {
-                        ui.heading("Source");
-                        ui.add_space(12.0);
-                        ui.selectable_value(&mut self.source_view, ViewMode::Tree, "Tree");
-                        ui.selectable_value(&mut self.source_view, ViewMode::Text, "Text");
-
-                        // Pinned to the right edge of the header, mirroring
-                        // the toolbar's theme toggle.
-                        ui.allocate_ui_with_layout(
-                            egui::vec2(ui.available_width(), ui.spacing().interact_size.y),
-                            egui::Layout::right_to_left(egui::Align::Center),
-                            |ui| {
-                                if ui.button("Save…").clicked() {
-                                    self.save_source();
-                                }
-                            },
-                        );
-                    });
-                    ui.separator();
-                    match self.source_view {
-                        ViewMode::Tree => {
-                            if let Some(action) =
-                                self.source_tree.ui(ui, "source_tree", &doc.root, false)
-                            {
-                                match action {
-                                    RowAction::Save(node_path) => self.save_source_node(node_path),
-                                    RowAction::OpenSearch => {
-                                        self.open_search_dialog(PanelKind::Source)
-                                    }
-                                    RowAction::FindInSource(_) => {}
-                                }
-                            }
-                        }
-                        ViewMode::Text => self.source_text_view(ui, &doc),
-                    }
-                }
-                None => {
-                    ui.heading("Source");
-                    ui.separator();
-                    self.paste_area(ui, hovering_drop);
-                }
-            });
+            .default_size(width * 0.5)
+            .frame(source_frame);
+        if self.touch {
+            // A finger cannot pull back a divider that has been pushed to the
+            // screen's edge (that is where the system's back gesture lives), so
+            // each panel keeps room for its header: tabs and a Save button.
+            let room = MIN_PANEL_WIDTH.min(width * 0.4);
+            source_panel = source_panel.size_range(room..=width - room);
+        }
+        let source_resp = source_panel.show(ui, |ui| self.source_panel_body(ui, hovering_drop));
 
         let results_resp = egui::CentralPanel::default().show(ui, |ui| self.results_panel(ui));
 
@@ -2191,10 +2440,249 @@ impl eframe::App for App {
             source_resp.response.rect,
             results_resp.response.rect,
         );
+    }
 
-        if let Some(request) = self.tutorial.show(ui.ctx()) {
-            self.apply_tutorial_request(request);
+    /// The phone layout: a slim toolbar (with a ☰ menu for everything else),
+    /// the query bar, then Source *or* Results, chosen by the tab bar at the
+    /// bottom of the screen where a thumb can reach it.
+    fn compact_layout(&mut self, ui: &mut egui::Ui, hovering_drop: bool) {
+        egui::Panel::top("toolbar").show(ui, |ui| self.compact_toolbar(ui));
+        egui::Panel::top("query_bar")
+            .resizable(true)
+            .default_size(112.0)
+            .min_size(72.0)
+            .show(ui, |ui| self.query_bar(ui));
+        // Declared first so it is the outermost bottom panel: the very bottom
+        // edge, with the status line just above it.
+        egui::Panel::bottom("tab_bar").show(ui, |ui| self.tab_bar(ui));
+        egui::Panel::bottom("status_bar").show(ui, |ui| self.status_bar(ui));
+        if self.hit_list.is_some() {
+            egui::Panel::bottom("search_results_panel")
+                .resizable(true)
+                .default_size(150.0)
+                .show(ui, |ui| self.hit_list_panel(ui));
         }
+
+        egui::CentralPanel::default().show(ui, |ui| match self.focused_panel {
+            PanelKind::Source => self.source_panel_body(ui, hovering_drop),
+            PanelKind::Results => self.results_panel(ui),
+        });
+    }
+
+    /// What the Source panel holds: the document (as a tree or as text), or
+    /// the empty state that offers ways to get one.
+    fn source_panel_body(&mut self, ui: &mut egui::Ui, hovering_drop: bool) {
+        match self.doc.clone() {
+            Some(doc) => {
+                ui.horizontal(|ui| {
+                    if !self.compact {
+                        ui.heading("Source");
+                        ui.add_space(12.0);
+                    }
+                    ui.selectable_value(&mut self.source_view, ViewMode::Tree, "Tree");
+                    ui.selectable_value(&mut self.source_view, ViewMode::Text, "Text");
+
+                    // Pinned to the right edge of the header, mirroring
+                    // the toolbar's theme toggle.
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(ui.available_width(), ui.spacing().interact_size.y),
+                        egui::Layout::right_to_left(egui::Align::Center),
+                        |ui| {
+                            if ui.button("Save…").clicked() {
+                                self.save_source();
+                            }
+                        },
+                    );
+                });
+                ui.separator();
+                match self.source_view {
+                    ViewMode::Tree => {
+                        if let Some(action) =
+                            self.source_tree.ui(ui, "source_tree", &doc.root, false)
+                        {
+                            match action {
+                                RowAction::Save(node_path) => self.save_source_node(node_path),
+                                RowAction::OpenSearch => self.open_search_dialog(PanelKind::Source),
+                                RowAction::FindInSource(_) => {}
+                            }
+                        }
+                    }
+                    ViewMode::Text => self.source_text_view(ui, &doc),
+                }
+            }
+            None => {
+                if !self.compact {
+                    ui.heading("Source");
+                    ui.separator();
+                }
+                self.paste_area(ui, hovering_drop);
+            }
+        }
+    }
+
+    /// Phone toolbar: ☰ menu, then the document's name and size.
+    fn compact_toolbar(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.menu_button("☰", |ui| self.main_menu(ui));
+            if let Some(doc) = &self.doc {
+                let mut text = format!(
+                    "{}  ·  {}",
+                    source_label(&doc.source),
+                    human_bytes(doc.byte_len)
+                );
+                if doc.top_level_values > 1 {
+                    text.push_str(&format!("  ·  {} records", doc.top_level_values));
+                }
+                ui.add(egui::Label::new(egui::RichText::new(text).monospace()).truncate());
+            } else if self.loading {
+                ui.spinner();
+                ui.label("Loading…");
+            } else {
+                ui.weak("jsonquery");
+            }
+        });
+    }
+
+    /// The ☰ menu: what the desktop toolbar and its icon buttons offer.
+    fn main_menu(&mut self, ui: &mut egui::Ui) {
+        if ui.button("Open file…").clicked() {
+            self.begin_open();
+            ui.close();
+        }
+        if ui.button("Open URL…").clicked() {
+            self.open_url_dialog();
+            ui.close();
+        }
+        if ui.button("Paste JSON from clipboard").clicked() {
+            self.paste_from_clipboard();
+            ui.close();
+        }
+        let can_clear = self.doc.is_some() || self.loading || self.load_error.is_some();
+        if ui
+            .add_enabled(can_clear, egui::Button::new("Clear"))
+            .clicked()
+        {
+            self.clear_source();
+            ui.close();
+        }
+        ui.separator();
+        if ui
+            .add_enabled(self.search_available(), egui::Button::new("Search…"))
+            .clicked()
+        {
+            self.open_search_dialog(self.focused_panel);
+            ui.close();
+        }
+        ui.separator();
+        if ui.button("Tutorial").clicked() {
+            self.tutorial.open_or_focus(ui.ctx());
+            ui.close();
+        }
+        let dark = ui.ctx().theme() == egui::Theme::Dark;
+        if ui
+            .button(if dark { "Light theme" } else { "Dark theme" })
+            .clicked()
+        {
+            ui.ctx().set_theme(if dark {
+                egui::ThemePreference::Light
+            } else {
+                egui::ThemePreference::Dark
+            });
+            ui.close();
+        }
+        let mut suggest = self.query_suggest.enabled;
+        if ui
+            .checkbox(&mut suggest, "Autocomplete suggestions")
+            .changed()
+        {
+            self.query_suggest.set_enabled(suggest);
+        }
+    }
+
+    /// Source | Results, as big touch targets.
+    fn tab_bar(&mut self, ui: &mut egui::Ui) {
+        let results_title = if self.results_count_so_far > 0 {
+            format!("Results ({})", self.results_count_so_far)
+        } else {
+            "Results".to_string()
+        };
+        let tabs = [
+            (PanelKind::Source, "Source".to_string()),
+            (PanelKind::Results, results_title),
+        ];
+        ui.columns(tabs.len(), |columns| {
+            for (column, (kind, title)) in columns.iter_mut().zip(tabs) {
+                let selected = self.focused_panel == kind;
+                let size = egui::vec2(column.available_width(), 38.0);
+                if column
+                    .add_sized(size, egui::Button::selectable(selected, title))
+                    .clicked()
+                {
+                    self.focused_panel = kind;
+                }
+            }
+        });
+    }
+
+    /// Load whatever text is on the device clipboard as the source document.
+    fn paste_from_clipboard(&mut self) {
+        if let Some(text) = platform::current().clipboard_text() {
+            if !text.trim().is_empty() {
+                self.open_text(text);
+            }
+        }
+    }
+
+    /// Tell the platform what it needs to follow along: whether a text field
+    /// wants the on-screen keyboard, the theme (so the system bars can match
+    /// it), and anything copied — the device clipboard isn't egui's.
+    fn sync_platform(&mut self, ctx: &egui::Context) {
+        let platform = platform::current();
+        if self.touch {
+            let wants_keyboard = ctx.egui_wants_keyboard_input();
+            if wants_keyboard != self.keyboard_shown {
+                self.keyboard_shown = wants_keyboard;
+                platform.set_keyboard_visible(wants_keyboard);
+            }
+        }
+        let dark = ctx.theme() == egui::Theme::Dark;
+        if self.dark_told != Some(dark) {
+            self.dark_told = Some(dark);
+            platform.set_dark_theme(dark);
+        }
+        ctx.output(|output| {
+            for command in &output.commands {
+                if let egui::OutputCommand::CopyText(text) = command {
+                    platform.set_clipboard_text(text);
+                }
+            }
+        });
+    }
+}
+
+/// Bigger targets and a little zoom, so fingertips can hit rows and buttons.
+fn apply_touch_style(ctx: &egui::Context) {
+    ctx.set_zoom_factor(1.15);
+    ctx.all_styles_mut(|style| {
+        style.spacing.interact_size = egui::vec2(40.0, 32.0);
+        style.spacing.button_padding = egui::vec2(10.0, 6.0);
+        style.spacing.item_spacing = egui::vec2(8.0, 6.0);
+    });
+}
+
+/// A file's name as the user should see it: the platform's, if it has one
+/// (a phone stages picked documents under a cache path that means nothing to
+/// the user), else the path itself.
+fn path_label(path: &std::path::Path) -> String {
+    platform::current()
+        .display_name(path)
+        .unwrap_or_else(|| path.display().to_string())
+}
+
+fn source_label(source: &DocumentSource) -> String {
+    match source {
+        DocumentSource::File(path) => path_label(path),
+        other => other.label(),
     }
 }
 

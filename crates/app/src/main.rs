@@ -3,24 +3,7 @@
 // visible.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-mod app;
-mod query_highlight;
-mod query_suggest;
-mod tree_view;
-mod tutorial;
-mod worker;
-
-/// Must match the AppImage's `.desktop` file (`StartupWMClass=jsonquery_gui`,
-/// see `build/appimage.sh`) so window managers associate the running window
-/// with the launcher icon — otherwise "pin to taskbar" after launch doesn't
-/// stick.
-const APP_ID: &str = "jsonquery_gui";
-
-/// The window icon, shared by the main window and the tutorial window.
-fn app_icon() -> egui::IconData {
-    eframe::icon_data::from_png_bytes(include_bytes!("../../../assets/icon.png"))
-        .expect("bundled icon should be a valid PNG")
-}
+use jsonquery_gui::{app_icon, App, APP_ID};
 
 fn main() -> eframe::Result {
     let native_options = eframe::NativeOptions {
@@ -36,6 +19,6 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "jsonquery_gui",
         native_options,
-        Box::new(|cc| Ok(Box::new(app::App::new(cc)))),
+        Box::new(|cc| Ok(Box::new(App::new(cc)))),
     )
 }
