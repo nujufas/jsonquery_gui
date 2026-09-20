@@ -1,0 +1,56 @@
+name: MSIX
+
+# Wraps a published GitHub Release's Windows zip into MSIX packages (see packaging/msix/README.md):
+#   - "test" package: throwaway self-signed certificate, for sideloading in a Windows VM
+#   - "store" package: unsigned, built only once packaging/msix/identity.env has the Store identity
+# Run it by hand from the Actions tab (or: gh workflow run msix.yml -f tag=v0.4.1).
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to package
+        required: true
+        default: v0.4.1
+
+permissions:
+  contents: read
+
+jobs:
+  msix:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download the release zip and check it against GitHub's recorded digest
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          gh release download $env:TAG --repo $env:GITHUB_REPOSITORY --pattern '*-windows-x86_64.zip' --dir release
+          $zip = Get-ChildItem release -Filter '*-windows-x86_64.zip' | Select-Object -First 1
+          $release = gh api "repos/$env:GITHUB_REPOSITORY/releases/tags/$env:TAG" | ConvertFrom-Json
+          $digest = ($release.assets | Where-Object { $_.name -eq $zip.Name }).digest
+          $actual = 'sha256:' + (Get-FileHash $zip.FullName -Algorithm SHA256).Hash.ToLower()
+          Write-Host "zip    : $($zip.Name)"
+          Write-Host "digest : $digest"
+          Write-Host "actual : $actual"
+          if ($digest -ne $actual) { throw 'the downloaded zip does not match the release digest' }
+          "ZIP=$($zip.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Build the test package (signed with a throwaway certificate)
+        shell: powershell
+        run: ./packaging/msix/build-msix.ps1 -Flavor Test -ZipPath $env:ZIP -OutDir dist/msix
+
+      - name: Build the Store package (unsigned; skipped while the Store identity is empty)
+        shell: powershell
+        run: |
+          ./packaging/msix/build-msix.ps1 -Flavor Store -ZipPath $env:ZIP -OutDir dist/msix
+          if ($LASTEXITCODE -eq 3) { Write-Host '::notice::Store package skipped - fill STORE_* in packaging/msix/identity.env'; exit 0 }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: msix-${{ inputs.tag }}
+          path: dist/msix/
+          if-no-files-found: error

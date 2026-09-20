@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Chocolatey package for jsonquery gui. Bump for a release: see README.md in this folder. -->
+<package xmlns="http://schemas.microsoft.com/packaging/2015/06/nuspec.xsd">
+  <metadata>
+    <id>jsonquery-gui</id>
+    <version>0.4.1</version>
+    <title>jsonquery gui</title>
+    <authors>nujufas</authors>
+    <owners>nujufas</owners>
+    <projectUrl>https://github.com/nujufas/jsonquery_gui</projectUrl>
+    <iconUrl>https://cdn.jsdelivr.net/gh/nujufas/jsonquery_gui@v0.4.1/assets/icons/icon-256.png</iconUrl>
+    <licenseUrl>https://github.com/nujufas/jsonquery_gui/blob/master/LICENSE</licenseUrl>
+    <requireLicenseAcceptance>false</requireLicenseAcceptance>
+    <projectSourceUrl>https://github.com/nujufas/jsonquery_gui</projectSourceUrl>
+    <packageSourceUrl>https://github.com/nujufas/jsonquery_gui/tree/master/packaging/chocolatey</packageSourceUrl>
+    <docsUrl>https://github.com/nujufas/jsonquery_gui#readme</docsUrl>
+    <bugTrackerUrl>https://github.com/nujufas/jsonquery_gui/issues</bugTrackerUrl>
+    <copyright>Copyright (c) 2026 nujufas</copyright>
+    <tags>jsonquery-gui json jq jsonpath jmespath json-pointer viewer query gui rust foss cross-platform</tags>
+    <summary>A fast, native desktop GUI for browsing and querying large JSON files with jq, JSONPath, JMESPath and JSON Pointer.</summary>
+    <description><![CDATA[
+**jsonquery gui** is a native desktop tool for browsing and querying large JSON files. Drag in a file, open a URL or paste JSON directly, then query it with jq, JSON Pointer (RFC 6901), JSONPath (RFC 9535) or JMESPath. Results stream into a searchable tree or text view.
+
+## Features
+
+- Four query dialects: jq, JSON Pointer, JSONPath and JMESPath
+- Handles large files: results stream in instead of freezing the window
+- Optional inline autocomplete for each dialect's functions and for the loaded document's own keys
+- Colour-coded query box and a built-in tutorial with live results for all four dialects
+- Built in Rust with egui; a single self-contained executable
+
+## Package notes
+
+- The package downloads the official release zip from GitHub and checks its SHA-256 before extracting it.
+- It adds a **jsonquery gui** Start-menu shortcut and a `jsonquery-gui` command (`jsonquery-gui file.json`).
+- The executable is not code-signed, so Windows SmartScreen may warn the first time it runs.
+]]></description>
+    <releaseNotes>https://github.com/nujufas/jsonquery_gui/releases/tag/v0.4.1</releaseNotes>
+  </metadata>
+  <files>
+    <file src="tools\**" target="tools" />
+  </files>
+</package>
