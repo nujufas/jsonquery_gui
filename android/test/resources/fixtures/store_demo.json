@@ -1,0 +1,9 @@
+{
+  "store": "Riverside Books",
+  "open": true,
+  "orders": [
+    {"id": 1001, "customer": {"name": "Ada Lovelace", "city": "London"}, "total": 74.5, "items": ["Analytical Engines", "Notes"]},
+    {"id": 1002, "customer": {"name": "Alan Turing", "city": "Wilmslow"}, "total": 32.0, "items": ["On Computable Numbers"]},
+    {"id": 1003, "customer": {"name": "Grace Hopper", "city": "New York"}, "total": 128.9, "items": ["COBOL", "Compilers", "Nanoseconds"]}
+  ]
+}

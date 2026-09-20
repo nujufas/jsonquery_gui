@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">jsonquery</string>
+    <string name="saved">Saved</string>
+    <string name="save_failed">Couldn\'t save: %1$s</string>
+    <string name="open_failed">Couldn\'t open the file: %1$s</string>
+    <string name="no_file_picker">No app is available to pick a file.</string>
+</resources>

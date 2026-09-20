@@ -1,0 +1,120 @@
+name: Android
+
+# Builds the Android app with the same scripts (and the same toolchain
+# container) as a local build: android/scripts/*.sh, android/docker/. On a
+# version tag (or by hand) it also builds the signed release bundle for
+# Google Play, checks it, and -- if a Play service account is configured --
+# uploads it to the internal testing track as a draft.
+#
+# Secrets (Settings > Secrets and variables > Actions), see android/docs/play-store.md:
+#   ANDROID_KEYSTORE_BASE64    base64 -w0 android/signing/upload.jks
+#   ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS, ANDROID_KEY_PASSWORD
+#   PLAY_SERVICE_ACCOUNT_JSON  (optional) the service account key, to publish
+
+on:
+  push:
+    branches: [main, master]
+    tags: ["v*"]
+    paths:
+      - "android/**"
+      - "crates/**"
+      - "assets/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/android.yml"
+  pull_request:
+    paths:
+      - "android/**"
+      - "crates/**"
+      - "assets/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/android.yml"
+  workflow_dispatch:
+    inputs:
+      release:
+        description: "Build the signed release bundle too"
+        type: boolean
+        default: false
+      publish:
+        description: "...and upload it to Play (internal track, draft)"
+        type: boolean
+        default: false
+
+env:
+  RELEASE: ${{ startsWith(github.ref, 'refs/tags/v') || inputs.release == true }}
+  PUBLISH: ${{ startsWith(github.ref, 'refs/tags/v') || inputs.publish == true }}
+
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      # The toolchain image is ~7 GB of SDK/NDK/Rust; cache its layers.
+      - uses: docker/setup-buildx-action@v3
+      - name: Toolchain image
+        uses: docker/build-push-action@v6
+        with:
+          context: android/docker
+          file: android/docker/Dockerfile.build
+          tags: jsonquery-android-build:1
+          load: true
+          cache-from: type=gha,scope=android-toolchain
+          cache-to: type=gha,scope=android-toolchain,mode=max
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            android/.build/cargo
+            android/.build/gradle
+            android/.build/target
+          key: android-${{ hashFiles('android/Cargo.lock', 'android/gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: android-
+
+      - name: Format and lint
+        run: android/scripts/build.sh check
+
+      - name: Debug APK (x86_64)
+        run: android/scripts/build.sh apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jsonquery-debug-apk
+          path: android/dist/*-debug.apk
+
+      - name: Release bundle
+        if: env.RELEASE == 'true'
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          if [ -z "$ANDROID_KEYSTORE_BASE64" ]; then
+            echo "::error::ANDROID_KEYSTORE_BASE64 is not set; cannot sign a release bundle"; exit 1
+          fi
+          mkdir -p android/signing
+          echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > android/signing/upload.jks
+          export ANDROID_KEYSTORE_FILE=signing/upload.jks
+          android/scripts/build.sh aab
+          android/scripts/preflight.sh
+          rm -f android/signing/upload.jks
+
+      - uses: actions/upload-artifact@v4
+        if: env.RELEASE == 'true'
+        with:
+          name: jsonquery-release-bundle
+          path: android/dist/*.aab
+
+      - name: Upload to Google Play (internal track, draft)
+        if: env.RELEASE == 'true' && env.PUBLISH == 'true'
+        env:
+          PLAY_SERVICE_ACCOUNT_JSON: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
+        run: |
+          if [ -z "$PLAY_SERVICE_ACCOUNT_JSON" ]; then
+            echo "::warning::PLAY_SERVICE_ACCOUNT_JSON is not set; skipping the Play upload (the bundle is attached to this run)"
+            exit 0
+          fi
+          android/scripts/publish.sh --track internal --status draft

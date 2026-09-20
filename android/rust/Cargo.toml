@@ -1,0 +1,22 @@
+[package]
+name = "jsonquery_android"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Android shell for jsonquery: NativeActivity entry point and the Kotlin bridge"
+
+[lib]
+name = "jsonquery_android"
+crate-type = ["cdylib"]
+
+[dependencies]
+jsonquery_gui = { path = "../../crates/app", default-features = false, features = ["android"] }
+# The same crates (and so the same versions) the app crate builds on: winit's
+# `AndroidApp` must be android-activity's, and eframe's `NativeOptions` needs it.
+eframe = { version = "0.36.1", default-features = false, features = ["android-native-activity", "glow", "default_fonts"] }
+android-activity = { version = "0.6.1", features = ["native-activity"] }
+jni = "0.21"
+log = "0.4"
+android_logger = "0.15"
+crossbeam-channel = "0.5.16"

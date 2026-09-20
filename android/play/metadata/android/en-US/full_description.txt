@@ -1,0 +1,33 @@
+jsonquery is a fast JSON viewer and query tool for your phone. Open a JSON file, browse it as a tree, and ask it questions with the query language you already know.
+
+OPEN JSON YOUR WAY
+• Open any JSON, NDJSON or JSON Lines file from your device or cloud storage
+• "Open with jsonquery" from your file manager, browser or email app
+• Share JSON text to jsonquery from any app, or paste it from the clipboard
+• Load a document straight from a URL
+
+BROWSE
+• Collapsible tree with a tap; long-press a row to copy its JSON path, save it, or search
+• Switch to plain, pretty-printed text at any time
+• The tree only draws the rows on screen, so big documents stay responsive
+
+QUERY WITH THE LANGUAGE YOU KNOW
+• jq — filters, map/select, aggregates, sorting and more
+• JSONPath — $..book[?(@.price < 10)].title
+• JMESPath — people[?age > `30`].name
+• JSON Pointer — /users/0/name
+• The dialect is detected from your query, or pick one yourself
+• Colour-coded query steps, and optional suggestions as you type (Menu → Autocomplete suggestions)
+• A built-in tutorial with 60+ runnable lessons for all four languages
+
+FIND AND SAVE
+• Search the document or your results, step through matches or list them all
+• Jump from a result back to where it lives in the source
+• Save the whole document, one node, or your query results as JSON
+
+PRIVATE BY DESIGN
+• Everything happens on your device. Your files are never uploaded.
+• No account, no ads, no tracking.
+• The only network access is downloading a document when you choose "Open URL".
+
+jsonquery is free and open source (MIT). Source and issue tracker: https://github.com/nujufas/jsonquery_gui

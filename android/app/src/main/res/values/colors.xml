@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- The dark theme's panel colour in egui, so nothing flashes before the first frame. -->
+    <color name="window_background">#1B1B1B</color>
+    <!-- The app icon's dark background. -->
+    <color name="ic_launcher_background">#181610</color>
+</resources>

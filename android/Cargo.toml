@@ -1,0 +1,29 @@
+# The Android build's own Cargo workspace. It is deliberately NOT a member of
+# the repo's root workspace: the app crate is built here with its `android`
+# feature set, and putting both in one workspace would unify the two feature
+# sets and break the desktop build. `Cargo.lock` starts as a copy of the root
+# one, so both resolve the same versions of everything they share.
+[workspace]
+resolver = "2"
+members = ["rust"]
+
+[workspace.package]
+version = "0.4.0"
+edition = "2021"
+license = "MIT"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+# Keep the symbol table (Play Console uses it to symbolicate native crashes);
+# Gradle strips the copy that ships in the APK.
+strip = "debuginfo"
+
+# For emulator test builds and pull-request CI: several times quicker to
+# compile than `release`, still fast enough to run egui smoothly.
+[profile.ci]
+inherits = "release"
+opt-level = 2
+lto = false
+codegen-units = 16

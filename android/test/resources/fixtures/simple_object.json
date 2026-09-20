@@ -1,0 +1,7 @@
+{
+  "name": "jsonquery",
+  "version": 3,
+  "active": true,
+  "notes": null,
+  "tags": ["gui", "rust", "json"]
+}

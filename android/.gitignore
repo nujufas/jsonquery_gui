@@ -1,0 +1,24 @@
+# Build state: Cargo target dir, Gradle and Cargo caches, the container's $HOME
+# (which holds the debug keystore). Safe to delete; the next build recreates it.
+/.build/
+/.gradle/
+/app/build/
+/build/
+/local.properties
+
+# Build outputs (APK / AAB / symbols)
+/dist/
+
+# Signing material: NEVER commit. See README.md, "Signing".
+/signing/
+*.jks
+*.keystore
+keystore.properties
+
+# Play publishing credentials
+play-service-account*.json
+
+# Test run output
+/test/results/
+/test/.venv/
+__pycache__/

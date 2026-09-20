@@ -1,0 +1,1 @@
+First release on Google Play: open JSON files or paste JSON, browse them as a tree, query with jq, JSONPath, JMESPath and JSON Pointer, search, and save results.

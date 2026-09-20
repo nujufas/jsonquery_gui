@@ -1,0 +1,70 @@
+# syntax=docker/dockerfile:1
+#
+# Toolchain image for building the jsonquery Android app: JDK, Android SDK +
+# NDK, Rust (with the Android targets) and cargo-ndk. Everything lives in the
+# image, so nothing is installed on the host -- see android/README.md.
+#
+# The repo is bind-mounted at /work at run time and the container runs as the
+# host user (android/scripts/lib.sh), so build outputs are owned by you.
+FROM ubuntu:24.04
+
+ARG DEBIAN_FRONTEND=noninteractive
+# Versions: bump deliberately, then rebuild with `android/scripts/image.sh`.
+ARG CMDLINE_TOOLS_BUILD=16111833
+ARG ANDROID_PLATFORM=36
+ARG BUILD_TOOLS=36.0.0
+ARG NDK_VERSION=29.0.14206865
+ARG RUST_VERSION=1.98.1
+ARG CARGO_NDK_VERSION=4.1.2
+ARG BUNDLETOOL_VERSION=1.18.3
+
+ENV ANDROID_HOME=/opt/android-sdk \
+    ANDROID_SDK_ROOT=/opt/android-sdk \
+    ANDROID_NDK_HOME=/opt/android-sdk/ndk/${NDK_VERSION} \
+    JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64 \
+    RUSTUP_HOME=/opt/rustup \
+    PATH=/opt/cargo/bin:/opt/venv/bin:/opt/android-sdk/cmdline-tools/latest/bin:/opt/android-sdk/platform-tools:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+        ca-certificates curl unzip zip git file build-essential pkg-config \
+        openjdk-17-jdk-headless python3 python3-venv \
+ && rm -rf /var/lib/apt/lists/*
+
+# Android SDK: command-line tools, platform, build-tools, NDK.
+RUN mkdir -p ${ANDROID_HOME}/cmdline-tools \
+ && curl -fsSL "https://dl.google.com/android/repository/commandlinetools-linux-${CMDLINE_TOOLS_BUILD}_latest.zip" -o /tmp/cmdline-tools.zip \
+ && unzip -q /tmp/cmdline-tools.zip -d ${ANDROID_HOME}/cmdline-tools \
+ && mv ${ANDROID_HOME}/cmdline-tools/cmdline-tools ${ANDROID_HOME}/cmdline-tools/latest \
+ && rm /tmp/cmdline-tools.zip \
+ && yes | sdkmanager --licenses >/dev/null \
+ && sdkmanager --install "platform-tools" "platforms;android-${ANDROID_PLATFORM}" \
+        "build-tools;${BUILD_TOOLS}" "ndk;${NDK_VERSION}" \
+ && rm -rf ${ANDROID_HOME}/.temp \
+ # sdkmanager unpacks with mode 0744: executable by root only, which would
+ # stop the (non-root) build user from running clang, aapt2, ... In the same
+ # layer, so the files are not stored twice.
+ && chmod -R go+rX ${ANDROID_HOME}
+
+# Rust + the three Android ABIs Play devices use (arm64, arm32, x86_64 for
+# emulators/Chromebooks) + cargo-ndk, which points cargo at the NDK's clang.
+ENV CARGO_HOME=/opt/cargo
+RUN curl -fsSL https://sh.rustup.rs | sh -s -- -y --no-modify-path --profile minimal \
+        --component rustfmt --component clippy \
+        --default-toolchain ${RUST_VERSION} \
+        --target aarch64-linux-android --target armv7-linux-androideabi --target x86_64-linux-android \
+ && cargo install cargo-ndk --version ${CARGO_NDK_VERSION} --locked \
+ && rm -rf /opt/cargo/registry /opt/cargo/git
+# At run time CARGO_HOME moves to a writable, bind-mounted cache (lib.sh);
+# the tools installed above stay on PATH via /opt/cargo/bin.
+
+# bundletool: validates the .aab and turns it into a universal .apk.
+RUN curl -fsSL "https://github.com/google/bundletool/releases/download/${BUNDLETOOL_VERSION}/bundletool-all-${BUNDLETOOL_VERSION}.jar" -o /opt/bundletool.jar \
+ && printf '#!/bin/sh\nexec java -jar /opt/bundletool.jar "$@"\n' > /usr/local/bin/bundletool \
+ && chmod +x /usr/local/bin/bundletool
+
+# Python for the icon/graphics generators and the Play publisher.
+RUN python3 -m venv /opt/venv \
+ && /opt/venv/bin/pip install --no-cache-dir Pillow google-api-python-client google-auth
+
+WORKDIR /work
