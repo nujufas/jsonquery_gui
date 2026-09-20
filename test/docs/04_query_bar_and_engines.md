@@ -260,3 +260,17 @@ Priority: P2
 Steps: type `end` (a jq keyword, so glue — untinted — under auto-detect);
 then pick JMESPath.
 Expected: no tint before; `end` orange after, as a plain JMESPath field name.
+
+### TC-QRY-075 — A call inside a call gets its own tint, and the closer matches its opener
+Priority: P2
+Steps: type `.members | map(select(.active) | .name)` (the tutorial's own
+example; no document needed).
+Expected: `.members` orange, `map(` blue, `select(.active)` green, `.name`
+purple, and the closing `)` blue again — the same tint as its opener. (A group
+that holds a function call is opened up; the closer repeats the opener's tint.)
+
+### TC-QRY-076 — A call with no sub-function stays one chip
+Priority: P2
+Steps: type `map(.a | .b)`.
+Expected: one orange chip for the whole call, the `|` inside it on the tint,
+and no blue or green anywhere.

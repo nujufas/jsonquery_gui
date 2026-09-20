@@ -94,3 +94,29 @@ TC-QRY-074 The Engine Picker Changes How The Query Is Split
     Select Engine    JMESPath
     Sleep    0.5s
     Region Should Contain Color        13    ${ROW_Y}    20    ${ROW_H}    @{ORANGE}
+
+TC-QRY-075 A Call Inside A Call Gets Its Own Tint And The Closer Matches Its Opener
+    [Documentation]    `.members | map(select(.active) | .name)` -- the
+    ...    tutorial's own example. `map(` is opened up: `map(` is blue,
+    ...    `select(.active)` green and `.name` purple, and the closing `)` is
+    ...    blue again (the tutorial tints it the same way). Before, the whole
+    ...    `map(...)` was one blue chip and the sub-function had no tint.
+    [Tags]    p2
+    Type Query    .members | map(select(.active) | .name)
+    Region Should Contain Color        14     ${ROW_Y}    56     ${ROW_H}    @{ORANGE}
+    Region Should Contain Color        100    ${ROW_Y}    24     ${ROW_H}    @{BLUE}
+    Region Should Contain Color        134    ${ROW_Y}    108    ${ROW_H}    @{GREEN}
+    Region Should Contain Color        272    ${ROW_Y}    32     ${ROW_H}    @{PURPLE}
+    Region Should Contain Color        311    ${ROW_Y}    5      ${ROW_H}    @{BLUE}
+    Region Should Not Contain Color    311    ${ROW_Y}    5      ${ROW_H}    @{PURPLE}
+
+TC-QRY-076 A Call With No Sub-Function Stays One Chip
+    [Documentation]    `map(.a | .b)` holds no function call, so it is one
+    ...    orange chip -- the `|` inside it sits on the tint, and nothing
+    ...    else is coloured. Only a group with a call inside is opened up.
+    [Tags]    p2
+    Type Query    map(.a | .b)
+    Region Should Contain Color        14     ${ROW_Y}    88     ${ROW_H}    @{ORANGE}
+    Region Should Contain Color        60     ${ROW_Y}    10     ${ROW_H}    @{ORANGE}
+    Region Should Not Contain Color    14     ${ROW_Y}    88     ${ROW_H}    @{BLUE}
+    Region Should Not Contain Color    14     ${ROW_Y}    88     ${ROW_H}    @{GREEN}

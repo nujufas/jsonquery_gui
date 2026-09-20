@@ -12,6 +12,7 @@
 //! The egui side lives in `crates/app/src/tutorial.rs`; the split mirrors
 //! [`crate::suggest`] / `query_suggest.rs`.
 
+use std::ops::Range;
 use std::sync::atomic::AtomicBool;
 
 use jsonquery_core::engine::QueryEvent;
@@ -261,8 +262,12 @@ pub fn format_value(value: &Value) -> String {
 /// order, each starting where the previous one ended; text between them is
 /// returned untagged, so the pieces always concatenate back to `query`. A
 /// fragment that can't be found is skipped (the content tests forbid that).
+///
+/// A fragment that opens a bracket it doesn't close (`map(`, `[`, `{name`)
+/// also tints the bracket that closes it, under the same index, so the pair
+/// reads as one — unless another fragment already covers that closer.
 pub fn segments<'q>(query: &'q str, parts: &[Part]) -> Vec<(&'q str, Option<usize>)> {
-    let mut out = Vec::new();
+    let mut tinted: Vec<(Range<usize>, usize)> = Vec::new();
     let mut cursor = 0;
     for (i, (fragment, _)) in parts.iter().enumerate() {
         if fragment.is_empty() {
@@ -272,16 +277,89 @@ pub fn segments<'q>(query: &'q str, parts: &[Part]) -> Vec<(&'q str, Option<usiz
             continue;
         };
         let start = cursor + offset;
-        if start > cursor {
-            out.push((&query[cursor..start], None));
-        }
-        out.push((&query[start..start + fragment.len()], Some(i)));
+        tinted.push((start..start + fragment.len(), i));
         cursor = start + fragment.len();
+    }
+    let closers: Vec<(Range<usize>, usize)> = tinted
+        .iter()
+        .flat_map(|(fragment, i)| {
+            closers_of(query.as_bytes(), fragment.clone())
+                .into_iter()
+                .map(move |at| (at..at + 1, *i))
+        })
+        .filter(|(closer, _)| !tinted.iter().any(|(t, _)| t.contains(&closer.start)))
+        .collect();
+    tinted.extend(closers);
+    tinted.sort_by_key(|(range, _)| range.start);
+
+    let mut out = Vec::new();
+    let mut cursor = 0;
+    for (range, i) in tinted {
+        if range.start > cursor {
+            out.push((&query[cursor..range.start], None));
+        }
+        out.push((&query[range.clone()], Some(i)));
+        cursor = range.end;
     }
     if cursor < query.len() {
         out.push((&query[cursor..], None));
     }
     out
+}
+
+/// The positions in `b` of the brackets that close the ones `fragment` opens
+/// and leaves open — none for a fragment whose brackets balance. Quoted text
+/// doesn't count, so a `)` in a string is not a closer.
+fn closers_of(b: &[u8], fragment: Range<usize>) -> Vec<usize> {
+    let mut unclosed = 0usize;
+    let mut i = fragment.start;
+    while i < fragment.end {
+        match b[i] {
+            b'(' | b'[' | b'{' => unclosed += 1,
+            b')' | b']' | b'}' => unclosed = unclosed.saturating_sub(1),
+            b'"' | b'\'' | b'`' => {
+                i = skip_quoted(b, i, fragment.end);
+                continue;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+
+    let mut closers = Vec::new();
+    let mut nested = 0usize;
+    let mut i = fragment.end;
+    while unclosed > 0 && i < b.len() {
+        match b[i] {
+            b'(' | b'[' | b'{' => nested += 1,
+            b')' | b']' | b'}' if nested > 0 => nested -= 1,
+            b')' | b']' | b'}' => {
+                closers.push(i);
+                unclosed -= 1;
+            }
+            b'"' | b'\'' | b'`' => {
+                i = skip_quoted(b, i, b.len());
+                continue;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    closers
+}
+
+/// From an opening quote to just past its closing one, or to `end`.
+fn skip_quoted(b: &[u8], at: usize, end: usize) -> usize {
+    let quote = b[at];
+    let mut i = at + 1;
+    while i < end {
+        match b[i] {
+            b'\\' => i += 2,
+            c if c == quote => return i + 1,
+            _ => i += 1,
+        }
+    }
+    end
 }
 
 /// A run of prose from [`parse_inline`].
@@ -591,6 +669,56 @@ mod tests {
             vec![0, 1, 2]
         );
         assert_eq!(segs[1], (" | ", None));
+    }
+
+    #[test]
+    fn a_fragment_that_opens_a_bracket_also_tints_the_closer() {
+        // The closer is tinted with its opener's index, not left plain.
+        let segs = segments(
+            ".members | map(select(.active) | .name)",
+            &[("map(", "a"), ("select(.active)", "b"), ("| .name", "c")],
+        );
+        assert_eq!(
+            segs,
+            vec![
+                (".members | ", None),
+                ("map(", Some(0)),
+                ("select(.active)", Some(1)),
+                (" ", None),
+                ("| .name", Some(2)),
+                (")", Some(0)),
+            ]
+        );
+        // Every bracket the fragment opens is closed, however deep the text
+        // between, and a `)` inside a string is not a closer.
+        let segs = segments(r#"a(b(")") | c)"#, &[("a(", "x")]);
+        assert_eq!(segs.last(), Some(&(")", Some(0))));
+        assert_eq!(segs.iter().filter(|(_, i)| i.is_some()).count(), 2);
+        let segs = segments("f(g(x))", &[("f(g(", "x")]);
+        assert_eq!(
+            segs,
+            vec![
+                ("f(g(", Some(0)),
+                ("x", None),
+                (")", Some(0)),
+                (")", Some(0))
+            ]
+        );
+    }
+
+    #[test]
+    fn a_closer_another_fragment_already_covers_keeps_that_fragments_tint() {
+        let segs = segments("[.a]", &[("[", "open"), (".a", "body"), ("]", "close")]);
+        assert_eq!(segs, vec![("[", Some(0)), (".a", Some(1)), ("]", Some(2))]);
+    }
+
+    #[test]
+    fn balanced_fragments_and_missing_closers_add_nothing() {
+        let segs = segments("f(a) | g(b)", &[("f(a)", "x")]);
+        assert_eq!(segs.iter().filter(|(_, i)| i.is_some()).count(), 1);
+        // Half a query: the closer isn't there yet.
+        let segs = segments("map(.a", &[("map(", "x")]);
+        assert_eq!(segs, vec![("map(", Some(0)), (".a", None)]);
     }
 
     #[test]

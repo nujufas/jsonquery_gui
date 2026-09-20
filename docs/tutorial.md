@@ -84,7 +84,10 @@ Lesson::new(
 ```
 
 - **Fragments** are matched against the query in order, so each must appear
-  after the previous one. Text between fragments is simply not highlighted.
+  after the previous one. Text between fragments is simply not highlighted —
+  except that a fragment which opens a bracket it doesn't close (`map(`, `[`,
+  `{name`) also tints the bracket that closes it, in the same colour, so you
+  don't need a fragment for the closing `)`.
 - **Prose** (`summary`, tips, notes) understands `` `code` `` and `*emphasis*`.
   JMESPath's own literals use backticks, so a code span that contains one is
   fenced with doubled backticks: `` `` `30` `` ``.

@@ -138,6 +138,8 @@ a false expectation.
 | TC-QRY-072 | Query highlighting: Pointer segments each tinted | P2 | **Passing** | `suites/query_highlight/` |
 | TC-QRY-073 | Query highlighting: half-typed query still tinted | P2 | **Passing** | `suites/query_highlight/` |
 | TC-QRY-074 | Query highlighting: engine picker changes the split | P2 | **Passing** | `suites/query_highlight/` |
+| TC-QRY-075 | Query highlighting: a call inside a call gets its own tint; closer matches opener | P2 | **Passing** | `suites/query_highlight/` |
+| TC-QRY-076 | Query highlighting: a call with no sub-function stays one chip | P2 | **Passing** | `suites/query_highlight/` |
 
 **Confirmed during implementation, two OCR-specific limitations worth
 knowing before touching this suite again**: Tesseract sometimes reads the
