@@ -1,5 +1,13 @@
+__pycache__/
+
 /target/
 /dist/
 /build/AppDir/
 /build/appimagetool-*.AppImage
 /test-data/
+
+/android/app/build/
+/android/dist/
+/android/.build/
+/android/.gradle/
+/android/test/results/

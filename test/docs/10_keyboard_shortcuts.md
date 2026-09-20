@@ -72,14 +72,15 @@ Cross-reference [06_text_view.md](06_text_view.md) TC-TXT-007. Same
 focus-gating note as TC-KEY-004 applies — worth the same quick negative
 check alongside it, not a standalone case.
 
-### TC-KEY-006 — Enter submits the Open URL and Search popups
+### TC-KEY-006 — Enter loads the source field and submits the Search popup
 Priority: P3
 Cross-reference [02_opening_sources.md](02_opening_sources.md) TC-OPEN-003
 and [08_search_and_find_in_source.md](08_search_and_find_in_source.md)
 TC-SRCH-001+ — implement as a parametrized "press Enter instead of clicking
 the primary button" variant of those existing cases rather than a new case.
 In the Search dialog Enter is `Find`: it steps to the next match and the
-dialog stays open (TC-SRCH-033), where Enter in Open URL loads and closes.
+dialog stays open (TC-SRCH-033), where Enter in the toolbar's source field
+just loads it (there's no popup left to close).
 
 ### TC-KEY-007 — Standard text-editing keys behave natively in every text
 field

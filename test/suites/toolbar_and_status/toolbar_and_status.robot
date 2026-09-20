@@ -19,7 +19,7 @@ ${FIXTURES}    ${CURDIR}/../../resources/fixtures
 *** Test Cases ***
 TC-TOOL-005 Parse Time Text Only Appears Once A Document Is Loaded
     [Documentation]    "Parsed in ..." renders in the bottom status bar, not
-    ...    the toolbar's own source-label area.
+    ...    the toolbar.
     [Tags]    p3
     Region Should Not Contain Text    @{STATUS_BAR}    Parsed
     ${json}=    Get File    ${FIXTURES}/simple_object.json
@@ -27,17 +27,20 @@ TC-TOOL-005 Parse Time Text Only Appears Once A Document Is Loaded
     Region Should Contain Text    @{STATUS_BAR}    Parsed
 
 TC-TOOL-001 Source Label Reflects The Source Kind
-    [Documentation]    Pasted JSON shows the fixed placeholder "(pasted
-    ...    JSON)"; a URL source shows the URL itself. File sources need the
-    ...    native Open File dialog and aren't covered here.
+    [Documentation]    Pasted JSON shows the fixed note "(pasted JSON)" beside
+    ...    the (then empty) source field; a URL source shows the URL itself
+    ...    in the field. File sources are the same as URLs but need the
+    ...    native file dialog behind the "..." button, and aren't covered
+    ...    here (a typed path is: see TC-OPEN-019).
     [Tags]    p2
     ${json}=    Get File    ${FIXTURES}/simple_object.json
     Load Fixture Via Paste    ${json}
     Region Should Contain Text    @{STATUS_AREA}    pasted JSON
     ${base_url}=    Start Fixture Server    ${HTTP_FIXTURES_DIR}
     Load Via Url    ${base_url}/valid.json
-    Wait Until Region Contains Text    @{STATUS_AREA}    valid.json    timeout=5
-    Region Should Contain Text    @{STATUS_AREA}    ${base_url}
+    Wait Until Pasted Source Is Replaced
+    Region Should Contain Text    @{SOURCE_FIELD}    valid.json
+    Region Should Contain Text    @{SOURCE_FIELD}    ${base_url}
     [Teardown]    Run Keywords    Stop Fixture Server    AND    Close Jsonquery App
 
 TC-TOOL-002 Byte Size Is Shown In Human-Readable Units
@@ -47,7 +50,9 @@ TC-TOOL-002 Byte Size Is Shown In Human-Readable Units
     [Tags]    p3
     ${json}=    Get File    ${FIXTURES}/simple_object.json
     Load Fixture Via Paste    ${json}
-    Region Should Contain Text    @{STATUS_AREA}    B
+    # "112 B" reads back as "1128" -- Tesseract takes the weak-gray B for an
+    # 8 -- so the pattern accepts either; what it rules out is a KB size.
+    Wait Until Region Matches    @{STATUS_AREA}    \\d+ ?[B8]    timeout=3
     Region Should Not Contain Text    @{STATUS_AREA}    KB
     ${base_url}=    Start Fixture Server    ${HTTP_FIXTURES_DIR}
     Load Via Url    ${base_url}/big_array.json
@@ -61,7 +66,7 @@ TC-TOOL-003 NDJSON Record Count Suffix Is Conditional
     ${json}=    Get File    ${FIXTURES}/simple_object.json
     Load Fixture Via Paste    ${json}
     Region Should Not Contain Text    @{STATUS_AREA}    NDJSON
-    Click At    199    11
+    Click At    ${CLEAR_BUTTON_X}    ${TOOLBAR_Y}
     Sleep    0.3s
     Load Fixture Via Paste    {"a": 1}\n{"b": 2}\n{"c": 3}
     Region Should Contain Text    @{STATUS_AREA}    3 NDJSON records
@@ -71,11 +76,11 @@ TC-TOOL-004 A Failed Reload Doesn't Blank Out The Still-Loaded Document's State
     ...    previously loaded document (still intact, unaffected) keeps
     ...    showing its own "Parsed in ..." alongside the new error, rather
     ...    than either one being clobbered by the other. Both render in the
-    ...    bottom status bar. Uses Open URL for the failing second load, not
-    ...    a second paste: pasting only loads at all while the empty-state
-    ...    paste box is showing (confirmed during implementation -- once a
-    ...    document is loaded, there's no box left to paste into, so Ctrl+V
-    ...    does nothing). Open URL has no such restriction.
+    ...    bottom status bar. Uses the source field for the failing second
+    ...    load, not a second paste: pasting only loads at all while the
+    ...    empty-state paste box is showing (confirmed during implementation
+    ...    -- once a document is loaded, there's no box left to paste into,
+    ...    so Ctrl+V does nothing). The source field has no such restriction.
     [Tags]    p2
     ${json}=    Get File    ${FIXTURES}/simple_object.json
     Load Fixture Via Paste    ${json}

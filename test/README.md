@@ -27,9 +27,9 @@ The short version:
   the suite runs against an isolated Xvfb display instead (`test/run.sh`
   handles this), with a minimal window manager (`fluxbox`) alongside it,
   because bare Xvfb silently breaks keyboard focus.
-- **Confirmed, and a real limit on scope**: the native Open File and Save
-  dialogs hang or fail before showing anything usable, in every environment
-  tried, due to an `rfd`-vs-non-GTK-toolkit integration gap. Every test case
+- **Confirmed, and a real limit on scope**: the native file dialog (the `…`
+  button beside the source field) and the Save dialogs hang or fail before
+  showing anything usable, in every environment tried, due to an `rfd`-vs-non-GTK-toolkit integration gap. Every test case
   that depends on one of those dialogs completing is marked **Blocked** in
   the traceability matrix, not implemented as a false pass — 11 cases in
   total, all needing an app-side `Cargo.toml` change to ever unblock.
@@ -53,7 +53,7 @@ The short version:
     plenty of crop margin. Assert on adjacent normal-contrast content
     instead of chasing it.
   - A right-click, or a click immediately after typing into a field (the
-    Search/Open URL dialogs' submit buttons), occasionally doesn't register
+    Search dialog's submit buttons), occasionally doesn't register
     on the first attempt. The shared keywords (`Open Row Context Menu`,
     `Load Via Url`, `Search For`) all retry-and-verify rather than assuming
     one attempt always works.
@@ -104,14 +104,15 @@ test/
                                 Menu, Select Engine, ...) built on AppLibrary
     fixtures/                 — sample JSON files used across suites
       http/                   — files served by the fixture HTTP server for
-                                Open URL... tests (valid/invalid/empty/large)
+                                source-field URL tests (valid/invalid/empty/large)
   suites/
     launch_and_window/        — 4 tests: default state, theme, placeholder,
                                 no menu bar
-    opening_sources/          — 12 tests: paste, NDJSON, malformed JSON,
-                                Clear, Open URL (success/failure/non-JSON/
-                                empty/disabled-state), Ctrl+Enter paste,
-                                replace-while-loaded
+    opening_sources/          — 16 tests: paste, NDJSON, malformed JSON,
+                                Clear, source field (URL success/failure/
+                                non-JSON/empty, Load button, typed path,
+                                missing path, disabled-state), Ctrl+Enter
+                                paste, replace-while-loaded
     query_engines/             — 22 tests: picker UI, auto-detect for all 4
                                 engines, and each engine's own 0-vs-error
                                 contract (jq streaming + item errors, Pointer
@@ -138,8 +139,8 @@ test/
                                 Find in Source (success, not-found,
                                 candidate list)
     keyboard_shortcuts/           — 4 tests: Ctrl+F panel scoping, Ctrl+Enter
-                                paste (incl. focus-gating), Enter submits
-                                Open URL/Search
+                                paste (incl. focus-gating), Enter loads
+                                the source field / submits Search
     saving/                       — 2 tests: Save... buttons' enabled-state
                                 behavior (the dialogs themselves are blocked)
 ```

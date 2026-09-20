@@ -118,7 +118,7 @@ differently from the source tree:
 | `jsonpath-rust` | JSONPath (RFC 9535) engine. |
 | `jmespath` | JMESPath engine. |
 | `crossbeam-channel` | UI ⇄ worker-thread messaging. |
-| `rfd` | Native "Open File" dialog, alongside OS-level drag-and-drop (handled directly by egui/winit). |
+| `rfd` | Native file dialog behind the toolbar's "…" button, alongside OS-level drag-and-drop (handled directly by egui/winit). |
 | `ureq` | Loading a document from a URL. |
 | `anyhow` / `thiserror` | Error handling — typed errors at API boundaries, contextual errors in the app layer. |
 

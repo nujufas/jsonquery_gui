@@ -29,7 +29,7 @@ TC-WIN-001 App Launches To A Known Default State
 TC-WIN-003 Empty State Placeholder Text
     [Documentation]    Left panel shows the no-document hint before anything
     ...    is loaded. Only checks the placeholder text, not the full
-    ...    "Drag & drop... or use Open File." sentence above it -- that
+    ...    "Drag & drop... or enter a URL or path above." sentence above it -- that
     ...    entire line renders in the app's dim "weak" gray style, which OCR
     ...    could not reliably read even with contrast enhancement/inversion
     ...    tried during implementation (see 00_test_strategy.md's OCR
@@ -63,7 +63,10 @@ TC-WIN-005 No Native Menu Bar Or About/Help Entry Point Exists
     ...    first row of window content, and there's no About/Help anywhere
     ...    in it or the status area.
     [Tags]    p3
-    Region Should Contain Text    @{TOOLBAR_ROW}    Open File
+    Region Should Contain Text    @{TOOLBAR_ROW}    Source
+    # Not Load/Clear: both are disabled (dim gray on gray) at launch, which
+    # OCR can't read; the source field's own hint text it can.
+    Region Should Contain Text    @{TOOLBAR_ROW}    local path
     Region Should Not Contain Text    @{TOOLBAR_ROW}    Help
     Region Should Not Contain Text    @{TOOLBAR_ROW}    Edit
     Region Should Not Contain Text    @{STATUS_AREA}    Help

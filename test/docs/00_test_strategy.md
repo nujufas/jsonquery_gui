@@ -100,10 +100,11 @@ This would require touching `crates/app/src` (production code), which is outside
 implementing it.** If approved later, it changes several "Automation notes" below
 from OCR to "read state file" and meaningfully de-risks the whole suite.
 
-## Native OS dialogs: Open File and Save… — CONFIRMED BLOCKED, root cause known
+## Native OS dialogs: the `…` file picker and Save… — CONFIRMED BLOCKED, root cause known
 
 **Update from implementation**: this was spiked as planned, and the outcome is
-worse than "needs the right technique" — **`Open File…` and every `Save…` trigger
+worse than "needs the right technique" — **the file picker (then a toolbar button
+labeled `Open File…`, now the `…` beside the source field) and every `Save…` trigger
 currently freeze the app's entire UI thread, in every environment tried.**
 
 `jsonquery_gui` depends on `rfd = "0.17.2"` with default features, which resolve to
@@ -116,7 +117,7 @@ resolves.
 
 Three environments were tried, all hang or fail before a usable dialog appears:
 
-1. **Real GNOME/Wayland session, inherited D-Bus** — clicking `Open File…` freezes
+1. **Real GNOME/Wayland session, inherited D-Bus** — clicking the file picker freezes
    the app indefinitely (no further clicks, keystrokes, or repaints land). No portal
    dialog ever became visible on the real display either.
 2. **Isolated `dbus-run-session`, `GDK_BACKEND=x11` + `XDG_CURRENT_DESKTOP=GNOME`
@@ -145,12 +146,13 @@ default portal backend (an app dependency change, out of scope for "under `test/
 without a separate decision), or getting the portal association bug fixed upstream.
 
 **Consequence for this suite**: every test case that requires a native dialog to
-actually complete — `Open File…` success paths, and **all** `Save…` triggers
+actually complete — the `…` button's success path, and **all** `Save…` triggers
 (toolbar buttons, both row context-menu items, Ctrl+S) — is marked **BLOCKED** in
 the traceability matrix rather than implemented. This is 12 of 107 cases.
-It does not block much else: Paste and Open URL exercise the identical
-load/parse/worker code path as Open File (same `Command::OpenText`/`OpenUrl`
-handling in `worker.rs`) and are fully testable, so load-flow correctness coverage
+It does not block much else: Paste, a typed URL and a typed path exercise the
+identical load/parse/worker code path as the `…` button (same
+`Command::OpenText`/`OpenUrl`/`OpenFile` handling in `worker.rs`) and are fully
+testable, so load-flow correctness coverage
 is not actually lost — only coverage of "does clicking this button produce a
 working native dialog" is.
 
@@ -341,16 +343,19 @@ still showing the *first* document with no error of any kind, easy to
 misread as an unrelated flake.
 
 **A click immediately after typing into a field can land on a still-disabled
-button.** The Search dialog's "Find"/"Find All" and the Open URL dialog's "Load"
+button.** The Search dialog's "Find"/"Find All" and the toolbar's "Load"
 are both disabled while their field is blank, and re-enable on the next
 frame after typing finishes. Clicking immediately after `pyautogui.typewrite`
 returns leaves essentially no gap for that frame to render, so the click can
 land on a button that's still rendered disabled from the previous frame and
-do nothing. Fixed by retry-and-verify wrapping (`Load Via Url`, `Search
-For`, `Open Row Context Menu` all follow this pattern: act, then check the
+do nothing. Fixed by retry-and-verify wrapping (`Search For` and `Open Row
+Context Menu` follow this pattern: act, then check the
 expected effect actually happened, retrying the whole action — not just
 waiting longer — if it didn't) rather than a longer fixed sleep, since the
-window that matters is one repaint frame, not a fixed duration.
+window that matters is one repaint frame, not a fixed duration. `Load Via Url`
+sidesteps the race a different way: it submits the toolbar's source field with
+Enter, which needs nothing but the focused field, and `TC-OPEN-018` covers the
+Load button itself.
 
 **Two more specific OCR digit/letter confusions, beyond the already-known
 weak-text limitation**: Tesseract sometimes reads the 2-character "jq"

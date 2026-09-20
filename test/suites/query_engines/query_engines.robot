@@ -415,7 +415,7 @@ TC-QRY-060 Run Is Disabled With No Document Loaded
     ...    text to OCR here, just a widget enabled-state change.
     [Tags]    p2
     ${enabled_color}=    Get Pixel Color    70    39
-    Click At    199    11
+    Click At    ${CLEAR_BUTTON_X}    ${TOOLBAR_Y}
     Sleep    0.3s
     ${disabled_color}=    Get Pixel Color    70    39
     Colors Should Not Match    ${enabled_color}    ${disabled_color}

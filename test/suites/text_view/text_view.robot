@@ -147,12 +147,12 @@ TC-TXT-010 Apply Is Disabled When The Buffer Is Blank
 TC-TXT-009 A File Or URL Source's Text View Has No Editable Buffer
     [Documentation]    Only a *pasted* document's Text view is editable --
     ...    file/URL sources render read-only, worker-rendered text instead
-    ...    (checked here via a URL source, since Open File needs the blocked
-    ...    native dialog).
+    ...    (checked here via a URL source, since the "..." browse button needs
+    ...    the blocked native dialog).
     [Tags]    p2
     ${base_url}=    Start Fixture Server    ${HTTP_FIXTURES_DIR}
     Load Via Url    ${base_url}/valid.json
-    Wait Until Region Contains Text    @{STATUS_AREA}    valid.json    timeout=5
+    Wait Until Region Contains Text    @{SOURCE_PANEL}    3 items    timeout=5
     Click At    140    144
     Sleep    0.3s
     Region Should Not Contain Text    @{SOURCE_PANEL}    Editable

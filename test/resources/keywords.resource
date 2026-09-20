@@ -21,8 +21,15 @@ Library           AppLibrary.py
 # Dark theme (the app's fixed launch state -- see 01_launch_and_window.md).
 # Recalibrate these if the layout changes; see test/docs/00_test_strategy.md
 # for how (OCR a screenshot at each candidate region, cross-check positions).
-@{TOOLBAR_ROW}            0      0      230     20
-@{STATUS_AREA}            230    0      950     20
+# The toolbar is one row: the "Source:" label, the source field (x 60-811),
+# the "...", Load and Clear buttons, then what is loaded ("(pasted JSON)", the
+# byte size, an "(N NDJSON records)" note) and the icon buttons at the far
+# right. While the NDJSON note is showing the field is 150px narrower, so
+# everything after it sits 150px further left; the fixed points below are for
+# every other state.
+@{TOOLBAR_ROW}            0      0      1000    20
+@{SOURCE_FIELD}           60     0      750     20
+@{STATUS_AREA}            780    0      330     20
 @{QUERY_ROW}              0      22     260     24
 @{ENGINE_PICKER_ROW}      970    22     230     24
 # Height deliberately tight to one text line (not the query box's full,
@@ -49,9 +56,17 @@ Library           AppLibrary.py
 # Icon-only controls OCR can't read -- fixed click points, not regions.
 ${THEME_TOGGLE_X}         1183
 ${THEME_TOGGLE_Y}         10
-# The "Search --- Source/Results" and "Open URL" popups both render as a
-# small floating window anchored near the toolbar's top-left corner -- same
-# region works for either (calibrated against both).
+# The toolbar's source field and its Load / Clear buttons (see TOOLBAR_ROW
+# above for the row's layout). LOAD_BUTTON_X / CLEAR_BUTTON_X are glyph pixels
+# of the button labels, confirmed to shift by 30+ grayscale levels between the
+# enabled and disabled states -- the same way TC-WIN-002 reads the theme
+# toggle -- so they double as the probe for "is this button enabled?".
+${TOOLBAR_Y}              11
+${SOURCE_FIELD_X}         300
+${LOAD_BUTTON_X}          866
+${CLEAR_BUTTON_X}         914
+# The "Search --- Source/Results" popup renders as a small floating window
+# anchored near the toolbar's top-left corner.
 @{POPUP_DIALOG_AREA}      15     15     345    130
 ${SEARCH_FIND_FIELD_X}    183
 ${SEARCH_FIND_FIELD_Y}    84
@@ -73,12 +88,6 @@ ${SEARCH_CANCEL_Y}        127
 # this one reads it as "10f 4", which the library's 0/O and whitespace
 # fallbacks still match against "1 of 4".
 @{SEARCH_STATUS_AREA}     20     136    330    22
-${URL_FIELD_X}            183
-${URL_FIELD_Y}            84
-${URL_LOAD_X}             40
-${URL_LOAD_Y}             106
-${URL_CANCEL_X}           90
-${URL_CANCEL_Y}           106
 # The bottom panel -- a "Find All" hit list or a "Find in Source" candidate
 # list -- sizes itself to its content rather than staying a fixed height
 # (confirmed during implementation: a 0-match "No matches found." panel and a
@@ -114,7 +123,7 @@ ${AUTOCOMPLETE_ICON_PROBE_Y}   10
 # own (resizable) height.
 @{SUGGEST_POPUP_AREA}         0      100    480    400
 
-# Fixtures served over HTTP for Open URL... tests -- avoids depending on the
+# Fixtures served over HTTP for the source field's URL tests -- avoids depending on the
 # public internet, and lets load-failure/non-JSON/empty/oversized cases be
 # constructed on demand rather than relying on a real remote server's
 # behavior. See AppLibrary's Start/Stop Fixture Server.
@@ -123,9 +132,10 @@ ${HTTP_FIXTURES_DIR}      ${CURDIR}/fixtures/http
 *** Keywords ***
 Load Fixture Via Paste
     [Documentation]    Loads a JSON fixture by pasting its text -- avoids the
-    ...    native Open File dialog entirely (confirmed blocked, see the
-    ...    strategy doc's "Native OS dialogs" section). Exercises the same
-    ...    load/parse code path as Open File. Retries the click+paste up to 3
+    ...    native file dialog behind the toolbar's "..." button entirely
+    ...    (confirmed blocked, see the strategy doc's "Native OS dialogs"
+    ...    section). Exercises the same load/parse code path as a typed
+    ...    path or URL. Retries the click+paste up to 3
     ...    times: synthetic input to a freshly-focused window is occasionally
     ...    dropped by the X server (confirmed during implementation -- not
     ...    fully root-caused, structurally defended against here rather than
@@ -241,30 +251,54 @@ Close Search Results Panel
     Click Text In Region    @{SEARCH_RESULTS_AREA}    Close
 
 Load Via Url
-    [Documentation]    Opens "Open URL...", types `${url}`, and submits via
-    ...    Load -- retrying the whole type+click if Load doesn't visibly
-    ...    register. Confirmed during implementation: clicking Load
-    ...    immediately after typing can land on a frame where egui hasn't
-    ...    yet re-enabled the button, since typing finishes with no frame
-    ...    gap before the click that follows it -- the same class of
-    ...    input-timing flakiness documented for Ctrl+Enter elsewhere in this
-    ...    suite, just for a plain click instead of a hotkey.
+    [Documentation]    Types `${url}` into the toolbar's source field and
+    ...    loads it with Enter -- retrying the whole click+type if the text
+    ...    doesn't visibly land in the field. Enter rather than the Load
+    ...    button: the button only enables a frame after the first
+    ...    keystroke, and a click right behind fast typing can land before
+    ...    it has (the same class of input-timing flakiness documented for
+    ...    Ctrl+Enter elsewhere in this suite), whereas Enter needs nothing
+    ...    but the focused field. The Load button has its own test
+    ...    (TC-OPEN-018). Works whether or not a document is already loaded
+    ...    -- the field is always there, unlike the paste box.
+    ...
+    ...    Returns as soon as Enter is pressed: the source field keeps the
+    ...    typed text whether the load worked or not, so it is no evidence of
+    ...    a load. Wait on the status bar or the Source panel for that.
     [Arguments]    ${url}
-    Click At    131    11
-    Sleep    0.3s
     Wait Until Keyword Succeeds    3x    0.5s
-    ...    Type And Submit Url    ${url}
+    ...    Type And Submit Source    ${url}
 
-Type And Submit Url
-    [Arguments]    ${url}
-    Click At    ${URL_FIELD_X}    ${URL_FIELD_Y}
+Type And Submit Source
+    [Arguments]    ${source}
+    Click At    ${SOURCE_FIELD_X}    ${TOOLBAR_Y}
     Sleep    0.2s
     Press Keys    ctrl    a
-    Type Text    ${url}
+    Type Text    ${source}
     Sleep    0.3s
-    Click At    ${URL_LOAD_X}    ${URL_LOAD_Y}
+    # Just the file name's stem ("valid" of ".../valid.json"), not all of the
+    # text: the blinking caret sits right after the last character and
+    # clips it in the OCR read (confirmed: "missing.json" read back as
+    # "missing.jso"), and a whole URL can run past what one word-box gets
+    # right anyway. Enough to show the typing landed in the field.
+    ${stem}=    Evaluate    """${source}""".rsplit('/', 1)[-1].split('.')[0]
+    Region Should Contain Text    @{SOURCE_FIELD}    ${stem}
+    Press Key    enter
     Sleep    0.3s
-    Region Should Not Contain Text    @{POPUP_DIALOG_AREA}    Open URL
+    # Off the field: a pointer left hovering it draws a bright outline box
+    # around the field, and Tesseract's layout analysis then reads the crop
+    # as a frame and returns nothing at all (confirmed: TC-OPEN-020's
+    # "/no/such/dir/missing.json" read back as '' with the pointer on it,
+    # cleanly with it elsewhere -- same text, same crop).
+    Move Mouse To    600    400
+
+Wait Until Pasted Source Is Replaced
+    [Documentation]    Waits for the "(pasted JSON)" note to leave the
+    ...    toolbar -- the proof that a URL or file load *replaced* a pasted
+    ...    document. The source field is no evidence of that: it keeps
+    ...    whatever was typed into it whether or not the load worked.
+    Wait Until Keyword Succeeds    10x    0.5s
+    ...    Region Should Not Contain Text    @{STATUS_AREA}    pasted JSON
 
 Run Current Query
     [Documentation]    Runs whatever text is already in the query box, with

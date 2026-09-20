@@ -137,7 +137,7 @@ Load Fixture Over People
     ...    `${name}` via Clear + paste, same as TC-SRCH-002 does for
     ...    simple_object.json.
     [Arguments]    ${name}
-    Click At    199    11
+    Click At    ${CLEAR_BUTTON_X}    ${TOOLBAR_Y}
     Sleep    0.3s
     ${json}=    Get File    ${FIXTURES}/${name}
     Load Fixture Via Paste    ${json}
@@ -243,7 +243,7 @@ TC-SRCH-002 Substring Search Is Case-Insensitive Over Keys And Values
     ...    hit `active` -- by key and by value -- so NULL sits between them),
     ...    which is what makes the highlight prove the *new* search matched.
     [Tags]    p1
-    Click At    199    11
+    Click At    ${CLEAR_BUTTON_X}    ${TOOLBAR_Y}
     Sleep    0.3s
     ${json}=    Get File    ${FIXTURES}/simple_object.json
     Load Fixture Via Paste    ${json}
@@ -323,7 +323,7 @@ TC-SRCH-007c Clearing The Source Invalidates The Open Search Panel
     Open Source Search Dialog
     Find All For    Alice
     Region Should Contain Text    @{SEARCH_RESULTS_AREA}    Search results
-    Click At    199    11
+    Click At    ${CLEAR_BUTTON_X}    ${TOOLBAR_Y}
     Sleep    0.3s
     Region Should Not Contain Text    @{SEARCH_RESULTS_AREA}    Search results
 
@@ -332,7 +332,7 @@ TC-SRCH-007d Clearing The Source Clears The Find Status
     Open Source Search Dialog
     Search For    Alice
     Region Should Contain Text    @{SEARCH_STATUS_AREA}    1 of 1
-    Click At    199    11
+    Click At    ${CLEAR_BUTTON_X}    ${TOOLBAR_Y}
     Sleep    0.3s
     Region Should Not Contain Text    @{SEARCH_STATUS_AREA}    1 of 1
 

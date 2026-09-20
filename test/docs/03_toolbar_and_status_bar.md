@@ -10,11 +10,17 @@ surrounding chrome — what shows, in what order, under what conditions.
 ### TC-TOOL-001 — Source label reflects the actual source kind
 Priority: P2
 Steps: Load a document via (a) file, (b) URL, (c) paste — three sub-cases.
-Expected: the read-only, selectable source-label field shows, respectively,
-(a) the file's path, (b) the URL, (c) literally `(pasted JSON)`.
-Automation notes: field is marked selectable/copyable in code — a good
-candidate to verify by selecting-all + copy + clipboard read instead of OCR,
-which sidesteps font/OCR risk entirely for this one field.
+Expected: the toolbar's source field shows, respectively, (a) the file's path,
+(b) the URL, (c) nothing — it is emptied, since pasted JSON has no address —
+while the status area beside the buttons shows the note `(pasted JSON)`.
+The field is the editable one a source is typed into (see
+[02_opening_sources.md](02_opening_sources.md)), so it can be selected and
+copied from like any text field.
+Automation notes: for (a)/(b) the field's text is no evidence the load
+happened — it keeps whatever was typed even if the load fails — so assert on
+the Source panel or the `(pasted JSON)` note leaving instead. The
+selecting-all + copy + clipboard read is a way to check the field's exact
+text without OCR.
 
 ### TC-TOOL-002 — Byte size is human-readable and updates per document
 Priority: P3
@@ -36,9 +42,9 @@ Priority: P2
 Steps: Observe the toolbar status area at each of the three states (use a
 slow-loading fixture, e.g. an artificially large file or a deliberately
 delayed local fixture server, to catch the loading state).
-Expected: exactly one of the three renderings is visible at a time; the
-"loading" spinner + `Loading…` never simultaneously shows the no-doc
-placeholder or a loaded doc's label.
+Expected: exactly one of the three renderings is visible at a time — nothing
+(no doc), the spinner + `Loading…`, or the loaded doc's size and notes; the
+"loading" spinner + `Loading…` never shows alongside a loaded doc's size.
 
 ### TC-TOOL-005 — Status bar: parse time only appears once a doc is loaded
 Priority: P3

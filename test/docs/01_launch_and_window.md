@@ -53,8 +53,9 @@ Steps:
 1. Launch the binary, don't load anything.
 2. Read the left (Source) panel.
 Expected:
-- Weak/gray text reads: `No document loaded — drag & drop a JSON file anywhere,
-  use Open File, or paste JSON on the left.`
+- The toolbar's source field is empty, showing the gray hint `URL or local
+  path…`; the left panel's weak/gray text reads: `Drag & drop a file anywhere,
+  or enter a URL or path above.`
 - A paste textarea is present below it with hint text `Paste JSON here…`
   (hint text only shows while the field is empty and unfocused — don't assert
   it after focusing the field in the same test).

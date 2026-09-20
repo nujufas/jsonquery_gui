@@ -1,8 +1,10 @@
 *** Settings ***
-Documentation     Opening a JSON source via paste (Open File dialog cases are
+Documentation     Opening a JSON source via paste, or by typing a URL or
+...               local path into the toolbar's source field (the "..."
+...               browse button opens a native file dialog: those cases are
 ...               BLOCKED -- see test/docs/00_test_strategy.md and
-...               02_opening_sources.md). Paste exercises the identical
-...               load/parse worker path as Open File and URL.
+...               02_opening_sources.md). All of them go through the identical
+...               load/parse worker path.
 Resource          ../../resources/keywords.resource
 Library           OperatingSystem
 Force Tags        opening_sources
@@ -44,31 +46,35 @@ TC-OPEN-014 Malformed JSON Shows A Load Error
     Press Keys    ctrl    v
     Wait Until Region Matches    @{STATUS_BAR}    Load error.*parsing JSON    timeout=5
 
-TC-OPEN-003 Open URL Loads A Remote JSON Document
+TC-OPEN-003 A URL Typed Into The Source Field Loads A Remote JSON Document
     [Documentation]    Exercised against a local fixture HTTP server rather
     ...    than a real remote host -- avoids a network dependency and lets
     ...    the failure/non-JSON/empty variants below be constructed on demand.
     [Tags]    p1
     ${base_url}=    Start Fixture Server    ${HTTP_FIXTURES_DIR}
     Load Via Url    ${base_url}/valid.json
-    Wait Until Region Contains Text    @{STATUS_AREA}    valid.json    timeout=5
     # people.json's 3 array elements are collapsed by default (root-only-
     # expanded, see TC-TREE-003) -- "3 items" is visible without expanding
     # any of them; "Alice" itself is nested a level deeper.
-    Region Should Contain Text    @{SOURCE_PANEL}    3 items
+    Wait Until Region Contains Text    @{SOURCE_PANEL}    3 items    timeout=5
+    Region Should Contain Text    @{SOURCE_FIELD}    valid.json
     [Teardown]    Run Keywords    Stop Fixture Server    AND    Close Jsonquery App
 
-TC-OPEN-004 Open URL's Load Button Is Disabled While The Field Is Blank
+TC-OPEN-004 Load Button Is Disabled While The Source Field Is Blank
     [Tags]    p3
-    Click At    131    11
-    Sleep    0.3s
-    ${disabled_color}=    Get Pixel Color    ${URL_LOAD_X}    ${URL_LOAD_Y}
-    Click At    ${URL_FIELD_X}    ${URL_FIELD_Y}
+    ${disabled_color}=    Get Pixel Color    ${LOAD_BUTTON_X}    ${TOOLBAR_Y}
+    Click At    ${SOURCE_FIELD_X}    ${TOOLBAR_Y}
     Type Text    x
-    Sleep    0.2s
-    ${enabled_color}=    Get Pixel Color    ${URL_LOAD_X}    ${URL_LOAD_Y}
+    Sleep    0.3s
+    ${enabled_color}=    Get Pixel Color    ${LOAD_BUTTON_X}    ${TOOLBAR_Y}
     Colors Should Not Match    ${disabled_color}    ${enabled_color}
-    ...    msg=Expected Load's label to visibly dim while the URL field is blank
+    ...    msg=Expected Load's label to visibly dim while the source field is blank
+    Press Keys    ctrl    a
+    Press Key    delete
+    Sleep    0.3s
+    ${blank_again}=    Get Pixel Color    ${LOAD_BUTTON_X}    ${TOOLBAR_Y}
+    Colors Should Match    ${disabled_color}    ${blank_again}
+    ...    msg=Expected Load to dim again once the field is emptied
 
 TC-OPEN-005 A Failed Request Shows A Load Error
     [Tags]    p1
@@ -111,12 +117,12 @@ TC-OPEN-009 Paste Loads Via Ctrl+Enter As Well As Ctrl+V
 TC-OPEN-015 Loading A New Source Replaces The Old One And Cancels Any Query
     [Documentation]    The query *text* survives (same exception Clear makes,
     ...    see TC-OPEN-016) but its results/error are discarded, since they
-    ...    belonged to the document that just got replaced. Uses Open URL for
-    ...    the second load, not a second paste: pasting only loads at all
-    ...    while the empty-state paste box is showing (confirmed during
-    ...    implementation -- once a document is loaded, that box no longer
-    ...    exists to paste into, so Ctrl+V simply does nothing). Open URL has
-    ...    no such restriction -- it's a plain toolbar button, available and
+    ...    belonged to the document that just got replaced. Uses the source
+    ...    field for the second load, not a second paste: pasting only loads
+    ...    at all while the empty-state paste box is showing (confirmed
+    ...    during implementation -- once a document is loaded, that box no
+    ...    longer exists to paste into, so Ctrl+V simply does nothing). The
+    ...    source field has no such restriction -- it's always there and
     ...    fully functional regardless of whether a document is already
     ...    loaded, which is exactly the scenario this case is testing.
     [Tags]    p2
@@ -126,17 +132,17 @@ TC-OPEN-015 Loading A New Source Replaces The Old One And Cancels Any Query
     Region Should Contain Text    @{STATUS_BAR}    Query error
     ${base_url}=    Start Fixture Server    ${HTTP_FIXTURES_DIR}
     Load Via Url    ${base_url}/valid.json
-    Wait Until Region Contains Text    @{STATUS_AREA}    valid.json    timeout=5
+    Wait Until Pasted Source Is Replaced
     Region Should Not Contain Text    @{STATUS_BAR}    Query error
     Query Box Should Contain Text    does/not/exist
     [Teardown]    Run Keywords    Stop Fixture Server    AND    Close Jsonquery App
 
 TC-OPEN-017 Clear Is Disabled When There's Nothing To Clear
     [Tags]    p3
-    ${disabled_color}=    Get Pixel Color    199    11
+    ${disabled_color}=    Get Pixel Color    ${CLEAR_BUTTON_X}    ${TOOLBAR_Y}
     ${json}=    Get File    ${FIXTURES}/simple_object.json
     Load Fixture Via Paste    ${json}
-    ${enabled_color}=    Get Pixel Color    199    11
+    ${enabled_color}=    Get Pixel Color    ${CLEAR_BUTTON_X}    ${TOOLBAR_Y}
     Colors Should Not Match    ${disabled_color}    ${enabled_color}
     ...    msg=Expected Clear's label to visibly dim when there is no document, query, or error
 
@@ -158,10 +164,60 @@ TC-OPEN-016 Clear Resets State But Preserves Query Text And Engine
     ...    msg=Selecting JMESPath did not visibly change its button color
     Click At    100    58
     Type Text    people[0].name
-    Click Text In Region    @{TOOLBAR_ROW}    Clear
+    Click At    ${CLEAR_BUTTON_X}    ${TOOLBAR_Y}
     Sleep    0.3s
     Region Should Contain Text    @{SOURCE_PANEL}    Paste JSON here
     Query Box Should Contain Text    people
     ${after_clear_color}=    Get Pixel Color    ${x}    ${y}
     Colors Should Match    ${selected_color}    ${after_clear_color}
     ...    msg=JMESPath engine selection was not preserved across Clear
+
+TC-OPEN-018 The Load Button Loads What Is In The Source Field
+    [Documentation]    Same load as pressing Enter in the field, by clicking
+    ...    Load instead. Nothing is loaded beforehand, so "Parsed in ..."
+    ...    appearing is real evidence the click registered.
+    [Tags]    p2
+    ${base_url}=    Start Fixture Server    ${HTTP_FIXTURES_DIR}
+    Click At    ${SOURCE_FIELD_X}    ${TOOLBAR_Y}
+    Type Text    ${base_url}/valid.json
+    Sleep    0.5s
+    Click At    ${LOAD_BUTTON_X}    ${TOOLBAR_Y}
+    Wait Until Region Contains Text    @{STATUS_BAR}    Parsed    timeout=5
+    Region Should Contain Text    @{SOURCE_PANEL}    3 items
+    [Teardown]    Run Keywords    Stop Fixture Server    AND    Close Jsonquery App
+
+TC-OPEN-019 A Local Path Typed Into The Source Field Loads That File
+    [Documentation]    Anything that isn't an http(s) address is a local
+    ...    path. Stands in for the "..." browse button's success path, which
+    ...    needs the blocked native file dialog; that button hands its path
+    ...    to the same loader.
+    [Tags]    p1
+    Load Via Url    ${FIXTURES}/people.json
+    Wait Until Region Contains Text    @{SOURCE_PANEL}    3 items    timeout=5
+    Region Should Contain Text    @{SOURCE_FIELD}    people.json
+    Region Should Not Contain Text    @{STATUS_AREA}    pasted JSON
+
+TC-OPEN-020 A Path That Doesn't Exist Shows A Load Error And Keeps The Text
+    [Documentation]    The attempted path stays in the field, to be corrected
+    ...    rather than retyped.
+    [Tags]    p2
+    Load Via Url    /no/such/dir/missing.json
+    Wait Until Region Contains Text    @{STATUS_BAR}    Load error    timeout=5
+    Region Should Contain Text    @{STATUS_BAR}    No such file
+    Region Should Contain Text    @{SOURCE_FIELD}    missing.json
+
+TC-OPEN-021 Clear Also Empties Text That Was Typed But Never Loaded
+    [Documentation]    With nothing loaded, Clear is still live once the field
+    ...    has text in it, and empties just the field.
+    [Tags]    p3
+    ${disabled_color}=    Get Pixel Color    ${CLEAR_BUTTON_X}    ${TOOLBAR_Y}
+    Click At    ${SOURCE_FIELD_X}    ${TOOLBAR_Y}
+    Type Text    some-file-name.json
+    Sleep    0.3s
+    Region Should Contain Text    @{SOURCE_FIELD}    some-file-name
+    ${enabled_color}=    Get Pixel Color    ${CLEAR_BUTTON_X}    ${TOOLBAR_Y}
+    Colors Should Not Match    ${disabled_color}    ${enabled_color}
+    ...    msg=Expected Clear to light up once the field has text
+    Click At    ${CLEAR_BUTTON_X}    ${TOOLBAR_Y}
+    Sleep    0.3s
+    Region Should Not Contain Text    @{SOURCE_FIELD}    some-file-name

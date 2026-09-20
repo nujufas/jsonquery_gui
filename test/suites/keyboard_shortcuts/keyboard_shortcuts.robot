@@ -25,24 +25,6 @@ Load People Fixture
     ${json}=    Get File    ${FIXTURES}/people.json
     Load Fixture Via Paste    ${json}
 
-Open Url And Submit Via Enter
-    [Arguments]    ${url}
-    Click At    131    11
-    Sleep    0.3s
-    Wait Until Keyword Succeeds    3x    0.5s
-    ...    Type Url And Press Enter    ${url}
-
-Type Url And Press Enter
-    [Arguments]    ${url}
-    Click At    ${URL_FIELD_X}    ${URL_FIELD_Y}
-    Sleep    0.2s
-    Press Keys    ctrl    a
-    Type Text    ${url}
-    Sleep    0.3s
-    Press Key    enter
-    Sleep    0.3s
-    Region Should Not Contain Text    @{POPUP_DIALOG_AREA}    Open URL
-
 Search For Via Enter
     [Arguments]    ${text}
     Click At    200    300
@@ -80,7 +62,7 @@ TC-KEY-000 And TC-KEY-002 Ctrl+F Opens Search Scoped To The Last-Clicked Panel
 
 TC-KEY-004 Ctrl+Enter Loads A Paste, But Only While The Paste Box Has Focus
     [Tags]    p2
-    Click At    199    11
+    Click At    ${CLEAR_BUTTON_X}    ${TOOLBAR_Y}
     Sleep    0.3s
     Click At    200    300
     Sleep    0.2s
@@ -96,11 +78,16 @@ TC-KEY-004 Ctrl+Enter Loads A Paste, But Only While The Paste Box Has Focus
     Press Keys    ctrl    enter
     Wait Until Region Contains Text    @{STATUS_AREA}    pasted JSON    timeout=5
 
-TC-KEY-006a Enter Submits The Open URL Popup
+TC-KEY-006a Enter Loads The Source Field
+    [Documentation]    `Load Via Url` submits with Enter, so it is the whole
+    ...    flow; what this case adds is asserting it. The people fixture
+    ...    is still loaded from Test Setup (pasted), so the load counts
+    ...    once the "(pasted JSON)" note is gone.
     [Tags]    p3
     ${base_url}=    Start Fixture Server    ${HTTP_FIXTURES_DIR}
-    Open Url And Submit Via Enter    ${base_url}/valid.json
-    Wait Until Region Contains Text    @{STATUS_AREA}    valid.json    timeout=5
+    Load Via Url    ${base_url}/valid.json
+    Wait Until Pasted Source Is Replaced
+    Region Should Contain Text    @{SOURCE_FIELD}    valid.json
     [Teardown]    Run Keywords    Stop Fixture Server    AND    Close Jsonquery App
 
 TC-KEY-006b Enter Submits The Search Popup

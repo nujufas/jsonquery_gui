@@ -37,11 +37,11 @@ during implementation; see 00_test_strategy.md's OCR limitations note).
 |---|---|---|---|---|
 | TC-OPEN-001 | Open valid file via dialog | P1 | **Blocked** — native dialog hangs the app (confirmed, see strategy doc) | `suites/opening_sources/` |
 | TC-OPEN-002 | File dialog extension filter | P2 | **Blocked** — same reason | `suites/opening_sources/` |
-| TC-OPEN-003 | Open via URL | P1 | **Passing** (local fixture HTTP server, not the public internet) | `suites/opening_sources/` |
-| TC-OPEN-004 | Open URL: Load disabled when blank | P3 | **Passing** | `suites/opening_sources/` |
-| TC-OPEN-005 | Open URL: request failure | P1 | **Passing** | `suites/opening_sources/` |
-| TC-OPEN-006 | Open URL: non-JSON response | P2 | **Passing** | `suites/opening_sources/` |
-| TC-OPEN-007 | Open URL: oversized download rejected | P3 | Not implemented — would need serving an actual 4+ GiB response; not attempted | `suites/opening_sources/` |
+| TC-OPEN-003 | Open via URL typed into the source field | P1 | **Passing** (local fixture HTTP server, not the public internet) | `suites/opening_sources/` |
+| TC-OPEN-004 | Load disabled while the source field is blank | P3 | **Passing** | `suites/opening_sources/` |
+| TC-OPEN-005 | URL: request failure | P1 | **Passing** | `suites/opening_sources/` |
+| TC-OPEN-006 | URL: non-JSON response | P2 | **Passing** | `suites/opening_sources/` |
+| TC-OPEN-007 | URL: oversized download rejected | P3 | Not implemented — would need serving an actual 4+ GiB response; not attempted | `suites/opening_sources/` |
 | TC-OPEN-008 | Paste auto-loads on Ctrl+V | P1 | **Passing** | `suites/opening_sources/` |
 | TC-OPEN-009 | Paste loads via Ctrl+Enter | P2 | **Passing** | `suites/opening_sources/` |
 | TC-OPEN-010 | Drag-and-drop opens a file | P3 (skip on Wayland) | Not implemented — pyautogui has no native drag-and-drop primitive; skipped per the doc's own allowance | `suites/opening_sources/` |
@@ -49,17 +49,21 @@ during implementation; see 00_test_strategy.md's OCR limitations note).
 | TC-OPEN-012 | NDJSON wraps into one array | P2 | **Passing** | `suites/opening_sources/` |
 | TC-OPEN-013 | Empty file loads as empty array | P2 | **Passing** | `suites/opening_sources/` |
 | TC-OPEN-014 | Malformed JSON load error | P1 | **Passing** | `suites/opening_sources/` |
-| TC-OPEN-015 | New source replaces old, cancels query | P2 | **Passing** (second load via Open URL, not a second paste — see note below) | `suites/opening_sources/` |
+| TC-OPEN-015 | New source replaces old, cancels query | P2 | **Passing** (second load via the source field, not a second paste — see note below) | `suites/opening_sources/` |
 | TC-OPEN-016 | Clear resets state, preserves query/engine | P1 | **Passing** | `suites/opening_sources/` |
 | TC-OPEN-017 | Clear disabled with nothing to clear | P3 | **Passing** | `suites/opening_sources/` |
+| TC-OPEN-018 | Load button loads the source field | P2 | **Passing** | `suites/opening_sources/` |
+| TC-OPEN-019 | Typed local path loads that file | P1 | **Passing** | `suites/opening_sources/` |
+| TC-OPEN-020 | Missing path: load error, text kept | P2 | **Passing** | `suites/opening_sources/` |
+| TC-OPEN-021 | Clear empties typed-but-unloaded text | P3 | **Passing** | `suites/opening_sources/` |
 
 **Confirmed during implementation, worth flagging for anyone extending this
 suite**: pasting only loads anything while the empty-state "Paste JSON
 here…" box is showing. Once a document is loaded, that box no longer exists
 to paste into, and Ctrl+V does nothing — there's no global paste-to-replace
 shortcut. TC-OPEN-015 and TC-TOOL-004 both need a *second* load over an
-already-loaded document, so both use `Load Via Url` (a plain toolbar button,
-unconditionally available) instead of a second paste.
+already-loaded document, so both use `Load Via Url` (the toolbar's source
+field, unconditionally available) instead of a second paste.
 
 ## Toolbar and status bar — [03_toolbar_and_status_bar.md](03_toolbar_and_status_bar.md)
 
@@ -329,7 +333,7 @@ the sign that the text landed.
 | TC-KEY-003 | Ctrl+S saves focused panel's whole-panel target | P2 | **Blocked** — needs the native Save dialog | `suites/keyboard_shortcuts/` |
 | TC-KEY-004 | Ctrl+Enter loads paste (focus-gated) | P2 | **Passing** (both the positive case and the focus-gated negative case — Ctrl+Enter does nothing once the paste box has lost focus) | `suites/keyboard_shortcuts/` |
 | TC-KEY-005 | Ctrl+Enter applies edited paste (focus-gated) | P2 | **Passing** (covered by TC-TXT-007's positive case; the focus-gated negative half isn't separately re-tested there, but TC-KEY-004 demonstrates the same focus-gating for the analogous paste-box shortcut) | `suites/text_view/` |
-| TC-KEY-006 | Enter submits Open URL / Search popups | P3 | **Passing** (split into TC-KEY-006a/006b) | `suites/keyboard_shortcuts/` |
+| TC-KEY-006 | Enter loads the source field / submits the Search popup | P3 | **Passing** (split into TC-KEY-006a/006b) | `suites/keyboard_shortcuts/` |
 | TC-KEY-007 | Native text-editing keys (smoke) | P3 | Not implemented — would only re-confirm egui's own `TextEdit` behavior, not anything this app added | `suites/keyboard_shortcuts/` |
 
 ## Coverage summary
@@ -353,7 +357,7 @@ the sign that the text landed.
   cross-reference to one of those 91 (same underlying code path, deliberately
   not re-implemented as a separate test — see each area's own note above),
   for **124 of the 149 IDs covered**.
-- **Blocked: 12** — every case needing the native Open File or Save dialog to
+- **Blocked: 12** — every case needing the native file dialog (the `…` button) or Save dialog to
   actually complete (TC-OPEN-001/002, TC-CTX-004, TC-SAVE-001/003/004/006/
   007/008/009/010, TC-KEY-003). Root cause confirmed and documented in
   [00_test_strategy.md](00_test_strategy.md): `rfd`'s default portal backend
