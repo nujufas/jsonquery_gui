@@ -1,7 +1,7 @@
 name: jsonquery-gui
 title: jsonquery
 base: core24
-version: '0.4.0'
+version: '0.4.1'
 summary: Browse and query large JSON files with jq, JSONPath, JMESPath & Pointer
 description: |
   jsonquery is a native desktop GUI for browsing and querying large JSON
