@@ -107,6 +107,18 @@ sudo snap install jsonquery-gui
 
 Also available on the [Snap Store](https://snapcraft.io/jsonquery-gui).
 
+### Scoop (Windows)
+
+```pwsh
+scoop bucket add jsonquery-gui https://github.com/nujufas/scoop-jsonquery-gui
+scoop install jsonquery-gui/jsonquery-gui
+```
+
+This installs the release's Windows zip with a Start-menu shortcut and a
+`jsonquery-gui` command; `scoop update jsonquery-gui` follows new releases. The
+executable is not code-signed, so Windows SmartScreen may warn the first time
+it runs. Packaging notes: [`packaging/scoop/`](packaging/scoop/).
+
 ### Download a build
 
 Prebuilt Linux and Windows binaries are attached to each
