@@ -1,1 +1,7 @@
 /target/
+
+/android/app/build/
+/android/dist/
+/android/.build/
+/android/.gradle/
+/android/test/results/

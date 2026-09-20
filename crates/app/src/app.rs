@@ -29,6 +29,13 @@ const LIVE_PREVIEW_CAP: usize = 50_000;
 /// still be arbitrarily large).
 const TEXT_VIEW_NODE_BUDGET: usize = 20_000;
 
+/// Width the toolbar keeps free to the right of its source field: the "…",
+/// "Load" and "Clear" buttons, the byte size, and the icon buttons pinned to
+/// the far right.
+const TOOLBAR_TRAILING_RESERVE: f32 = 380.0;
+/// Extra width reserved while the "(N NDJSON records)" note is showing.
+const NDJSON_NOTE_WIDTH: f32 = 150.0;
+
 pub struct App {
     cmd_tx: Sender<Command>,
     evt_rx: Receiver<Event>,
@@ -124,9 +131,10 @@ pub struct App {
     /// act on whichever document window last had focus.
     focused_panel: PanelKind,
 
-    /// State for the "Open URL…" popup.
-    show_url_dialog: bool,
-    url_input: String,
+    /// The toolbar's source field: typed or pasted by the user (a URL or a
+    /// local path), and set to name the source whenever one is opened or
+    /// loads, so it always says what is showing.
+    source_input: String,
 
     /// State for the "Search…" popup, which stays open while "Find" steps
     /// through the matches one at a time.
@@ -300,8 +308,7 @@ impl App {
             results_text_truncated: false,
             paste_text: String::new(),
             focused_panel: PanelKind::Source,
-            show_url_dialog: false,
-            url_input: String::new(),
+            source_input: String::new(),
             show_search_dialog: false,
             search_input: String::new(),
             search_regex: false,
@@ -356,6 +363,12 @@ impl App {
                     self.find_message = None;
                     self.invalidate_search();
 
+                    // Pasted JSON has no address to name, so the field goes
+                    // back to empty, ready for the next source.
+                    self.source_input = match &doc.source {
+                        DocumentSource::Pasted => String::new(),
+                        source => source.label(),
+                    };
                     self.doc = Some(doc);
                     self.source_tree.reset();
                     self.invalidate_source_text();
@@ -539,7 +552,11 @@ impl App {
         }
     }
 
+    // `open_file` and `open_url` put what they were asked to open in the
+    // source field, so a load that fails still shows what was attempted
+    // (and a dropped file shows up there too).
     fn open_file(&mut self, path: PathBuf) {
+        self.source_input = path.display().to_string();
         let _ = self.cmd_tx.send(Command::OpenFile(path));
     }
 
@@ -548,7 +565,18 @@ impl App {
     }
 
     fn open_url(&mut self, url: String) {
+        self.source_input.clone_from(&url);
         let _ = self.cmd_tx.send(Command::OpenUrl(url));
+    }
+
+    /// Load whatever the toolbar's source field holds — a URL or a local
+    /// path (see [`parse_source_input`]).
+    fn load_source_input(&mut self) {
+        match parse_source_input(&self.source_input) {
+            Some(SourceInput::Url(url)) => self.open_url(url),
+            Some(SourceInput::Path(path)) => self.open_file(path),
+            None => {}
+        }
     }
 
     /// Prompt for a destination and write the currently loaded source data
@@ -1095,9 +1123,36 @@ impl App {
         hovering
     }
 
+    /// One row: a source field that takes a typed or pasted URL or local
+    /// path, then "…" (browse for a file), "Load" and "Clear", then what is
+    /// loaded (size, NDJSON note) and the icon buttons pinned to the right.
     fn toolbar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            if ui.button("Open File…").clicked() {
+            ui.label("Source:");
+
+            // The field gets the row minus a reserve for everything after it
+            // (the three buttons, the byte size and an occasional NDJSON
+            // note, and the icon buttons pinned to the far right) rather
+            // than a fixed width — a long URL should get to use the room a
+            // short one leaves empty.
+            let ndjson_note = self.doc.as_ref().is_some_and(|d| d.top_level_values > 1);
+            let reserve =
+                TOOLBAR_TRAILING_RESERVE + if ndjson_note { NDJSON_NOTE_WIDTH } else { 0.0 };
+            let field = ui.add(
+                egui::TextEdit::singleline(&mut self.source_input)
+                    .desired_width((ui.available_width() - reserve).max(120.0))
+                    .font(egui::TextStyle::Monospace)
+                    .hint_text("URL or local path…"),
+            );
+            // Enter takes the focus out of a single-line field, which is how
+            // it's told apart from other keys.
+            let mut load = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+
+            if ui
+                .button("…")
+                .on_hover_text("Browse for a local JSON file")
+                .clicked()
+            {
                 if let Some(path) = rfd::FileDialog::new()
                     .add_filter("JSON", &["json", "ndjson", "jsonl", "log", "txt"])
                     .pick_file()
@@ -1105,39 +1160,37 @@ impl App {
                     self.open_file(path);
                 }
             }
-            if ui.button("Open URL…").clicked() {
-                self.show_url_dialog = true;
+            load |= ui
+                .add_enabled(
+                    !self.source_input.trim().is_empty(),
+                    egui::Button::new("Load"),
+                )
+                .on_hover_text("Load the URL or file path in the field (Enter)")
+                .clicked();
+            if load {
+                self.load_source_input();
             }
+
+            let has_source = self.doc.is_some() || self.loading || self.load_error.is_some();
             if ui
                 .add_enabled(
-                    self.doc.is_some() || self.loading || self.load_error.is_some(),
+                    has_source || !self.source_input.is_empty(),
                     egui::Button::new("Clear"),
                 )
+                .on_hover_text("Empty the field and unload the current document")
                 .clicked()
             {
-                self.clear_source();
+                if has_source {
+                    self.clear_source();
+                }
+                self.source_input.clear();
             }
             ui.separator();
 
             if let Some(doc) = &self.doc {
-                // `&str` is an immutable `TextBuffer` impl, so this behaves as
-                // a read-only field: selectable and copyable with the mouse,
-                // but typing into it has no effect and nothing is written
-                // back to `doc`.
-                let label = doc.source.label();
-                let mut label_ref = label.as_str();
-                // Give the path the whole row minus a modest reserve for
-                // what follows it (the byte size, an occasional NDJSON
-                // note, and the two icon buttons pinned to the far right)
-                // rather than a fixed width — a long path should get to use
-                // the room a short one leaves empty, not sit truncated next
-                // to a mostly-blank toolbar.
-                let label_width = (ui.available_width() - 232.0).max(120.0);
-                ui.add(
-                    egui::TextEdit::singleline(&mut label_ref)
-                        .desired_width(label_width)
-                        .font(egui::TextStyle::Monospace),
-                );
+                if matches!(doc.source, DocumentSource::Pasted) {
+                    ui.label(doc.source.label());
+                }
                 ui.weak(human_bytes(doc.byte_len));
                 if doc.top_level_values > 1 {
                     ui.weak(format!("({} NDJSON records)", doc.top_level_values));
@@ -1145,16 +1198,12 @@ impl App {
             } else if self.loading {
                 ui.spinner();
                 ui.label("Loading…");
-            } else {
-                ui.weak(
-                    "No document loaded — drag & drop a JSON file anywhere, use Open File, or paste JSON on the left.",
-                );
             }
 
             // Claims whatever width is left after everything above, so the
             // theme toggle (and, just to its left, the autocomplete toggle
             // and the tutorial button) sit pinned at the top-right corner
-            // regardless of how long the path/status text is.
+            // regardless of how long the status text is.
             ui.allocate_ui_with_layout(
                 egui::vec2(ui.available_width(), ui.spacing().interact_size.y),
                 egui::Layout::right_to_left(egui::Align::Center),
@@ -1165,47 +1214,6 @@ impl App {
                 },
             );
         });
-    }
-
-    /// Popup prompting for a URL to download; shown when `show_url_dialog`
-    /// is set by the "Open URL…" toolbar button.
-    fn url_dialog(&mut self, ctx: &egui::Context) {
-        if !self.show_url_dialog {
-            return;
-        }
-
-        let mut open = true;
-        let mut submit = false;
-        let mut cancel = false;
-        egui::Window::new("Open URL")
-            .collapsible(false)
-            .resizable(false)
-            .open(&mut open)
-            .show(ctx, |ui| {
-                ui.label("URL:");
-                let resp = ui.add(
-                    egui::TextEdit::singleline(&mut self.url_input)
-                        .desired_width(360.0)
-                        .hint_text("https://example.com/data.json"),
-                );
-                let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                ui.horizontal(|ui| {
-                    let load_clicked = ui
-                        .add_enabled(!self.url_input.trim().is_empty(), egui::Button::new("Load"))
-                        .clicked();
-                    submit = load_clicked || enter;
-                    cancel = ui.button("Cancel").clicked();
-                });
-            });
-
-        if cancel || !open {
-            self.show_url_dialog = false;
-            self.url_input.clear();
-        } else if submit && !self.url_input.trim().is_empty() {
-            let url = std::mem::take(&mut self.url_input);
-            self.show_url_dialog = false;
-            self.open_url(url);
-        }
     }
 
     /// Popup prompting for a search query; shown when `show_search_dialog`
@@ -1440,7 +1448,7 @@ impl App {
             return;
         }
 
-        ui.weak("Drag & drop a file anywhere, or use Open File.");
+        ui.weak("Drag & drop a file anywhere, or enter a URL or path above.");
         ui.add_space(4.0);
 
         // Fill whatever space is left in the panel rather than a fixed row
@@ -2111,7 +2119,6 @@ impl eframe::App for App {
         // Shortcuts first, so Ctrl+F's dialog is drawn (and focused) in the
         // frame it was pressed rather than the one after.
         self.handle_shortcuts(ui.ctx());
-        self.url_dialog(ui.ctx());
         self.search_dialog(ui.ctx());
 
         egui::Panel::top("toolbar").show(ui, |ui| self.toolbar(ui));
@@ -2195,6 +2202,53 @@ impl eframe::App for App {
         if let Some(request) = self.tutorial.show(ui.ctx()) {
             self.apply_tutorial_request(request);
         }
+    }
+}
+
+/// What the toolbar's source field asks to load.
+#[derive(Debug, PartialEq)]
+enum SourceInput {
+    Url(String),
+    Path(PathBuf),
+}
+
+/// Read the toolbar's source field: an `http://` or `https://` address is a
+/// download, anything else a local path. Surrounding whitespace and one pair
+/// of quotes (which a file manager's "Copy as path" adds) are dropped, and a
+/// leading `~` means the home directory. `None` for a blank field.
+fn parse_source_input(text: &str) -> Option<SourceInput> {
+    let text = text.trim();
+    let text = ['"', '\'']
+        .into_iter()
+        .find_map(|quote| text.strip_prefix(quote)?.strip_suffix(quote))
+        .unwrap_or(text)
+        .trim();
+    if text.is_empty() {
+        return None;
+    }
+    let is_url = ["http://", "https://"].iter().any(|scheme| {
+        text.get(..scheme.len())
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(scheme))
+    });
+    if is_url {
+        return Some(SourceInput::Url(text.to_owned()));
+    }
+    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"));
+    Some(SourceInput::Path(expand_home(
+        text,
+        home.map(PathBuf::from),
+    )))
+}
+
+/// `~` or `~/rest` → `home` or `home/rest`; anything else (including `~user`,
+/// or `~` when there's no home directory to expand it to) is left as typed.
+fn expand_home(path: &str, home: Option<PathBuf>) -> PathBuf {
+    let rest = path
+        .strip_prefix('~')
+        .filter(|rest| rest.is_empty() || rest.starts_with(['/', '\\']));
+    match (rest, home) {
+        (Some(rest), Some(home)) => home.join(rest.trim_start_matches(['/', '\\'])),
+        _ => PathBuf::from(path),
     }
 }
 
@@ -2282,5 +2336,91 @@ fn human_bytes(bytes: u64) -> String {
         format!("{bytes} {}", UNITS[unit])
     } else {
         format!("{size:.1} {}", UNITS[unit])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn url(s: &str) -> Option<SourceInput> {
+        Some(SourceInput::Url(s.to_owned()))
+    }
+
+    #[test]
+    fn source_input_http_and_https_are_downloads() {
+        assert_eq!(
+            parse_source_input("https://example.com/a.json?x=1"),
+            url("https://example.com/a.json?x=1")
+        );
+        assert_eq!(
+            parse_source_input("  http://localhost:8000/a.json \n"),
+            url("http://localhost:8000/a.json")
+        );
+        // The scheme is case-insensitive; the rest is kept exactly as typed.
+        assert_eq!(
+            parse_source_input("HTTPS://Example.com/A.json"),
+            url("HTTPS://Example.com/A.json")
+        );
+    }
+
+    #[test]
+    fn source_input_anything_else_is_a_local_path() {
+        assert_eq!(
+            parse_source_input("/tmp/data.json"),
+            Some(SourceInput::Path(PathBuf::from("/tmp/data.json")))
+        );
+        assert_eq!(
+            parse_source_input("data/records.ndjson"),
+            Some(SourceInput::Path(PathBuf::from("data/records.ndjson")))
+        );
+        // Not a scheme this app downloads, so it isn't treated as a URL.
+        assert_eq!(
+            parse_source_input("ftp://host/a.json"),
+            Some(SourceInput::Path(PathBuf::from("ftp://host/a.json")))
+        );
+    }
+
+    #[test]
+    fn source_input_strips_one_pair_of_quotes() {
+        assert_eq!(
+            parse_source_input("\"/tmp/my data.json\""),
+            Some(SourceInput::Path(PathBuf::from("/tmp/my data.json")))
+        );
+        assert_eq!(
+            parse_source_input("'https://example.com/a.json'"),
+            url("https://example.com/a.json")
+        );
+        // A lone quote is part of the name, not a pair.
+        assert_eq!(
+            parse_source_input("/tmp/it's.json"),
+            Some(SourceInput::Path(PathBuf::from("/tmp/it's.json")))
+        );
+    }
+
+    #[test]
+    fn source_input_blank_is_nothing_to_load() {
+        assert_eq!(parse_source_input(""), None);
+        assert_eq!(parse_source_input("  \t "), None);
+        assert_eq!(parse_source_input("\"\""), None);
+    }
+
+    #[test]
+    fn expand_home_only_touches_a_leading_tilde_directory() {
+        let home = || Some(PathBuf::from("/home/me"));
+        assert_eq!(
+            expand_home("~/data/a.json", home()),
+            PathBuf::from("/home/me/data/a.json")
+        );
+        assert_eq!(expand_home("~", home()), PathBuf::from("/home/me/"));
+        assert_eq!(
+            expand_home("~other/a.json", home()),
+            PathBuf::from("~other/a.json")
+        );
+        assert_eq!(
+            expand_home("/x/~/a.json", home()),
+            PathBuf::from("/x/~/a.json")
+        );
+        assert_eq!(expand_home("~/a.json", None), PathBuf::from("~/a.json"));
     }
 }

@@ -61,8 +61,9 @@ file (or paste JSON directly) and query it with **jq**, **JSON Pointer**,
   save just that node to a file, or expand a whole subtree at once.
 - **Save to file** — the whole source document, the whole result set, or a
   single node, independently.
-- **Load however's convenient** — drag-and-drop, an **Open File…** picker,
-  pasting JSON straight into the text area, or loading from a URL.
+- **Load however's convenient** — drag-and-drop, a **Source** field that
+  takes a URL or a local path (type it or paste it, or browse with **…**),
+  or pasting JSON straight into the text area.
 - **Light and dark themes**, switchable from the toolbar.
 - **Keyboard shortcuts** — `Ctrl+Enter` run/apply, `Ctrl+F` search,
   `Ctrl+S` save (both scoped to whichever panel you last clicked), `F1`
@@ -74,8 +75,9 @@ file (or paste JSON directly) and query it with **jq**, **JSON Pointer**,
   [`winit`](https://github.com/rust-windowing/winit) (`eframe`'s windowing
   library), which only implements OS-level file drop on Windows, macOS, and
   X11 ([rust-windowing/winit#1881](https://github.com/rust-windowing/winit/issues/1881)).
-  **Open File…** and pasting both work fine everywhere. Workaround: run
-  under XWayland instead (if `DISPLAY` is set, it's available):
+  The **Source** field (and its **…** file picker) and pasting both work fine
+  everywhere. Workaround: run under XWayland instead (if `DISPLAY` is set,
+  it's available):
   ```sh
   WAYLAND_DISPLAY= cargo run --release -p jsonquery_gui
   ```
@@ -124,8 +126,9 @@ cargo run --release -p jsonquery_gui
 
 ## Usage
 
-1. Get JSON in: drag a file onto the window, use **Open File…**, paste JSON
-   into the text area, or load a URL.
+1. Get JSON in: drag a file onto the window, type or paste a URL or file path
+   into the **Source** field and press **Load** (**…** browses for a file), or
+   paste JSON into the text area.
 2. Pick a query engine (or leave it on auto-detect) and write a query, e.g.
    `.users[] | select(.active) | {name, roles}` for jq, `/users/0` for
    Pointer, `$.users[*].name` for JSONPath, or `users[?active].name` for
