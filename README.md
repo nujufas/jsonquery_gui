@@ -106,7 +106,10 @@ sudo snap install jsonquery-gui
 ```
 
 Also available on the [Snap Store](https://snapcraft.io/jsonquery-gui), for
-both x86-64 (amd64) and ARM (arm64) machines.
+both x86-64 (amd64) and ARM (arm64) machines. The snap is sandboxed: it reads
+files in your home folder directly. For files on an external drive or under
+`/mnt`, run `sudo snap connect jsonquery-gui:removable-media` once (the **…**
+file picker works for any file without it).
 
 ### Scoop (Windows)
 
