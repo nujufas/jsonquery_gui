@@ -86,6 +86,45 @@ only the Store's install path and a real ARM device would. Also worth a
 static check on the unsquashed snap: `file bin/jsonquery_gui` (ARM aarch64)
 and `readelf -V bin/jsonquery_gui` (highest `GLIBC_` must be ≤ 2.39, core24's).
 
+## Opening local files
+
+A strict snap reaches a file two ways, and both need checking after any
+change to the plugs:
+
+- **Real paths** (typed or pasted into the Source field, or dropped on the
+  window) need a plug. `home` covers non-hidden files under `$HOME` and
+  auto-connects on desktops. `removable-media` covers `/media`, `/run/media`
+  and `/mnt`; it is **not** auto-connected, so until the Store approves
+  auto-connection users run `sudo snap connect jsonquery-gui:removable-media`
+  (a `--dangerous` local install needs the same). Anything else (hidden
+  directories, `/tmp`, other system paths) stays denied. AppArmor logs the
+  refusal as
+  `apparmor="DENIED" operation="open" profile="snap.jsonquery-gui.jsonquery-gui"`.
+- **The "…" picker** (`rfd`'s portal backend) needs no plug. The portal
+  exports the chosen file to the document portal and the app gets
+  `/run/user/<uid>/doc/<id>/<name>`, which snap-confine bind-mounts into the
+  snap from `by-app/snap.jsonquery-gui`.
+
+Check both from inside the sandbox, without a display:
+
+```sh
+snap run --shell jsonquery-gui -c 'head -c 80 "$SNAP_REAL_HOME/some.json"; ls /run/user/$(id -u)/doc/'
+```
+
+(`$HOME` inside a snap is its private `~/snap/jsonquery-gui/<rev>`, hence
+`$SNAP_REAL_HOME`; and `timeout` is not permitted inside the snap, so cap the
+call from outside.)
+
+If the picker reports `No such file or directory` for a `/run/user/…/doc/…`
+path while the file is listed in `~/.local/share/flatpak/db/documents`, the
+mount is being served by a second `xdg-document-portal`. Starting one on a
+private D-Bus session (`dbus-run-session`, as the GUI-test experiments did)
+lazily unmounts the real portal's FUSE mount and takes its place with a
+database that never sees new exports. `pgrep -af xdg-document-portal` shows
+more than one, with the extra one's `DBUS_SESSION_BUS_ADDRESS` not
+`/run/user/<uid>/bus`. Kill it, then `systemctl --user restart
+xdg-document-portal` and relaunch the app.
+
 ## Publish
 
 Published as [`jsonquery-gui`](https://snapcraft.io/jsonquery-gui) on the
@@ -103,9 +142,13 @@ Each architecture is uploaded separately and gets its own Store revision
 its own architecture's channel map.
 
 `upload --release` blocks until the Snap Store's automated review finishes
-and, if it passes, releases straight to the `stable` channel — no manual
-review step expected for a strict-confinement snap using only standard
-interfaces (`gnome` extension, `network` plug).
+and, if it passes, releases straight to the `stable` channel. A
+strict-confinement snap using only standard interfaces (`gnome` extension,
+`network` and `home` plugs) needs no manual review. `removable-media` was
+accepted the same way (revisions 5 and 6 went straight to "ready to
+release!"), but it is never auto-connected: that takes a Store-granted snap
+declaration (a request on forum.snapcraft.io), until then users connect it by
+hand.
 
 Bump `version` in `snap/snapcraft.yaml` alongside `Cargo.toml` for each
 release.

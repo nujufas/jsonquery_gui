@@ -38,6 +38,16 @@ apps:
     common-id: io.github.nujufas.jsonquery_gui
     plugs:
       - network
+      # Strict confinement denies every path outside the snap, so without
+      # these a path typed or pasted into the Source field or dropped on the
+      # window fails with "Permission denied". `home` covers non-hidden files
+      # under $HOME and auto-connects on desktops. The "…" picker needs
+      # neither, it returns document-portal paths.
+      - home
+      # /media, /run/media and /mnt. Not auto-connected by default: users run
+      # `snap connect jsonquery-gui:removable-media` until the Store approves
+      # auto-connection. The plug itself passed automated review (revs 5, 6).
+      - removable-media
 
 parts:
   jsonquery-gui:
