@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
-# Build a self-integrating AppImage for Linux x86_64.
+# Build a self-integrating AppImage for Linux.
+#
+#   build/appimage.sh            # x86_64, built natively
+#   build/appimage.sh aarch64    # arm64, cross-built in Docker (see linux_target)
 #
 # Structure/approach borrowed from a sibling project's build.sh
 # (ubuntu_manager/sysmanager/build.sh): the AppRun script registers a
@@ -12,13 +15,12 @@ cd "$(dirname "${BASH_SOURCE[0]}")"
 # shellcheck source=./common.sh
 source ./common.sh
 
-TARGET="x86_64-unknown-linux-gnu"
-ARCH="x86_64"
+linux_target "${1:-x86_64}"
 APPDIR="$ROOT_DIR/build/AppDir"
 OUTPUT="$DIST_DIR/$APP_NAME-$VERSION-$ARCH.AppImage"
 
 echo "==> Building $APP_NAME $VERSION for $TARGET"
-cargo build --release --target "$TARGET" -p jsonquery_gui
+"${BUILD[@]}" --release --target "$TARGET" -p jsonquery_gui
 
 echo "==> Assembling AppDir"
 rm -rf "$APPDIR"
@@ -92,21 +94,38 @@ DESKTOP_EOF
 cp "$APPDIR/$APP_NAME.desktop" "$APPDIR/usr/share/applications/$APP_NAME.desktop"
 
 echo "==> Locating appimagetool"
+# appimagetool itself has to run on this host, whatever arch the AppImage is for.
+HOST_ARCH="$(uname -m)"
 if command -v appimagetool &>/dev/null; then
     APPIMAGETOOL="appimagetool"
 else
-    TOOL_PATH="$ROOT_DIR/build/appimagetool-$ARCH.AppImage"
+    TOOL_PATH="$ROOT_DIR/build/appimagetool-$HOST_ARCH.AppImage"
     if [ ! -f "$TOOL_PATH" ]; then
         echo "    downloading appimagetool..."
         curl -Lo "$TOOL_PATH" \
-            "https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage"
+            "https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-$HOST_ARCH.AppImage"
         chmod +x "$TOOL_PATH"
     fi
     APPIMAGETOOL="$TOOL_PATH"
 fi
 
+# appimagetool embeds a runtime for its own arch by default; an AppImage for a
+# different arch needs that arch's runtime. The maintained type2 runtime is
+# static, so it doesn't need libfuse2 installed (Ubuntu/Debian no longer
+# ship it by default).
+RUNTIME_ARGS=()
+if [ "$ARCH" != "$HOST_ARCH" ]; then
+    RUNTIME_PATH="$ROOT_DIR/build/runtime-$ARCH"
+    if [ ! -f "$RUNTIME_PATH" ]; then
+        echo "    downloading the $ARCH AppImage runtime..."
+        curl -fLo "$RUNTIME_PATH" \
+            "https://github.com/AppImage/type2-runtime/releases/download/continuous/runtime-$ARCH"
+    fi
+    RUNTIME_ARGS=(--runtime-file "$RUNTIME_PATH")
+fi
+
 echo "==> Building AppImage"
 rm -f "$OUTPUT"
-ARCH=$ARCH "$APPIMAGETOOL" "$APPDIR" "$OUTPUT"
+ARCH=$ARCH "$APPIMAGETOOL" "${RUNTIME_ARGS[@]}" "$APPDIR" "$OUTPUT"
 
 echo "==> Wrote $OUTPUT"

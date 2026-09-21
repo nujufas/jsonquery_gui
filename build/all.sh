@@ -5,6 +5,8 @@ cd "$(dirname "${BASH_SOURCE[0]}")"
 
 ./linux.sh
 ./appimage.sh
+./linux.sh aarch64
+./appimage.sh aarch64
 ./windows.sh
 
 echo

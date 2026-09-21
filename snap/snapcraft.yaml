@@ -25,6 +25,11 @@ website: https://github.com/nujufas/jsonquery_gui
 
 platforms:
   amd64:
+  arm64:
+    # Built natively on an arm64 host, or cross-built from amd64 (see the
+    # cross branch in override-build below).
+    build-on: [amd64, arm64]
+    build-for: [arm64]
 
 apps:
   jsonquery-gui:
@@ -50,9 +55,28 @@ parts:
       - ca-certificates
       - gcc
       - pkg-config
+      - on amd64 to arm64:
+          - gcc-aarch64-linux-gnu
+          # Only a *Recommends* of the cross gcc, which snapcraft skips; without
+          # it gcc falls back to the host's amd64 /usr/include and fails.
+          - libc6-dev-arm64-cross
     override-build: |
       curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
           sh -s -- -y --default-toolchain stable --profile minimal
       . "$HOME/.cargo/env"
-      cargo build --release -p jsonquery_gui
-      install -Dm755 target/release/jsonquery_gui "$CRAFT_PART_INSTALL/bin/jsonquery_gui"
+      echo "build-on=$CRAFT_ARCH_BUILD_ON build-for=$CRAFT_ARCH_BUILD_FOR"
+      if [ "$CRAFT_ARCH_BUILD_ON" = "$CRAFT_ARCH_BUILD_FOR" ]; then
+          cargo build --release -p jsonquery_gui
+          BIN=target/release/jsonquery_gui
+      else
+          # amd64 -> arm64 cross-build. The binary links only libc/libm/
+          # libgcc_s; X11, Wayland, xkbcommon and GL are dlopen'd at run
+          # time from the gnome content snap, so all this needs is a cross
+          # C compiler/linker (for the `ring` crate and the final link).
+          rustup target add aarch64-unknown-linux-gnu
+          export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
+          export CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc
+          cargo build --release --target aarch64-unknown-linux-gnu -p jsonquery_gui
+          BIN=target/aarch64-unknown-linux-gnu/release/jsonquery_gui
+      fi
+      install -Dm755 "$BIN" "$CRAFT_PART_INSTALL/bin/jsonquery_gui"

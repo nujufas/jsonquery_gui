@@ -4,6 +4,7 @@ __pycache__/
 /dist/
 /build/AppDir/
 /build/appimagetool-*.AppImage
+/build/runtime-*
 /test-data/
 
 /android/app/build/

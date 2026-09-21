@@ -105,7 +105,8 @@ Homebrew refuses the formula as an untrusted tap, run
 sudo snap install jsonquery-gui
 ```
 
-Also available on the [Snap Store](https://snapcraft.io/jsonquery-gui).
+Also available on the [Snap Store](https://snapcraft.io/jsonquery-gui), for
+both x86-64 (amd64) and ARM (arm64) machines.
 
 ### Scoop (Windows)
 
@@ -164,16 +165,20 @@ Cross-platform packaged builds live in [`build/`](build/), output to `dist/`:
 ```sh
 build/linux.sh      # native release build -> .tar.gz
 build/appimage.sh   # native release build -> self-integrating .AppImage
+build/linux.sh aarch64      # arm64 .tar.gz, cross-compiled via `cross`/Docker
+build/appimage.sh aarch64   # arm64 .AppImage, likewise
 build/windows.sh    # cross-compiled via `cross`/Docker -> .zip
-build/all.sh        # all three, plus a listing of dist/
+build/all.sh        # all of the above, plus a listing of dist/
 build/snap.sh       # sandboxed build via snapcraft -> dist/*.snap
 ```
 
-`build/windows.sh` needs a working Docker daemon (cross-compiles inside a
-container with the mingw-w64 toolchain already installed). `build/appimage.sh`
-downloads `appimagetool` on first use and needs FUSE to run it. On an actual
-Windows machine, `build\windows.bat` builds natively instead — same output
-layout, just needs a Rust toolchain and PowerShell.
+`build/windows.sh` and the `aarch64` builds need a working Docker daemon (they
+cross-compile inside a container with the toolchain already installed; the
+aarch64 image links an old glibc, so those binaries also run on older distros
+than a native build would). `build/appimage.sh` downloads `appimagetool` on
+first use and needs FUSE to run it. On an actual Windows machine,
+`build\windows.bat` builds natively instead — same output layout, just needs a
+Rust toolchain and PowerShell.
 
 The AppImage is desktop-pinnable out of the box: it self-registers a
 `.desktop` entry and icon on first launch (no `appimaged`/AppImageLauncher
