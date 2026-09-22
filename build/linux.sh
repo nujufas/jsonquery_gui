@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Build and package the Linux release binary.
 #
-#   build/linux.sh            # x86_64, built natively
-#   build/linux.sh aarch64    # arm64, cross-built in Docker (see linux_target)
+#   build/linux.sh            # x86_64, cross-built in Docker (see linux_target)
+#   build/linux.sh aarch64    # arm64, likewise
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 # shellcheck source=./common.sh

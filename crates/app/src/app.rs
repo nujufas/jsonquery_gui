@@ -90,6 +90,9 @@ pub struct App {
 
     /// The tutorial window (a second native window) and its state.
     tutorial: Tutorial,
+    /// The (i) info window (also a second native window) — license, source,
+    /// issues/contact, privacy and known limitations.
+    info_window: InfoWindow,
     /// The tutorial's "▶ Try it" replaced the source document and wants the
     /// query run as soon as that new document has loaded (loading is
     /// asynchronous, and finishing it cancels any query already running).
@@ -300,6 +303,7 @@ impl App {
             last_resolved_engine: None,
             query_suggest: QuerySuggest::default(),
             tutorial: Tutorial::default(),
+            info_window: InfoWindow::default(),
             run_after_load: false,
             results: Value::Array(Vec::new()),
             results_item_errors: 0,
@@ -1850,6 +1854,32 @@ impl App {
     }
 
     fn status_bar(&mut self, ui: &mut egui::Ui) {
+        // `Sides` lays out the wrapped status text and the (i) button as two
+        // independent child uis (left one unconstrained, right one sized to
+        // whatever room is left after it) rather than fighting over one
+        // `horizontal_wrapped` row: an earlier version tried to claim
+        // `ui.available_width()` for the button *inside* that same wrapped
+        // row, which silently wrapped it onto its own new line instead of
+        // sharing the last one (the request didn't fit once `item_spacing`
+        // was added before it) — a couple of pixels of unwanted extra height
+        // that shifted every fixed pixel-coordinate the GUI test suite reads
+        // above this panel. `shrink_right` sizes the left side first so the
+        // status text wraps exactly as it always did.
+        //
+        // `status_bar_text` needs `&mut self` (it can call
+        // `self.expand_results()`), which would otherwise conflict with the
+        // second closure's separate `&mut self.info_window` borrow — taken
+        // out for the duration and put back afterwards.
+        let mut info_window = std::mem::take(&mut self.info_window);
+        egui::Sides::new().shrink_right().show(
+            ui,
+            |ui| self.status_bar_text(ui),
+            |ui| info_button(ui, &mut info_window),
+        );
+        self.info_window = info_window;
+    }
+
+    fn status_bar_text(&mut self, ui: &mut egui::Ui) {
         ui.horizontal_wrapped(|ui| {
             if let Some(doc) = &self.doc {
                 ui.label(format!("Parsed in {:.1?}", doc.parse_time));
@@ -2230,6 +2260,112 @@ fn tutorial_button(ui: &mut egui::Ui, tutorial: &mut Tutorial) {
     }
 }
 
+/// Repo URL that the info window's links are built from — license, source,
+/// issues/contact and the README's "Known limitations" section all live
+/// under it.
+const REPO_URL: &str = "https://github.com/nujufas/jsonquery_gui";
+
+fn info_viewport_id() -> egui::ViewportId {
+    egui::ViewportId::from_hash_of("jsonquery_info_window")
+}
+
+/// The (i) info window: license, source, issues/contact, privacy and known
+/// limitations. A second native window rather than a tooltip/popup — same
+/// shape as `Tutorial` — so its hyperlinks are ordinary click targets
+/// instead of having to survive inside a hover region.
+#[derive(Default)]
+struct InfoWindow {
+    open: bool,
+    icon: Option<Arc<egui::IconData>>,
+}
+
+impl InfoWindow {
+    /// Open the window, or bring it to the front if it's already open.
+    fn open_or_focus(&mut self, ctx: &egui::Context) {
+        if self.open {
+            ctx.send_viewport_cmd_to(info_viewport_id(), egui::ViewportCommand::Focus);
+        } else {
+            self.open = true;
+        }
+    }
+
+    /// Draw the window (if open) for this frame.
+    fn show(&mut self, ctx: &egui::Context) {
+        if !self.open {
+            return;
+        }
+
+        let icon = self
+            .icon
+            .get_or_insert_with(|| Arc::new(crate::app_icon()))
+            .clone();
+        let builder = egui::ViewportBuilder::default()
+            .with_title("jsonquery — About")
+            .with_inner_size([380.0, 320.0])
+            .with_min_inner_size([320.0, 280.0])
+            .with_app_id(crate::APP_ID)
+            .with_icon(icon);
+
+        let mut close = false;
+        ctx.show_viewport_immediate(info_viewport_id(), builder, |ui, _class| {
+            close = ui.ctx().input(|i| i.viewport().close_requested());
+            egui::CentralPanel::default().show(ui, info_window_contents);
+        });
+        if close {
+            self.open = false;
+        }
+    }
+}
+
+fn info_window_contents(ui: &mut egui::Ui) {
+    ui.add_space(4.0);
+    ui.strong(format!("jsonquery gui v{}", env!("CARGO_PKG_VERSION")));
+    ui.add_space(8.0);
+    egui::Grid::new("info_window_grid")
+        .num_columns(2)
+        .spacing([8.0, 6.0])
+        .show(ui, |ui| {
+            ui.label("License:");
+            ui.hyperlink_to("MIT", format!("{REPO_URL}/blob/master/LICENSE"));
+            ui.end_row();
+
+            ui.label("Source:");
+            ui.hyperlink_to("GitHub", REPO_URL);
+            ui.end_row();
+
+            ui.label("Issues / contact:");
+            ui.hyperlink_to("Report an issue", format!("{REPO_URL}/issues"));
+            ui.end_row();
+
+            ui.label("Privacy:");
+            ui.hyperlink_to(
+                "Privacy policy",
+                format!("{REPO_URL}/blob/master/PRIVACY.md"),
+            );
+            ui.end_row();
+        });
+    ui.add_space(8.0);
+    ui.label("Known limitations:");
+    ui.label(
+        "Drag-and-drop doesn't work on native Wayland (use the Source field, or run \
+         under XWayland); very large files load fully into memory rather than being \
+         memory-mapped.",
+    );
+    ui.hyperlink_to(
+        "More in the README",
+        format!("{REPO_URL}#known-limitations"),
+    );
+}
+
+/// Small "(i)" tag pinned to the bottom-right of the status bar — opens the
+/// info window on click (or focuses it if already open), same as the
+/// tutorial's 📖 button.
+fn info_button(ui: &mut egui::Ui, info: &mut InfoWindow) {
+    if ui.small_button("ℹ").clicked() {
+        info.open_or_focus(ui.ctx());
+    }
+}
+
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.drain_events(ui.ctx());
@@ -2318,6 +2454,8 @@ impl eframe::App for App {
             source_resp.response.rect,
             results_resp.response.rect,
         );
+
+        self.info_window.show(ui.ctx());
 
         if let Some(request) = self.tutorial.show(ui.ctx()) {
             self.apply_tutorial_request(request);

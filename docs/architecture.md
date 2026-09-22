@@ -106,6 +106,13 @@ differently from the source tree:
   query in a streaming write mode straight to disk, so exporting a large
   matched set never requires materializing it all at once in RAM.
 
+The same worker-offload discipline extends to single-row actions on either
+tree: right-click **Copy to Clipboard** or **Save…** resolves and serializes
+just that one node on the worker thread, so picking one branch out of a huge
+document never requires cloning the whole thing first. Above a size
+threshold, Copy to Clipboard asks for confirmation before putting that much
+text on the clipboard.
+
 ## 7. Crate map
 
 | Crate | Role |

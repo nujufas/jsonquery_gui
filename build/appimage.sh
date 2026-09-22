@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Build a self-integrating AppImage for Linux.
 #
-#   build/appimage.sh            # x86_64, built natively
-#   build/appimage.sh aarch64    # arm64, cross-built in Docker (see linux_target)
+#   build/appimage.sh            # x86_64, cross-built in Docker (see linux_target)
+#   build/appimage.sh aarch64    # arm64, likewise
 #
 # Structure/approach borrowed from a sibling project's build.sh
 # (ubuntu_manager/sysmanager/build.sh): the AppRun script registers a
