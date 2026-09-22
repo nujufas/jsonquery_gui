@@ -299,6 +299,87 @@ TC-AC-016 Suggestions Return At The Next Keystroke After Escape
     Sleep    0.4s
     Suggest Popup Should Contain    object
 
+TC-AC-017 Whitespace After A Pipe Suppresses Auto-Open So Tab Still Indents
+    [Documentation]    Regression test for the whitespace-suppression fix
+    ...    (query_suggest.rs's `cursor_after_whitespace`/`QuerySuggest::
+    ...    suppressed`, commit 7bb8ec2/905706b): typing a space to align or
+    ...    indent a query used to still pop the keyword-dump popup open, so
+    ...    the very next Tab -- pressed to keep indenting -- got eaten as
+    ...    "accept suggestion" instead of inserting a tab character. "abs" is
+    ...    the dump's own first alphabetical entry (also relied on by
+    ...    TC-AC-050) -- with an empty word being completed (the cursor sits
+    ...    right after "|", then right after the space typed after it) every
+    ...    jq keyword matches equally, so the same "abs" row anchors both the
+    ...    open and the suppressed state. Checked here by confirming Tab
+    ...    doesn't disturb the box's focus (typing right after it still
+    ...    lands, same focus-reclaim-style check TC-AC-015 uses for Escape) --
+    ...    Tesseract can't distinguish an inserted tab character from
+    ...    ordinary whitespace, so that part isn't OCR'd directly.
+    [Tags]    p1
+    Load People Fixture
+    Toggle Autocomplete
+    Type Query Text    .[] |
+    Suggest Popup Should Contain    abs
+    Type Text    ${SPACE}
+    Sleep    0.4s
+    Suggest Popup Should Not Contain    abs
+    Press Key    tab
+    Type Text    xyz
+    Sleep    0.3s
+    Query Box Should Contain Text    xy
+
+TC-AC-018 Escape Reveals A Whitespace-Suppressed List
+    [Documentation]    The other half of TC-AC-017: Escape can still ask for
+    ...    the held-back list explicitly, once, at that same cursor position
+    ...    (`QuerySuggest::reveal`). Also a regression check for the same
+    ...    egui-Memory global-focus-clear-on-Escape bug TC-AC-015 guards
+    ...    against, but at a second call site: `intercept_keys`'s `!self.open`
+    ...    branch reclaims focus after this Escape too, not just the
+    ...    already-open-popup one.
+    [Tags]    p1
+    Load People Fixture
+    Toggle Autocomplete
+    Type Query Text    .[] |
+    Suggest Popup Should Contain    abs
+    Type Text    ${SPACE}
+    Sleep    0.4s
+    Suggest Popup Should Not Contain    abs
+    Press Key    escape
+    Sleep    0.3s
+    Suggest Popup Should Contain    abs
+    # Same position, nothing typed since -- the reveal holds, it isn't a
+    # one-frame flash.
+    Sleep    0.5s
+    Suggest Popup Should Contain    abs
+    # Focus came back after Escape: typing still lands in the query box.
+    Type Text    xyz
+    Sleep    0.3s
+    Query Box Should Contain Text    xy
+
+TC-AC-019 Ctrl+Space Also Reveals A Whitespace-Suppressed List
+    [Documentation]    The dedicated "trigger suggestions" shortcut added
+    ...    alongside Escape's reveal (same `intercept_keys` branch, same
+    ...    `QuerySuggest::reveal` call, just a second key OR'd into the same
+    ...    `consume_key` check) -- the conventional autocomplete-trigger combo
+    ...    in most editors, for users who don't want to reach for Escape.
+    ...    Mirrors TC-AC-018 exactly, substituting the key.
+    [Tags]    p1
+    Load People Fixture
+    Toggle Autocomplete
+    Type Query Text    .[] |
+    Suggest Popup Should Contain    abs
+    Type Text    ${SPACE}
+    Sleep    0.4s
+    Suggest Popup Should Not Contain    abs
+    Press Keys    ctrl    space
+    Sleep    0.3s
+    Suggest Popup Should Contain    abs
+    Sleep    0.5s
+    Suggest Popup Should Contain    abs
+    Type Text    xyz
+    Sleep    0.3s
+    Query Box Should Contain Text    xy
+
 TC-AC-020 Explicit Engine Selection Restricts Suggestions To That Engine
     [Documentation]    "sub" is a jq builtin with no JMESPath equivalent;
     ...    "avg" is the reverse -- a JMESPath builtin jq doesn't have. Each

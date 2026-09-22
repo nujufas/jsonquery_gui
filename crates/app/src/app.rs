@@ -14,7 +14,7 @@ use crate::query_highlight;
 use crate::query_suggest::{apply_suggestion, QuerySuggest};
 use crate::tree_view::{RowAction, TreeView};
 use crate::tutorial::{LoadRequest, Tutorial};
-use crate::worker::{self, Command, Event, SearchRoot};
+use crate::worker::{self, Command, CopyTarget, Event, SearchRoot};
 
 /// Bounded live-preview cap (Architecture §7): the results tree never holds
 /// more than this many items in memory at once, no matter how large the
@@ -28,6 +28,14 @@ const LIVE_PREVIEW_CAP: usize = 50_000;
 /// multi-GB doc, which `LIVE_PREVIEW_CAP` alone wouldn't bound: one item can
 /// still be arbitrarily large).
 const TEXT_VIEW_NODE_BUDGET: usize = 20_000;
+
+/// Above this many bytes of serialized JSON, "Copy to Clipboard" asks for
+/// confirmation (`App::clipboard_warning_dialog`) before actually touching
+/// the OS clipboard, rather than doing it silently: pasting that much text
+/// can be slow, or make the target application unresponsive, and unlike a
+/// file save there's no natural place to show progress or let it happen in
+/// the background.
+const CLIPBOARD_WARN_BYTES: usize = 5 * 1024 * 1024;
 
 /// Width the toolbar keeps free to the right of its source field: the "…",
 /// "Load" and "Clear" buttons, the byte size, and the icon buttons pinned to
@@ -45,6 +53,14 @@ pub struct App {
     load_error: Option<String>,
     save_error: Option<String>,
     last_saved: Option<PathBuf>,
+    /// "Copy to Clipboard" (a row's context menu) outcome, shown in the
+    /// status bar the same way `save_error`/`last_saved` are.
+    copy_error: Option<String>,
+    last_copied: bool,
+    /// A `Command::CopyNode` came back too large to copy without asking
+    /// first (`CLIPBOARD_WARN_BYTES`) — held here until the warning
+    /// dialog's "Copy Anyway" is clicked, or dropped on "Cancel".
+    pending_clipboard: Option<String>,
 
     /// "Reveal in source" request/reply state (results panel row clicks).
     find_gen: u64,
@@ -268,6 +284,9 @@ impl App {
             load_error: None,
             save_error: None,
             last_saved: None,
+            copy_error: None,
+            last_copied: false,
+            pending_clipboard: None,
             find_gen: 0,
             finding: false,
             find_message: None,
@@ -323,7 +342,7 @@ impl App {
         }
     }
 
-    fn drain_events(&mut self) {
+    fn drain_events(&mut self, ctx: &egui::Context) {
         while let Ok(event) = self.evt_rx.try_recv() {
             match event {
                 Event::Loading => {
@@ -335,6 +354,9 @@ impl App {
                     self.load_error = None;
                     self.save_error = None;
                     self.last_saved = None;
+                    self.copy_error = None;
+                    self.last_copied = false;
+                    self.pending_clipboard = None;
 
                     // A newly loaded document invalidates any query that was
                     // running against the previous one.
@@ -389,6 +411,21 @@ impl App {
                 Event::SaveError(e) => {
                     self.last_saved = None;
                     self.save_error = Some(e);
+                }
+                Event::CopyReady(text) => {
+                    self.copy_error = None;
+                    if text.len() <= CLIPBOARD_WARN_BYTES {
+                        ctx.copy_text(text);
+                        self.last_copied = true;
+                    } else {
+                        self.last_copied = false;
+                        self.pending_clipboard = Some(text);
+                    }
+                }
+                Event::CopyError(e) => {
+                    self.pending_clipboard = None;
+                    self.last_copied = false;
+                    self.copy_error = Some(e);
                 }
                 Event::Found { gen, matches } => {
                     if gen != self.find_gen {
@@ -657,6 +694,33 @@ impl App {
                 path,
             });
         }
+    }
+
+    /// "Copy to Clipboard" over a row of the *source* tree — like
+    /// `save_source_node`, resolves `node_path` on the worker thread so a
+    /// huge document isn't cloned just to grab one branch of it.
+    fn copy_source_node(&mut self, node_path: NodePath) {
+        let Some(doc) = self.doc.clone() else { return };
+        let _ = self.cmd_tx.send(Command::CopyNode {
+            target: CopyTarget::Source {
+                doc,
+                node_path: Some(node_path),
+            },
+        });
+    }
+
+    /// "Copy to Clipboard" over a row of the *results* tree — like
+    /// `save_results_node`, resolves `node_path` here (cheap: results are
+    /// already bounded by `LIVE_PREVIEW_CAP`) before handing the value off
+    /// to serialize.
+    fn copy_results_node(&mut self, node_path: NodePath) {
+        let Some(value) = resolve(&self.results, &node_path) else {
+            return;
+        };
+        let value = value.clone();
+        let _ = self.cmd_tx.send(Command::CopyNode {
+            target: CopyTarget::Value(value),
+        });
     }
 
     /// "Find in Source": work out where the results row at `node_path` came
@@ -1294,6 +1358,48 @@ impl App {
         }
     }
 
+    /// Shown when a "Copy to Clipboard" came back over `CLIPBOARD_WARN_BYTES`
+    /// (`self.pending_clipboard`): asks before actually touching the OS
+    /// clipboard rather than just doing it, but still lets the user go
+    /// ahead — "Copy Anyway" copies exactly the text that was measured.
+    fn clipboard_warning_dialog(&mut self, ctx: &egui::Context) {
+        let Some(text) = &self.pending_clipboard else {
+            return;
+        };
+        let bytes = text.len() as u64;
+
+        let mut open = true;
+        let mut copy_anyway = false;
+        let mut cancel = false;
+        egui::Window::new("Copy to Clipboard")
+            .id(egui::Id::new("clipboard_warning_dialog"))
+            .collapsible(false)
+            .resizable(false)
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.set_max_width(360.0);
+                ui.label(format!(
+                    "This value is {} of JSON — copying that much text to the clipboard can be \
+                     slow, or make other applications unresponsive when you paste it.",
+                    human_bytes(bytes)
+                ));
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    copy_anyway = ui.button("Copy Anyway").clicked();
+                    cancel = ui.button("Cancel").clicked();
+                });
+            });
+
+        if copy_anyway {
+            if let Some(text) = self.pending_clipboard.take() {
+                ctx.copy_text(text);
+                self.last_copied = true;
+            }
+        } else if cancel || !open {
+            self.pending_clipboard = None;
+        }
+    }
+
     /// The dialog's bottom line: where "Find" stands for the query in the
     /// field. Always takes a line's height, so the dialog doesn't jump as the
     /// message comes and goes.
@@ -1766,6 +1872,16 @@ impl App {
                 ui.weak(format!("Saved to {}", path.display()));
                 ui.separator();
             }
+            if let Some(err) = &self.copy_error {
+                ui.colored_label(
+                    egui::Color32::from_rgb(220, 80, 80),
+                    format!("Copy error: {err}"),
+                );
+                ui.separator();
+            } else if self.last_copied {
+                ui.weak("Copied to clipboard");
+                ui.separator();
+            }
 
             // Which engine actually ran — shown wherever the query's outcome
             // is, so a result or error is never ambiguous about which
@@ -1874,6 +1990,7 @@ impl App {
                 {
                     match action {
                         RowAction::Save(node_path) => self.save_results_node(node_path),
+                        RowAction::Copy(node_path) => self.copy_results_node(node_path),
                         RowAction::FindInSource(node_path) => self.navigate_to_source(&node_path),
                         RowAction::OpenSearch => self.open_search_dialog(PanelKind::Results),
                     }
@@ -2086,7 +2203,8 @@ fn autocomplete_toggle_button(ui: &mut egui::Ui, suggest: &mut QuerySuggest) {
     let tooltip = if enabled {
         "Autocomplete suggestions — experimental\n\
          On: click to turn off. Esc closes the list that's showing; the next \
-         keystroke brings suggestions back."
+         keystroke brings suggestions back. Right after a space/tab, the \
+         list doesn't pop up on its own — Ctrl+Space (or Esc) shows it."
     } else {
         "Autocomplete suggestions — experimental\n\
          Off: click to turn on."
@@ -2114,12 +2232,13 @@ fn tutorial_button(ui: &mut egui::Ui, tutorial: &mut Tutorial) {
 
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        self.drain_events();
+        self.drain_events(ui.ctx());
         let hovering_drop = self.handle_drag_and_drop(ui);
         // Shortcuts first, so Ctrl+F's dialog is drawn (and focused) in the
         // frame it was pressed rather than the one after.
         self.handle_shortcuts(ui.ctx());
         self.search_dialog(ui.ctx());
+        self.clipboard_warning_dialog(ui.ctx());
 
         egui::Panel::top("toolbar").show(ui, |ui| self.toolbar(ui));
         egui::Panel::top("query_bar")
@@ -2174,6 +2293,7 @@ impl eframe::App for App {
                             {
                                 match action {
                                     RowAction::Save(node_path) => self.save_source_node(node_path),
+                                    RowAction::Copy(node_path) => self.copy_source_node(node_path),
                                     RowAction::OpenSearch => {
                                         self.open_search_dialog(PanelKind::Source)
                                     }

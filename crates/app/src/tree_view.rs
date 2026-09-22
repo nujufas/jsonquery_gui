@@ -21,6 +21,9 @@ use serde_json::Value;
 pub enum RowAction {
     /// "Save…" was chosen from a row's context menu.
     Save(NodePath),
+    /// "Copy to Clipboard" was chosen from a row's context menu — like
+    /// `Save`, but the destination is the OS clipboard instead of a file.
+    Copy(NodePath),
     /// "Find in Source" was chosen from a results row's context menu — work
     /// out where this row's key/value came from in the loaded source document.
     FindInSource(NodePath),
@@ -278,6 +281,10 @@ fn sense_row(
     row_resp.context_menu(|ui| {
         if ui.button("Save…").clicked() {
             action = Some(RowAction::Save(row.path.clone()));
+            ui.close();
+        }
+        if ui.button("Copy to Clipboard").clicked() {
+            action = Some(RowAction::Copy(row.path.clone()));
             ui.close();
         }
         if ui.button("Copy JSON Path").clicked() {
