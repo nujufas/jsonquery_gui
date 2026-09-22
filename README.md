@@ -58,8 +58,9 @@ file (or paste JSON directly) and query it with **jq**, **JSON Pointer**,
   elements their position: one hit is revealed directly, several are listed
   with the best guess selected, and a computed value falls back to a text
   search.
-- **Right-click row menus** — copy a node's path, search from that scope,
-  save just that node to a file, or expand a whole subtree at once.
+- **Right-click row menus** — copy a node's path or its JSON to the
+  clipboard, search from that scope, save just that node to a file, or
+  expand a whole subtree at once.
 - **Save to file** — the whole source document, the whole result set, or a
   single node, independently.
 - **Load however's convenient** — drag-and-drop, a **Source** field that
@@ -166,8 +167,8 @@ cargo build --release -p jsonquery_gui
 Cross-platform packaged builds live in [`build/`](build/), output to `dist/`:
 
 ```sh
-build/linux.sh      # native release build -> .tar.gz
-build/appimage.sh   # native release build -> self-integrating .AppImage
+build/linux.sh      # x86_64 .tar.gz, cross-compiled via `cross`/Docker
+build/appimage.sh   # x86_64 .AppImage, likewise
 build/linux.sh aarch64      # arm64 .tar.gz, cross-compiled via `cross`/Docker
 build/appimage.sh aarch64   # arm64 .AppImage, likewise
 build/windows.sh    # cross-compiled via `cross`/Docker -> .zip
@@ -175,11 +176,12 @@ build/all.sh        # all of the above, plus a listing of dist/
 build/snap.sh       # sandboxed build via snapcraft -> dist/*.snap
 ```
 
-`build/windows.sh` and the `aarch64` builds need a working Docker daemon (they
-cross-compile inside a container with the toolchain already installed; the
-aarch64 image links an old glibc, so those binaries also run on older distros
-than a native build would). `build/appimage.sh` downloads `appimagetool` on
-first use and needs FUSE to run it. On an actual Windows machine,
+`build/linux.sh`, `build/appimage.sh` and `build/windows.sh` all need a
+working Docker daemon (they cross-compile inside a container with the
+toolchain already installed, linking against an old glibc so the binaries
+run on distros much older than the machine that built them). `build/appimage.sh`
+downloads `appimagetool` on first use and needs FUSE to run it. On an actual
+Windows machine,
 `build\windows.bat` builds natively instead — same output layout, just needs a
 Rust toolchain and PowerShell.
 
