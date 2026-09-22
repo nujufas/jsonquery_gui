@@ -1,6 +1,6 @@
 # Maintainer: nujufas <nujufas@gmail.com>
 pkgname=jsonquery-gui-bin
-pkgver=0.4.1
+pkgver=0.4.2
 pkgrel=1
 pkgdesc="Native desktop GUI for browsing and querying large JSON files with jq, JSONPath, JMESPath, and JSON Pointer"
 arch=('x86_64')
@@ -11,7 +11,7 @@ conflicts=('jsonquery-gui')
 source=("$pkgname-$pkgver.tar.gz::https://github.com/nujufas/jsonquery_gui/releases/download/v$pkgver/jsonquery_gui-$pkgver-linux-x86_64.tar.gz"
         "jsonquery_gui.desktop"
         "jsonquery_gui.png")
-sha256sums=('1e1369cf84de9112ae31e78cb806d09b436954de4bc3975741fcc5cee149fa56'
+sha256sums=('45720620045640862262e7a6e0dbbd043ee0f84c069275d7e5d681b45ce2a717'
             '614ae5ed0be08baa934be414ac1568a7e1975e2906d1b25ef0950667268d9c92'
             'b0701ad406646bdb998acaf35029bbd57486d1127fd1e0f2f5900d2d48e58098')
 
