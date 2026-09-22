@@ -54,6 +54,22 @@ impl TextTarget {
     }
 }
 
+/// What "Copy to Clipboard" (a row's context menu) serializes to text,
+/// mirroring `Command::SaveFile`/`Command::SaveResults`: a node of the
+/// loaded source document, resolved here rather than on the UI thread so a
+/// row copy doesn't need to clone a potentially huge document just to pick
+/// one branch out of it, or an already-resolved value (a results row, small
+/// enough to have been cloned on the UI thread already, but — like
+/// `Command::RenderText` — still serialized off it, since one item can be
+/// arbitrarily large).
+pub enum CopyTarget {
+    Source {
+        doc: Arc<Document>,
+        node_path: Option<NodePath>,
+    },
+    Value(serde_json::Value),
+}
+
 pub enum Command {
     OpenFile(PathBuf),
     OpenText(String),
@@ -70,6 +86,13 @@ pub enum Command {
     SaveResults {
         results: serde_json::Value,
         path: PathBuf,
+    },
+    /// "Copy to Clipboard" over one row's context menu — serializes
+    /// `target` to pretty-printed JSON text; the UI thread decides whether
+    /// it's small enough to copy straight away or worth asking about first
+    /// (`Event::CopyReady` carries the text either way).
+    CopyNode {
+        target: CopyTarget,
     },
     /// Work out where a results row came from in `doc`, for the results
     /// panel's "Find in Source" row action: `target` is the row's value, and
@@ -117,6 +140,11 @@ pub enum Event {
     LoadError(String),
     Saved(PathBuf),
     SaveError(String),
+    /// `Command::CopyNode` finished serializing — the UI thread still has
+    /// to decide whether to copy it straight to the clipboard or hold it
+    /// for a size-warning confirmation first (see `CLIPBOARD_WARN_BYTES`).
+    CopyReady(String),
+    CopyError(String),
     Found {
         gen: u64,
         matches: SourceMatches,
@@ -199,6 +227,28 @@ pub fn spawn(cmd_rx: Receiver<Command>, evt_tx: Sender<Event>, wake: impl Fn() +
                     match result {
                         Ok(()) => send(&evt_tx, Event::Saved(path), &wake),
                         Err(e) => send(&evt_tx, Event::SaveError(format!("{e:#}")), &wake),
+                    }
+                }
+                Command::CopyNode { target } => {
+                    let result = match &target {
+                        CopyTarget::Source { doc, node_path } => match node_path {
+                            Some(np) => match jsonquery_core::resolve(&doc.root, np) {
+                                Some(v) => serde_json::to_string_pretty(v)
+                                    .context("serializing that value"),
+                                None => Err(anyhow::anyhow!(
+                                    "that value is no longer part of the document"
+                                )),
+                            },
+                            None => serde_json::to_string_pretty(&doc.root)
+                                .context("serializing the document"),
+                        },
+                        CopyTarget::Value(v) => {
+                            serde_json::to_string_pretty(v).context("serializing that value")
+                        }
+                    };
+                    match result {
+                        Ok(text) => send(&evt_tx, Event::CopyReady(text), &wake),
+                        Err(e) => send(&evt_tx, Event::CopyError(format!("{e:#}")), &wake),
                     }
                 }
                 Command::FindInSource {
