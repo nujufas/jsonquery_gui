@@ -1196,3 +1196,222 @@ fn the_dock_button_in_a_maximized_window_docks_its_pane_too() {
         .commands_for(Pane::Query)
         .contains(&egui::ViewportCommand::Maximized(false)));
 }
+
+// The Tools window (the 🛠 button) and its Merge JSON.
+
+/// A JSON file with `json` in it, in a folder of its own.
+fn temp_json(name: &str, json: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("jsonquery-tools-test-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(name);
+    std::fs::write(&path, json).unwrap();
+    path
+}
+
+/// The middle of `text`, wherever it was drawn last frame.
+fn center_of(h: &Harness, text: &str) -> egui::Pos2 {
+    text_rects(&h.shapes)
+        .into_iter()
+        .find(|(t, _)| t == text)
+        .unwrap_or_else(|| panic!("{text:?} is drawn"))
+        .1
+        .center()
+}
+
+fn is_drawn(h: &Harness, text: &str) -> bool {
+    h.texts().iter().any(|(t, _)| t == text)
+}
+
+/// Frames until `done` (the worker thread answers in its own time).
+fn wait_for(h: &mut Harness, what: &str, done: impl Fn(&Harness) -> bool) {
+    for _ in 0..300 {
+        h.frame();
+        if done(h) {
+            h.settle();
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    panic!("waited for {what}");
+}
+
+#[test]
+fn the_tools_button_sits_beside_the_tutorial_button_and_opens_the_window() {
+    let mut h = Harness::new();
+    let tools = h.pop_buttons("🛠");
+    let tutorial = h.pop_buttons("📖");
+    let autocomplete = h.pop_buttons("💡");
+    assert_eq!((tools.len(), tutorial.len(), autocomplete.len()), (1, 1, 1));
+    let (tools, tutorial, autocomplete) = (tools[0], tutorial[0], autocomplete[0]);
+    assert!(tools.x < tutorial.x, "left of 📖: {tools:?} {tutorial:?}");
+    assert_eq!(tools.y, tutorial.y, "same row");
+    assert!(
+        ((tutorial.x - tools.x) - (autocomplete.x - tutorial.x)).abs() < 3.0,
+        "spaced like its neighbours: {tools:?} {tutorial:?} {autocomplete:?}"
+    );
+
+    assert!(!h.app.tools.is_open());
+    h.click(tools.x, tools.y);
+    assert!(h.app.tools.is_open());
+    assert!(is_drawn(&h, "Merge JSON files"), "{:?}", h.texts());
+}
+
+#[test]
+fn merging_two_files_and_opening_the_result_in_the_main_window() {
+    let mut h = Harness::new();
+    let a = temp_json("merge_a.json", "[1, 2]");
+    let b = temp_json("merge_b.json", "[3]");
+    let ctx = h.ctx.clone();
+    h.app.tools.add_files(&ctx, vec![a, b]);
+    h.settle();
+    assert!(is_drawn(&h, "Files (2)"), "{:?}", h.texts());
+    assert!(is_drawn(&h, "merge_a.json") && is_drawn(&h, "merge_b.json"));
+
+    let merge = center_of(&h, "Merge");
+    h.click(merge.x, merge.y);
+    wait_for(&mut h, "the merged preview", |h| {
+        is_drawn(h, "[\n  1,\n  2,\n  3\n]")
+    });
+    assert!(
+        is_drawn(&h, "array · 2 items · 6 B"),
+        "each file says what it was: {:?}",
+        h.texts()
+    );
+    assert!(h.app.doc.is_none(), "nothing is opened until asked");
+
+    let open = center_of(&h, "Open in main window");
+    h.click(open.x, open.y);
+    let doc = h.app.doc.clone().expect("the merge opened");
+    assert_eq!(doc.root, serde_json::json!([1, 2, 3]));
+    assert_eq!(doc.source.label(), "(merged from 2 files)");
+    assert_eq!(h.app.source_input, "", "nothing to reload from the field");
+}
+
+#[test]
+fn a_failed_merge_says_why_and_editing_the_files_clears_it() {
+    let mut h = Harness::new();
+    let a = temp_json("fail_a.json", "[1]");
+    let b = temp_json("fail_b.json", r#"{"a": 1}"#);
+    let ctx = h.ctx.clone();
+    h.app.tools.add_files(&ctx, vec![a, b]);
+    h.settle();
+
+    let merge = center_of(&h, "Merge");
+    h.click(merge.x, merge.y);
+    wait_for(&mut h, "the error", |h| {
+        h.texts()
+            .iter()
+            .any(|(t, _)| t.contains("cannot calculate"))
+    });
+
+    // Removing a file makes the old answer stale.
+    let remove = h.pop_buttons("×");
+    assert_eq!(remove.len(), 2, "one per file");
+    h.click(remove[1].x, remove[1].y);
+    assert!(is_drawn(&h, "Files (1)"), "{:?}", h.texts());
+    assert!(
+        !h.texts()
+            .iter()
+            .any(|(t, _)| t.contains("cannot calculate")),
+        "the error is gone"
+    );
+}
+
+#[test]
+fn dropping_several_files_on_the_main_window_lists_them_for_merging() {
+    let mut h = Harness::new();
+    let files = [
+        temp_json("drop_a.json", "[1]"),
+        temp_json("drop_b.json", "[2]"),
+    ];
+    let input = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, SCREEN)),
+        time: Some(h.time),
+        dropped_files: files
+            .iter()
+            .map(|f| {
+                std::sync::Arc::new(FakeDroppedFile(f.clone()))
+                    as std::sync::Arc<dyn egui::DroppedFile + Send + Sync>
+            })
+            .collect(),
+        ..Default::default()
+    };
+    let app = &mut h.app;
+    let mut out = h.ctx.run_ui(input, |ui| app.show(ui));
+    out.textures_delta.clear();
+    h.settle();
+
+    assert!(
+        h.app.doc.is_none() && !h.app.loading,
+        "none of them was opened"
+    );
+    assert!(h.app.tools.is_open());
+    assert!(is_drawn(&h, "Files (2)"), "{:?}", h.texts());
+}
+
+/// The toolbar's own texts (and the icons pinned at its right end), left to
+/// right, as `(text, left, right)`.
+fn toolbar_row(h: &Harness) -> Vec<(String, f32, f32)> {
+    let mut row: Vec<_> = text_rects(&h.shapes)
+        .into_iter()
+        .filter(|(t, r)| !t.is_empty() && r.center().y > 5.0 && r.center().y < 18.0)
+        .map(|(t, r)| (t, r.min.x, r.max.x))
+        .collect();
+    row.sort_by(|a, b| a.1.total_cmp(&b.1));
+    row
+}
+
+fn assert_toolbar_does_not_overlap(h: &Harness, state: &str) {
+    for pair in toolbar_row(h).windows(2) {
+        assert!(
+            pair[0].2 <= pair[1].1,
+            "{state}: {:?} runs into {:?}",
+            pair[0],
+            pair[1]
+        );
+    }
+}
+
+#[test]
+fn the_toolbar_has_room_for_its_labels_and_buttons_in_every_state() {
+    // The new 🛠 button took room from the labels beside it ("(pasted JSON)",
+    // "(merged from 2 files)", the size) once the "dock all" button joined it.
+    let mut h = Harness::new();
+    assert_toolbar_does_not_overlap(&h, "empty");
+
+    load(&mut h, r#"{"a":1}"#);
+    assert_toolbar_does_not_overlap(&h, "pasted");
+    h.app.dock.pop_out(Pane::Query, None, None);
+    h.settle();
+    assert_toolbar_does_not_overlap(&h, "pasted, a pane out");
+    assert!(
+        h.pop_buttons("🗖").len() == 1,
+        "the dock-all button is there"
+    );
+
+    let a = temp_json("bar_a.json", "[1]");
+    let b = temp_json("bar_b.json", "[2]");
+    let ctx = h.ctx.clone();
+    h.app.tools.add_files(&ctx, vec![a, b]);
+    h.settle();
+    let merge = center_of(&h, "Merge");
+    h.click(merge.x, merge.y);
+    wait_for(&mut h, "the preview", |h| is_drawn(h, "[\n  1,\n  2\n]"));
+    let open = center_of(&h, "Open in main window");
+    h.click(open.x, open.y);
+    assert!(is_drawn(&h, "(merged from 2 files)"), "{:?}", h.texts());
+    assert_toolbar_does_not_overlap(&h, "merged, a pane out");
+}
+
+#[test]
+fn a_cancelled_merge_is_not_shown_as_an_error() {
+    let mut h = Harness::new();
+    let a = temp_json("cancel_a.json", "[1]");
+    let ctx = h.ctx.clone();
+    h.app.tools.add_files(&ctx, vec![a]);
+    h.settle();
+    h.app.tools.merge_done(0, Err("cancelled".to_owned()));
+    h.settle();
+    assert!(is_drawn(&h, "Cancelled."), "{:?}", h.texts());
+    assert!(!is_drawn(&h, "cancelled"));
+}

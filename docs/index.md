@@ -86,3 +86,5 @@ is in [Architecture](architecture.md).
 - **[Query Engines](query-engines.md)** — jq, JSON Pointer, JSONPath, and
   JMESPath, picked via an auto-detecting query-bar toggle, plus the wider
   landscape surveyed for what to add next.
+- **[Tools](tools.md)** — the 🛠 window: merging several JSON files into one
+  with a jq filter, with formatting and diff/merge to come.

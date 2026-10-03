@@ -34,6 +34,14 @@ the start, not a separate format — the file is treated as one-or-more
 top-level values rather than assuming exactly one root, so a log-export-style
 file works the same way a single large document does.
 
+Several files can also be combined into one document: the Tools window's
+**Merge JSON** (see [Tools](tools.md)) reads them on the worker thread, runs a
+jq filter over them with the same embedded engine (`jq -s` style: the files
+slurped into one array), and hands the result to the app as an in-memory
+document (`Document::from_value`, `DocumentSource::Merged`). It parses every
+file up front, so it is capped at 128 MB of input in total and is separate from
+the memory-mapped path above.
+
 ## 3. Query engines
 
 `jsonquery_query::QueryEngine` is the trait every dialect implements —
@@ -182,4 +190,7 @@ is solid for small-to-medium files but means a multi-gigabyte document pays
 full parse time and memory at open. Scaling further would mean replacing
 that with a memory-mapped, lazily-resolved index (a sparse checkpoint table
 over the mapped bytes, so any row resolves in bounded time regardless of
-document size) sitting behind the same `QueryEngine` trait — not yet built.
+document size) sitting behind the same `QueryEngine` trait — not yet built. One thing to keep
+in mind when it is: a merged document (above) is several files, so its root is a
+list of per-file segments, each with its own mapping and index — a handle into
+a lazy document should say which file it is in, not assume one byte range.

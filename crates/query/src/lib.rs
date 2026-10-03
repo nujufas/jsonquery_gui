@@ -25,6 +25,7 @@ pub mod jmespath_engine;
 pub mod jq;
 pub mod json_pointer;
 pub mod jsonpath;
+pub mod merge;
 pub mod suggest;
 pub mod tutorial;
 
@@ -173,6 +174,19 @@ pub fn run_query(
     input: &Value,
     query_src: &str,
     cancelled: &AtomicBool,
+    on_event: impl FnMut(QueryEvent),
+) -> Result<usize, QueryError> {
+    run_query_with_vars(input, query_src, &[], cancelled, on_event)
+}
+
+/// Like [`run_query`], with named global variables the query can read —
+/// `("$files", value)` makes `$files` mean `value`. Every name must start with
+/// `$`. (The merge tool uses this to hand its filter the list of file names.)
+pub fn run_query_with_vars(
+    input: &Value,
+    query_src: &str,
+    vars: &[(&str, Value)],
+    cancelled: &AtomicBool,
     mut on_event: impl FnMut(QueryEvent),
 ) -> Result<usize, QueryError> {
     let program = File {
@@ -196,11 +210,15 @@ pub fn run_query(
 
     let filter = Compiler::default()
         .with_funs(funs)
+        .with_global_vars(vars.iter().map(|(name, _)| *name))
         .compile(modules)
         .map_err(|e| QueryError::Compile(format!("{e:?}")))?;
 
     let val_input = to_val(input);
-    let ctx = Ctx::<data::JustLut<Val>>::new(&filter.lut, Vars::new([]));
+    let ctx = Ctx::<data::JustLut<Val>>::new(
+        &filter.lut,
+        Vars::new(vars.iter().map(|(_, value)| to_val(value))),
+    );
     let out = filter.id.run((ctx, val_input)).map(unwrap_valr);
 
     let mut count = 0usize;

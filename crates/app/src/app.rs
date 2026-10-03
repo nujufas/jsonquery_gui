@@ -13,6 +13,7 @@ use serde_json::Value;
 use crate::dock::{Central, Dock, Pane};
 use crate::query_highlight;
 use crate::query_suggest::{apply_suggestion, QuerySuggest};
+use crate::tools::{self, Tools};
 use crate::tree_view::{RowAction, TreeView};
 use crate::tutorial::{LoadRequest, Tutorial};
 use crate::worker::{self, Command, CopyTarget, Event, SearchRoot};
@@ -62,6 +63,12 @@ const WINDOW_DROP_GRACE_SECS: f64 = 0.5;
 const TOOLBAR_TRAILING_RESERVE: f32 = 380.0;
 /// Extra width reserved while the "(N NDJSON records)" note is showing.
 const NDJSON_NOTE_WIDTH: f32 = 150.0;
+/// Extra width reserved for a merge's "(merged from N files)" label, which is
+/// longer than the "(pasted JSON)" the reserve was sized for.
+const MERGED_LABEL_EXTRA_WIDTH: f32 = 60.0;
+/// Extra width reserved for the "dock all" button, which is there only while a
+/// pane is in a window of its own.
+const DOCK_ALL_BUTTON_WIDTH: f32 = 30.0;
 
 pub struct App {
     cmd_tx: Sender<Command>,
@@ -112,6 +119,8 @@ pub struct App {
 
     /// The tutorial window (a second native window) and its state.
     tutorial: Tutorial,
+    /// The Tools window (also a second native window) — Merge JSON today.
+    tools: Tools,
     /// The (i) info window (also a second native window) — license, source,
     /// issues/contact, privacy and known limitations.
     info_window: InfoWindow,
@@ -361,6 +370,7 @@ impl App {
             last_resolved_engine: None,
             query_suggest: QuerySuggest::default(),
             tutorial: Tutorial::default(),
+            tools: Tools::default(),
             info_window: InfoWindow::default(),
             dock: Dock::default(),
             raise_window: None,
@@ -406,6 +416,59 @@ impl App {
         }
     }
 
+    /// A document finished loading (or a merge was opened): make it the one
+    /// shown, dropping everything that belonged to the previous one.
+    fn document_loaded(&mut self, doc: Arc<Document>) {
+        self.loading = false;
+        self.load_error = None;
+        self.save_error = None;
+        self.last_saved = None;
+        self.copy_error = None;
+        self.last_copied = false;
+        self.pending_clipboard = None;
+
+        // A newly loaded document invalidates any query that was
+        // running against the previous one.
+        if let Some(prev) = self.active_cancel.take() {
+            prev.store(true, Ordering::Relaxed);
+        }
+        self.query_running = false;
+        self.query_error = None;
+        self.results = Value::Array(Vec::new());
+        self.results_item_errors = 0;
+        self.last_item_error = None;
+        self.results_count_so_far = 0;
+        self.results_truncated = false;
+        self.results_cap = LIVE_PREVIEW_CAP;
+        self.pending_results_search = None;
+        self.pending_save_results = None;
+        self.last_query_elapsed = None;
+        self.last_resolved_engine = None;
+        self.results_tree.reset();
+        self.invalidate_results_text();
+
+        // Invalidates any in-flight "reveal in source" too — it
+        // would otherwise land on an unrelated new document.
+        self.find_gen += 1;
+        self.finding = false;
+        self.find_message = None;
+        self.invalidate_search();
+
+        // Pasted JSON and a merge have no address to name, so the field goes
+        // back to empty, ready for the next source.
+        self.source_input = match &doc.source {
+            DocumentSource::Pasted | DocumentSource::Merged(_) => String::new(),
+            source => source.label(),
+        };
+        self.doc = Some(doc);
+        self.source_tree.reset();
+        self.invalidate_source_text();
+
+        if std::mem::take(&mut self.run_after_load) {
+            self.run_query();
+        }
+    }
+
     fn drain_events(&mut self, ctx: &egui::Context) {
         while let Ok(event) = self.evt_rx.try_recv() {
             match event {
@@ -413,56 +476,7 @@ impl App {
                     self.loading = true;
                     self.load_error = None;
                 }
-                Event::Loaded(doc) => {
-                    self.loading = false;
-                    self.load_error = None;
-                    self.save_error = None;
-                    self.last_saved = None;
-                    self.copy_error = None;
-                    self.last_copied = false;
-                    self.pending_clipboard = None;
-
-                    // A newly loaded document invalidates any query that was
-                    // running against the previous one.
-                    if let Some(prev) = self.active_cancel.take() {
-                        prev.store(true, Ordering::Relaxed);
-                    }
-                    self.query_running = false;
-                    self.query_error = None;
-                    self.results = Value::Array(Vec::new());
-                    self.results_item_errors = 0;
-                    self.last_item_error = None;
-                    self.results_count_so_far = 0;
-                    self.results_truncated = false;
-                    self.results_cap = LIVE_PREVIEW_CAP;
-                    self.pending_results_search = None;
-                    self.pending_save_results = None;
-                    self.last_query_elapsed = None;
-                    self.last_resolved_engine = None;
-                    self.results_tree.reset();
-                    self.invalidate_results_text();
-
-                    // Invalidates any in-flight "reveal in source" too — it
-                    // would otherwise land on an unrelated new document.
-                    self.find_gen += 1;
-                    self.finding = false;
-                    self.find_message = None;
-                    self.invalidate_search();
-
-                    // Pasted JSON has no address to name, so the field goes
-                    // back to empty, ready for the next source.
-                    self.source_input = match &doc.source {
-                        DocumentSource::Pasted => String::new(),
-                        source => source.label(),
-                    };
-                    self.doc = Some(doc);
-                    self.source_tree.reset();
-                    self.invalidate_source_text();
-
-                    if std::mem::take(&mut self.run_after_load) {
-                        self.run_query();
-                    }
-                }
+                Event::Loaded(doc) => self.document_loaded(doc),
                 Event::LoadError(e) => {
                     self.loading = false;
                     self.load_error = Some(e);
@@ -470,12 +484,15 @@ impl App {
                 }
                 Event::Saved(path) => {
                     self.save_error = None;
+                    self.tools.saved(&path);
                     self.last_saved = Some(path);
                 }
                 Event::SaveError(e) => {
                     self.last_saved = None;
+                    self.tools.save_failed(&e);
                     self.save_error = Some(e);
                 }
+                Event::MergeDone { gen, result } => self.tools.merge_done(gen, result),
                 Event::CopyReady(text) => {
                     self.copy_error = None;
                     if text.len() <= CLIPBOARD_WARN_BYTES {
@@ -1292,17 +1309,58 @@ impl App {
         }
     }
 
+    /// Do what the Tools window asked for (see `tools::Request`).
+    fn apply_tools_request(&mut self, ctx: &egui::Context, request: tools::Request) {
+        match request {
+            tools::Request::Merge {
+                paths,
+                filter,
+                gen,
+                cancel,
+            } => {
+                let _ = self.cmd_tx.send(Command::Merge {
+                    paths,
+                    filter,
+                    gen,
+                    cancel,
+                });
+            }
+            tools::Request::Open(doc) => {
+                self.document_loaded(doc);
+                ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Focus);
+            }
+            tools::Request::Save { doc, path } => {
+                let _ = self.cmd_tx.send(Command::SaveFile {
+                    doc,
+                    node_path: None,
+                    path,
+                });
+            }
+        }
+    }
+
     /// Whether a file is being dragged over this window, opening one that is
-    /// dropped on it — unless `open_dropped` is off, for a pane in an embedded
+    /// dropped on it (several go to the Tools window's merge) — unless `open_dropped` is off, for a pane in an embedded
     /// window, which shares the main window's input and so its dropped file.
     fn handle_drag_and_drop(&mut self, ui: &egui::Ui, open_dropped: bool) -> bool {
-        let (hovering, dropped_path) = ui.ctx().input(|i| {
+        let (hovering, dropped) = ui.ctx().input(|i| {
             let hovering = !i.raw.hovered_files.is_empty();
-            let dropped = i.raw.dropped_files.first().map(|f| f.path().to_path_buf());
+            let dropped: Vec<PathBuf> = i
+                .raw
+                .dropped_files
+                .iter()
+                .map(|f| f.path().to_path_buf())
+                .collect();
             (hovering, dropped)
         });
-        if let Some(path) = dropped_path.filter(|_| open_dropped) {
-            self.open_file(path);
+        if open_dropped {
+            // One file is opened; several are not something to open, so they
+            // go to the Tools window to be merged.
+            match <[PathBuf; 1]>::try_from(dropped) {
+                Ok([path]) => self.open_file(path),
+                Err(several) if several.len() > 1 => self.tools.add_files(ui.ctx(), several),
+                Err(_) => {}
+            }
         }
         hovering
     }
@@ -1319,9 +1377,24 @@ impl App {
             // note, and the icon buttons pinned to the far right) rather
             // than a fixed width — a long URL should get to use the room a
             // short one leaves empty.
-            let ndjson_note = self.doc.as_ref().is_some_and(|d| d.top_level_values > 1);
-            let reserve =
-                TOOLBAR_TRAILING_RESERVE + if ndjson_note { NDJSON_NOTE_WIDTH } else { 0.0 };
+            let doc = self.doc.as_ref();
+            let ndjson_note = doc.is_some_and(|d| d.top_level_values > 1);
+            // A merge names itself in the toolbar ("(merged from 3 files)"),
+            // longer than "(pasted JSON)"; and either of those labels leaves
+            // too little room for the "dock all" button while a pane is out.
+            let merged = doc.is_some_and(|d| matches!(d.source, DocumentSource::Merged(_)));
+            let labelled =
+                merged || doc.is_some_and(|d| matches!(d.source, DocumentSource::Pasted));
+            let mut reserve = TOOLBAR_TRAILING_RESERVE;
+            if ndjson_note {
+                reserve += NDJSON_NOTE_WIDTH;
+            }
+            if merged {
+                reserve += MERGED_LABEL_EXTRA_WIDTH;
+            }
+            if labelled && self.dock.any_popped() {
+                reserve += DOCK_ALL_BUTTON_WIDTH;
+            }
             let field = ui.add(
                 egui::TextEdit::singleline(&mut self.source_input)
                     .desired_width((ui.available_width() - reserve).max(120.0))
@@ -1372,7 +1445,10 @@ impl App {
             ui.separator();
 
             if let Some(doc) = &self.doc {
-                if matches!(doc.source, DocumentSource::Pasted) {
+                if matches!(
+                    doc.source,
+                    DocumentSource::Pasted | DocumentSource::Merged(_)
+                ) {
                     ui.label(doc.source.label());
                 }
                 ui.weak(human_bytes(doc.byte_len));
@@ -1395,6 +1471,7 @@ impl App {
                     theme_toggle_button(ui);
                     autocomplete_toggle_button(ui, &mut self.query_suggest);
                     tutorial_button(ui, &mut self.tutorial);
+                    tools::button(ui, &mut self.tools);
                     // Only while something is popped out, so the toolbar is
                     // exactly what it always was the rest of the time.
                     if self.dock.any_popped() {
@@ -2666,6 +2743,9 @@ impl App {
         if let Some(request) = self.tutorial.show(&ctx) {
             self.apply_tutorial_request(request);
         }
+        if let Some(request) = self.tools.show(&ctx) {
+            self.apply_tools_request(&ctx, request);
+        }
     }
 
     /// Make each pane that is in a window of its own show there.
@@ -3022,6 +3102,7 @@ fn default_filename_for_source(source: &DocumentSource) -> String {
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| "data.json".to_string()),
         DocumentSource::Pasted => "data.json".to_string(),
+        DocumentSource::Merged(_) => "merged.json".to_string(),
         DocumentSource::Url(url) => url
             .split(['?', '#'])
             .next()
@@ -3087,7 +3168,7 @@ fn preview_text(value: &Value) -> String {
     }
 }
 
-fn human_bytes(bytes: u64) -> String {
+pub(crate) fn human_bytes(bytes: u64) -> String {
     const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
     let mut size = bytes as f64;
     let mut unit = 0;

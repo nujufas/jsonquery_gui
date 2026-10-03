@@ -12,11 +12,24 @@ use anyhow::Context;
 use crossbeam_channel::{Receiver, Sender};
 use jsonquery_core::engine::QueryEvent;
 use jsonquery_core::{Document, DocumentSource, NodePath, SourceMatches};
+use jsonquery_query::merge;
+use serde_json::Value;
+
+use crate::app::human_bytes;
 
 /// Cap on a URL download's response body, matching the "a few GB" v1 scale
 /// ceiling (Architecture §3) — protects against a malicious or misbehaving
 /// server exhausting disk/memory via an unbounded response.
 const MAX_DOWNLOAD_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+
+/// Cap on the combined size of the files one merge reads. A merge happens in
+/// memory — each file is parsed, then copied into jq's own values, and the
+/// result is built on top — so it is for files that are not very large; past
+/// this, one at a time (or a tool made for it) is the way.
+pub const MAX_MERGE_BYTES: u64 = 128 * 1024 * 1024;
+
+/// Nodes of a merge result shown as the Tools window's preview.
+const MERGE_PREVIEW_NODES: usize = 600;
 
 /// Which tree a `Command::Search` runs over — the loaded source document (via
 /// its `Arc<Document>`, so a huge document isn't cloned just to search it) or
@@ -122,6 +135,14 @@ pub enum Command {
         node_budget: usize,
         gen: u64,
     },
+    /// The Tools window's "Merge JSON": read `paths` (in this order) and run
+    /// the jq `filter` over them (`jsonquery_query::merge`). `cancel` stops it.
+    Merge {
+        paths: Vec<PathBuf>,
+        filter: String,
+        gen: u64,
+        cancel: Arc<AtomicBool>,
+    },
     Query {
         doc: Arc<Document>,
         text: String,
@@ -134,12 +155,37 @@ pub enum Command {
     },
 }
 
+/// What one input file turned out to be, for the Tools window's file list.
+pub struct MergedFile {
+    pub bytes: u64,
+    /// "array · 120 items", "object · 3 keys", "number" …
+    pub shape: String,
+}
+
+/// A finished merge: the merged document (ready to open or save), what went in
+/// and a bounded text preview of what came out.
+pub struct MergeOutcome {
+    pub doc: Arc<Document>,
+    pub files: Vec<MergedFile>,
+    /// How many outputs the filter produced (more than one are put in an array).
+    pub outputs: usize,
+    pub preview: String,
+    pub preview_truncated: bool,
+    /// Reading the files plus running the filter.
+    pub elapsed: Duration,
+}
+
 pub enum Event {
     Loading,
     Loaded(Arc<Document>),
     LoadError(String),
     Saved(PathBuf),
     SaveError(String),
+    /// `Command::Merge` finished (`gen` says which one).
+    MergeDone {
+        gen: u64,
+        result: Result<MergeOutcome, String>,
+    },
     /// `Command::CopyNode` finished serializing — the UI thread still has
     /// to decide whether to copy it straight to the clipboard or hold it
     /// for a size-warning confirmation first (see `CLIPBOARD_WARN_BYTES`).
@@ -306,6 +352,16 @@ pub fn spawn(cmd_rx: Receiver<Command>, evt_tx: Sender<Event>, wake: impl Fn() +
                         &wake,
                     );
                 }
+                Command::Merge {
+                    paths,
+                    filter,
+                    gen,
+                    cancel,
+                } => {
+                    let result =
+                        merge_files(&paths, &filter, &cancel).map_err(|e| format!("{e:#}"));
+                    send(&evt_tx, Event::MergeDone { gen, result }, &wake);
+                }
                 Command::Query {
                     doc,
                     text,
@@ -318,6 +374,88 @@ pub fn spawn(cmd_rx: Receiver<Command>, evt_tx: Sender<Event>, wake: impl Fn() +
             }
         }
     });
+}
+
+/// Read `paths` and run the merge `filter` over them. The files are read one
+/// after the other with the ordinary loader, so a file of several top-level
+/// values (NDJSON) counts as one array, as it does when opened on its own.
+fn merge_files(
+    paths: &[PathBuf],
+    filter: &str,
+    cancel: &AtomicBool,
+) -> anyhow::Result<MergeOutcome> {
+    let start = Instant::now();
+    let total = paths
+        .iter()
+        .map(|p| {
+            std::fs::metadata(p)
+                .map(|m| m.len())
+                .with_context(|| format!("reading {}", p.display()))
+        })
+        .sum::<anyhow::Result<u64>>()?;
+    if total > MAX_MERGE_BYTES {
+        anyhow::bail!(
+            "these files add up to {}, over the {} that can be merged — a merge happens in \
+             memory. Open them one at a time instead.",
+            human_bytes(total),
+            human_bytes(MAX_MERGE_BYTES)
+        );
+    }
+
+    let mut inputs = Vec::with_capacity(paths.len());
+    let mut names = Vec::with_capacity(paths.len());
+    let mut files = Vec::with_capacity(paths.len());
+    let mut read_time = Duration::ZERO;
+    for path in paths {
+        if cancel.load(Ordering::Relaxed) {
+            anyhow::bail!("cancelled");
+        }
+        let doc = jsonquery_core::load(path).with_context(|| path.display().to_string())?;
+        read_time += doc.parse_time;
+        files.push(MergedFile {
+            bytes: doc.byte_len,
+            shape: describe(&doc.root),
+        });
+        names.push(path.file_name().map_or_else(
+            || path.display().to_string(),
+            |n| n.to_string_lossy().into_owned(),
+        ));
+        // Only the value is kept: the file's mapping ends here.
+        let Document { root, .. } = doc;
+        inputs.push(root);
+    }
+
+    let merged = merge::merge(inputs, &names, filter, cancel)?;
+    let (preview, preview_truncated) =
+        jsonquery_core::pretty_print_bounded(&merged.value, MERGE_PREVIEW_NODES);
+    let doc = Document::from_value(
+        merged.value,
+        DocumentSource::Merged(paths.to_vec()),
+        total,
+        read_time,
+    );
+    Ok(MergeOutcome {
+        doc: Arc::new(doc),
+        files,
+        outputs: merged.outputs,
+        preview,
+        preview_truncated,
+        elapsed: start.elapsed(),
+    })
+}
+
+/// A few words on what `value` is, for the merge file list.
+pub(crate) fn describe(value: &Value) -> String {
+    let count =
+        |n: usize, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
+    match value {
+        Value::Array(a) => format!("array · {}", count(a.len(), "item", "items")),
+        Value::Object(o) => format!("object · {}", count(o.len(), "key", "keys")),
+        Value::String(_) => "string".to_owned(),
+        Value::Number(_) => "number".to_owned(),
+        Value::Bool(_) => "boolean".to_owned(),
+        Value::Null => "null".to_owned(),
+    }
 }
 
 /// Download `url`'s body into a temporary file, then parse it with the same
@@ -433,4 +571,101 @@ fn send(evt_tx: &Sender<Event>, event: Event, wake: &impl Fn()) {
     // send at that point is expected and safe to ignore.
     let _ = evt_tx.send(event);
     wake();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("jsonquery-worker-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn write(dir: &Path, name: &str, text: &str) -> PathBuf {
+        let path = dir.join(name);
+        std::fs::write(&path, text).unwrap();
+        path
+    }
+
+    #[test]
+    fn merges_files_in_the_order_given_and_describes_each() {
+        let dir = temp_dir("order");
+        let a = write(&dir, "a.json", "[1, 2]");
+        let b = write(&dir, "b.json", r#"{"k": 1}"#);
+        let outcome =
+            merge_files(&[b.clone(), a.clone()], "$files", &AtomicBool::new(false)).unwrap();
+        assert_eq!(outcome.doc.root, serde_json::json!(["b.json", "a.json"]));
+        let shapes: Vec<_> = outcome.files.iter().map(|f| f.shape.as_str()).collect();
+        assert_eq!(shapes, ["object · 1 key", "array · 2 items"]);
+        assert_eq!(outcome.doc.source.label(), "(merged from 2 files)");
+        assert_eq!(outcome.doc.byte_len, 6 + 8);
+    }
+
+    #[test]
+    fn a_file_that_is_not_json_is_named_in_the_error() {
+        let dir = temp_dir("bad");
+        let good = write(&dir, "good.json", "[1]");
+        let bad = write(&dir, "bad.json", "[1,");
+        let err = merge_files(&[good, bad.clone()], "add", &AtomicBool::new(false))
+            .err()
+            .expect("a truncated file fails");
+        let message = format!("{err:#}");
+        assert!(message.contains(&bad.display().to_string()), "{message}");
+    }
+
+    #[test]
+    fn a_missing_file_is_named_in_the_error() {
+        let missing = temp_dir("missing").join("nope.json");
+        let err = merge_files(
+            std::slice::from_ref(&missing),
+            "add",
+            &AtomicBool::new(false),
+        )
+        .err()
+        .expect("a missing file fails");
+        assert!(format!("{err:#}").contains(&missing.display().to_string()));
+    }
+
+    #[test]
+    fn more_than_the_limit_is_refused_before_reading_anything() {
+        let dir = temp_dir("big");
+        let path = dir.join("big.json");
+        // Sparse: nothing is written, but the file reports its length.
+        std::fs::File::create(&path)
+            .unwrap()
+            .set_len(MAX_MERGE_BYTES + 1)
+            .unwrap();
+        let err = merge_files(&[path], "add", &AtomicBool::new(false))
+            .err()
+            .expect("over the limit");
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("add up to") && message.contains("one at a time"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn a_filter_error_comes_back_as_text() {
+        let dir = temp_dir("filter");
+        let a = write(&dir, "a.json", "[1]");
+        let b = write(&dir, "b.json", r#"{"k": 1}"#);
+        let err = merge_files(&[a, b], "add", &AtomicBool::new(false))
+            .err()
+            .expect("an array and an object do not add");
+        assert!(format!("{err:#}").contains("cannot calculate"));
+    }
+
+    #[test]
+    fn a_cancelled_merge_stops_before_reading() {
+        let dir = temp_dir("cancel");
+        let a = write(&dir, "a.json", "[1]");
+        let err = merge_files(&[a], "add", &AtomicBool::new(true))
+            .err()
+            .expect("cancelled");
+        assert_eq!(format!("{err:#}"), "cancelled");
+    }
 }

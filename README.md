@@ -34,6 +34,13 @@ file (or paste JSON directly) and query it with **jq**, **JSON Pointer**,
   can edit and experiment. See [Tutorial](docs/tutorial.md).
 
   ![The tutorial window](docs/images/screenshot-tutorial.png)
+- **Merge JSON files** — the dim 🛠 icon next to the tutorial opens a Tools
+  window; **Merge JSON** combines several files into one document with a jq
+  filter, the way `jq -s` does. Drop the files on it (or on the main window),
+  or add them with a button; pick *Append arrays* (the default, jq's `add`),
+  *Deep-merge objects* and the like, or write your own filter, then open the
+  result in the main window or save it. For files that are not very large —
+  a merge happens in memory. See [Tools](docs/tools.md).
 - **Streamed, cancellable queries** — results appear as jq produces them, so
   `first(...)`/`limit(...)` genuinely stop early; starting a new query aborts
   whatever was still running.
@@ -63,9 +70,10 @@ file (or paste JSON directly) and query it with **jq**, **JSON Pointer**,
   expand a whole subtree at once.
 - **Save to file** — the whole source document, the whole result set, or a
   single node, independently.
-- **Load however's convenient** — drag-and-drop, a **Source** field that
-  takes a URL or a local path (type it or paste it, or browse with **…**),
-  or pasting JSON straight into the text area.
+- **Load however's convenient** — drag-and-drop (several files at once are
+  offered to **Merge JSON**), a **Source** field that takes a URL or a local
+  path (type it or paste it, or browse with **…**), or pasting JSON straight
+  into the text area.
 - **Resizable query box that scrolls** — drag the query panel's bottom edge to
   make it any height; a long query scrolls inside it (the cursor stays in
   view) instead of taking over the window.
@@ -88,8 +96,8 @@ file (or paste JSON directly) and query it with **jq**, **JSON Pointer**,
   [`winit`](https://github.com/rust-windowing/winit) (`eframe`'s windowing
   library), which only implements OS-level file drop on Windows, macOS, and
   X11 ([rust-windowing/winit#1881](https://github.com/rust-windowing/winit/issues/1881)).
-  The **Source** field (and its **…** file picker) and pasting both work fine
-  everywhere. Workaround: run under XWayland instead (if `DISPLAY` is set,
+  The **Source** field (and its **…** file picker), the Tools window's **Add
+  files…** button and pasting all work fine everywhere. Workaround: run under XWayland instead (if `DISPLAY` is set,
   it's available):
   ```sh
   WAYLAND_DISPLAY= cargo run --release -p jsonquery_gui

@@ -7,6 +7,7 @@ mod app;
 mod dock;
 mod query_highlight;
 mod query_suggest;
+mod tools;
 mod tree_view;
 mod tutorial;
 mod worker;

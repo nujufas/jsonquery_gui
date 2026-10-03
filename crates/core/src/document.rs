@@ -13,6 +13,9 @@ pub enum DocumentSource {
     /// Downloaded from a URL into a temporary file, which backs the mmap the
     /// same way an opened file would.
     Url(String),
+    /// Built by the Tools window's merge from these files, in this order. It
+    /// lives in memory only, until it is saved.
+    Merged(Vec<PathBuf>),
 }
 
 impl DocumentSource {
@@ -21,6 +24,10 @@ impl DocumentSource {
             DocumentSource::File(p) => p.display().to_string(),
             DocumentSource::Pasted => "(pasted JSON)".to_string(),
             DocumentSource::Url(url) => url.clone(),
+            DocumentSource::Merged(files) => match files.len() {
+                1 => "(merged from 1 file)".to_string(),
+                n => format!("(merged from {n} files)"),
+            },
         }
     }
 }
@@ -38,6 +45,27 @@ pub struct Document {
     /// Kept alive so future phases can resolve lazily straight from the
     /// mapped bytes instead of re-reading the file; unused for now beyond that.
     _mmap: Option<Mmap>,
+}
+
+impl Document {
+    /// A document whose value was built in memory (a merge of several files)
+    /// rather than parsed from one source. `byte_len` is the size of what it
+    /// was built from, and `parse_time` the time that took to read.
+    pub fn from_value(
+        root: Value,
+        source: DocumentSource,
+        byte_len: u64,
+        parse_time: Duration,
+    ) -> Self {
+        Self {
+            source,
+            byte_len,
+            parse_time,
+            root,
+            top_level_values: 1,
+            _mmap: None,
+        }
+    }
 }
 
 /// Load and fully parse a JSON file in one step (Phase 1: in-memory path).
@@ -121,5 +149,32 @@ fn parse_bytes(bytes: &[u8]) -> Result<(Value, usize)> {
             let count = values.len();
             Ok((Value::Array(values), count))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn a_built_document_says_where_it_came_from() {
+        let files = vec![PathBuf::from("a.json"), PathBuf::from("b.json")];
+        let doc = Document::from_value(
+            json!([1, 2]),
+            DocumentSource::Merged(files),
+            12,
+            Duration::ZERO,
+        );
+        assert_eq!(doc.source.label(), "(merged from 2 files)");
+        assert_eq!(doc.byte_len, 12);
+        assert_eq!(doc.top_level_values, 1);
+        assert_eq!(doc.root, json!([1, 2]));
+    }
+
+    #[test]
+    fn one_merged_file_is_not_plural() {
+        let source = DocumentSource::Merged(vec![PathBuf::from("a.json")]);
+        assert_eq!(source.label(), "(merged from 1 file)");
     }
 }
