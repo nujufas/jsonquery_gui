@@ -81,6 +81,35 @@ Built on `egui`/`eframe`. The window is a query bar pinned to the top, and
 two instances of the same custom tree widget below it — the **source tree**
 (the loaded document) and the **results tree** (the last query's output).
 
+The query bar is as tall as the user drags it, and the query box scrolls
+inside it. egui stores a resizable panel's size as the rect of its *content*,
+so a box that grew with a long query would set the panel's height too (and
+undo every drag back to it); the box is therefore a vertical scroll area that
+fills whatever room the panel has, with its border drawn fixed around it.
+
+Each of the three panes (`Query`, `Source`, `Results`) can also be popped out
+into a window of its own (`crates/app/src/dock.rs` holds the state and the
+layout decisions; `app.rs` draws). A popped-out pane is an egui *deferred
+viewport*: eframe redraws its window by itself and calls back into the app, which
+`Shared` keeps behind a lock (`Arc<Mutex<App>>`) so that the window's frame and
+the main window's frame both have plain `&mut App` access. It has to be deferred
+rather than immediate (drawn inside the main window's frame, as the tutorial and
+About windows are): a Wayland compositor sends no redraw callbacks to a window
+that is completely covered (GNOME does), so a pane maximized over the main window
+would otherwise stop responding together with the window under it. Hence a
+window's frame does what the main window's frame would have done for it — drains
+the worker's events, applies the dock changes it asked for — and a docked pane's
+window, which only the main window's next frame can end, minimizes itself if that
+frame does not come. Where there are no real windows (embedded viewports, and the
+headless layout tests) the pane is drawn as an immediate viewport instead. Two
+rules keep the drawing sound: a pane's widget ids come from the pane
+(`UiBuilder::id`), not from the panel or window around it, so scroll positions
+and text cursors survive a move; and because those ids are global, a pane must be
+drawn in exactly one place per frame — so dock changes requested during a frame
+are applied after it, never in the middle of it. Every window handles its own
+keyboard input (`handle_shortcuts`), and a dialog is drawn in the window of the
+pane it belongs to.
+
 Expand/collapse state is *not* stored on the tree itself — it lives in a
 side map keyed by node path. Every frame, the widget reads the current
 scroll offset and viewport height, computes which row indices are visible

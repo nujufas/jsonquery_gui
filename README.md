@@ -66,6 +66,17 @@ file (or paste JSON directly) and query it with **jq**, **JSON Pointer**,
 - **Load however's convenient** — drag-and-drop, a **Source** field that
   takes a URL or a local path (type it or paste it, or browse with **…**),
   or pasting JSON straight into the text area.
+- **Resizable query box that scrolls** — drag the query panel's bottom edge to
+  make it any height; a long query scrolls inside it (the cursor stays in
+  view) instead of taking over the window.
+- **Pop-out panes** — the Query, Source and Results panes each have a small
+  **⬈** icon in the top right corner of their header that opens the pane in a
+  window of its own — a big query on a second monitor, or the results beside a
+  full-height source. The main window gives the room to whatever is left. The
+  **⬋** icon in that window, or just closing it, docks the pane back, and a
+  **🗖** button in the toolbar (there while anything is out) brings every
+  window back at once.
+  Shortcuts and search work in each window.
 - **Light and dark themes**, switchable from the toolbar.
 - **Keyboard shortcuts** — `Ctrl+Enter` run/apply, `Ctrl+F` search,
   `Ctrl+S` save (both scoped to whichever panel you last clicked), `F1`
@@ -83,6 +94,10 @@ file (or paste JSON directly) and query it with **jq**, **JSON Pointer**,
   ```sh
   WAYLAND_DISPLAY= cargo run --release -p jsonquery_gui
   ```
+- **Pop-out windows open wherever the compositor puts them on native
+  Wayland** — `winit` can neither set nor read a window's position there, so
+  a popped-out pane can't open over the spot it left or reopen where you
+  moved it. (Windows, macOS and X11 can; only X11 has been tried.)
 - Multi-gigabyte files are not yet backed by a memory-mapped, lazily-resolved
   index, so very large documents load fully into memory. See
   [Scaling beyond in-memory](docs/architecture.md#scaling-beyond-in-memory).

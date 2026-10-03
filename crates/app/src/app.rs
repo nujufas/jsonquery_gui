@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use crossbeam_channel::{Receiver, Sender};
@@ -10,6 +10,7 @@ use jsonquery_core::{
 };
 use serde_json::Value;
 
+use crate::dock::{Central, Dock, Pane};
 use crate::query_highlight;
 use crate::query_suggest::{apply_suggestion, QuerySuggest};
 use crate::tree_view::{RowAction, TreeView};
@@ -36,6 +37,24 @@ const TEXT_VIEW_NODE_BUDGET: usize = 20_000;
 /// file save there's no natural place to show progress or let it happen in
 /// the background.
 const CLIPBOARD_WARN_BYTES: usize = 5 * 1024 * 1024;
+
+/// Height the query panel starts at: its header row plus four rows of query
+/// text with the default fonts. The panel keeps whatever height the user drags
+/// it to from there; the query scrolls inside it instead of growing it. (The
+/// GUI tests' fixed coordinates for everything below the panel rely on this
+/// value — `layout_tests::the_default_layout_is_unchanged` pins it.)
+const QUERY_PANEL_DEFAULT_HEIGHT: f32 = 101.5;
+/// The panel can't be dragged shorter than this: the header and one row.
+const QUERY_PANEL_MIN_HEIGHT: f32 = 60.0;
+/// Inner margin of the query box — the one `TextEdit` uses by default.
+const QUERY_BOX_MARGIN: egui::Margin = egui::Margin::symmetric(4, 2);
+/// Side of the square a pane header's pop-out icon is clicked in.
+const POP_BUTTON_SIZE: f32 = 16.0;
+/// Font size of that icon: a notch under the body text, so it stays quiet.
+const POP_ICON_FONT_SIZE: f32 = 10.0;
+/// How long a window whose pane has been docked waits for the main window to
+/// drop it before it gets out of the way by itself, in seconds.
+const WINDOW_DROP_GRACE_SECS: f64 = 0.5;
 
 /// Width the toolbar keeps free to the right of its source field: the "…",
 /// "Load" and "Clear" buttons, the byte size, and the icon buttons pinned to
@@ -71,6 +90,9 @@ pub struct App {
     find_row: String,
 
     query_text: String,
+    /// The query box was just edited, so it must scroll to the cursor once
+    /// more on the next frame — see `App::query_text_edit`.
+    query_follow_cursor: bool,
     query_gen: u64,
     active_cancel: Option<Arc<AtomicBool>>,
     query_running: bool,
@@ -93,6 +115,12 @@ pub struct App {
     /// The (i) info window (also a second native window) — license, source,
     /// issues/contact, privacy and known limitations.
     info_window: InfoWindow,
+    /// Which of the Query, Source and Results panes are in windows of their
+    /// own (`dock.rs`).
+    dock: Dock,
+    /// A window to bring to the front on the next frame (a revealed row, or a
+    /// Find dialog, belongs to a window other than the one that asked).
+    raise_window: Option<egui::ViewportId>,
     /// The tutorial's "▶ Try it" replaced the source document and wants the
     /// query run as soon as that new document has loaded (loading is
     /// asynchronous, and finishing it cancels any query already running).
@@ -244,7 +272,7 @@ enum ViewMode {
 
 /// The Source or Results panel — which tree a search/save action targets,
 /// and (via `App::focused_panel`) which one last had a click in it.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PanelKind {
     Source,
     Results,
@@ -256,6 +284,22 @@ impl PanelKind {
             PanelKind::Source => "Source",
             PanelKind::Results => "Results",
         }
+    }
+
+    fn pane(self) -> Pane {
+        match self {
+            PanelKind::Source => Pane::Source,
+            PanelKind::Results => Pane::Results,
+        }
+    }
+}
+
+/// The tree a pane shows, if it shows one — the query pane has none.
+fn panel_kind(pane: Pane) -> Option<PanelKind> {
+    match pane {
+        Pane::Query => None,
+        Pane::Source => Some(PanelKind::Source),
+        Pane::Results => Some(PanelKind::Results),
     }
 }
 
@@ -269,15 +313,28 @@ struct SearchMatch {
 
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        Self::with_context(&cc.egui_ctx)
+    }
+
+    /// The whole app needs from eframe is the `egui::Context`, so this is
+    /// what lets the layout tests run it without a window.
+    fn with_context(egui_ctx: &egui::Context) -> Self {
         let (cmd_tx, cmd_rx) = crossbeam_channel::unbounded();
         let (evt_tx, evt_rx) = crossbeam_channel::unbounded();
 
         // Deterministic starting theme (rather than following the system,
         // which would make the light/dark toggle's initial state a surprise).
-        cc.egui_ctx.set_theme(egui::ThemePreference::Dark);
+        egui_ctx.set_theme(egui::ThemePreference::Dark);
 
-        let ctx = cc.egui_ctx.clone();
-        worker::spawn(cmd_rx, evt_tx, move || ctx.request_repaint());
+        let ctx = egui_ctx.clone();
+        worker::spawn(cmd_rx, evt_tx, move || {
+            ctx.request_repaint();
+            // A pane in a window of its own is redrawn on its own schedule
+            // (see `show_popped_panes`), so it has to be woken too.
+            for pane in Pane::ALL {
+                ctx.request_repaint_of(pane.viewport_id());
+            }
+        });
 
         Self {
             cmd_tx,
@@ -295,6 +352,7 @@ impl App {
             find_message: None,
             find_row: String::new(),
             query_text: String::new(),
+            query_follow_cursor: false,
             query_gen: 0,
             active_cancel: None,
             query_running: false,
@@ -304,6 +362,8 @@ impl App {
             query_suggest: QuerySuggest::default(),
             tutorial: Tutorial::default(),
             info_window: InfoWindow::default(),
+            dock: Dock::default(),
+            raise_window: None,
             run_after_load: false,
             results: Value::Array(Vec::new()),
             results_item_errors: 0,
@@ -450,8 +510,7 @@ impl App {
                     // approximate, so it's only listed — it shouldn't yank
                     // the Source tree somewhere on a guess.
                     if searched_for.is_none() {
-                        self.source_tree.reveal(best);
-                        self.source_view = ViewMode::Tree;
+                        self.reveal_in_tree(PanelKind::Source, best);
                     }
                     if searched_for.is_some() || paths.len() > 1 {
                         self.show_find_list(paths, searched_for);
@@ -806,25 +865,55 @@ impl App {
     /// Source or Results panel that last saw a click — the same way a
     /// desktop app's menu-bar Find/Save act on whichever document window is
     /// frontmost, rather than requiring a dedicated shortcut per panel.
-    fn handle_shortcuts(&mut self, ctx: &egui::Context) {
+    ///
+    /// Every window of the app has its own input, so each runs this for the
+    /// keys pressed in it. A pane's own window says which `pane_window` it
+    /// is: there, Ctrl+F and Ctrl+S are plainly about the pane in front of
+    /// the user. The query pane's window (and the main window) have no tree
+    /// of their own and go by the last click.
+    ///
+    /// This runs every frame for every window, so it must not touch
+    /// `focused_panel` unless a key was actually pressed: a pane's window
+    /// claiming it every frame would overwrite a click made in the main window.
+    fn handle_shortcuts(&mut self, ctx: &egui::Context, pane_window: Option<PanelKind>) {
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::F1)) {
             self.tutorial.open_or_focus(ctx);
         }
 
+        // Ctrl+Enter runs the query from any window, not just the one the
+        // query box is in. Read, not consumed: the editable Source text view
+        // takes the same keys as its "Apply".
+        let run = ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Enter));
+        if run && self.doc.is_some() && !self.query_running {
+            self.run_query();
+        }
+
         let find = ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::F));
         if find {
-            match self.focused_panel {
+            let panel = pane_window.unwrap_or(self.focused_panel);
+            self.focused_panel = panel;
+            match panel {
                 PanelKind::Source if self.doc.is_some() => {
                     self.open_search_dialog(PanelKind::Source);
                 }
                 PanelKind::Results => self.open_search_dialog(PanelKind::Results),
                 PanelKind::Source => {}
             }
+            // The Find dialog is drawn in the window of the tree it searches:
+            // bring that window forward if the key was pressed in another one.
+            if self.show_search_dialog {
+                let host = self.viewport_of(self.search_target);
+                if host != ctx.viewport_id() {
+                    self.raise_window = Some(host);
+                }
+            }
         }
 
         let save = ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::S));
         if save {
-            match self.focused_panel {
+            let panel = pane_window.unwrap_or(self.focused_panel);
+            self.focused_panel = panel;
+            match panel {
                 PanelKind::Source if self.doc.is_some() => self.save_source(),
                 PanelKind::Results if self.results.as_array().is_some_and(|a| !a.is_empty()) => {
                     self.save_results();
@@ -835,24 +924,47 @@ impl App {
     }
 
     /// Update `focused_panel` from a click this frame, so the next Ctrl+F or
-    /// Ctrl+S knows which panel to act on. `source_rect`/`results_rect` are
-    /// each panel's full on-screen area for this frame.
-    fn note_panel_click(
-        &mut self,
-        ctx: &egui::Context,
-        source_rect: egui::Rect,
-        results_rect: egui::Rect,
-    ) {
+    /// Ctrl+S knows which panel to act on. `rect` is the pane's full
+    /// on-screen area (in this window) this frame.
+    fn note_panel_click(&mut self, ctx: &egui::Context, panel: PanelKind, rect: egui::Rect) {
         if !ctx.input(|i| i.pointer.any_pressed()) {
             return;
         }
         let Some(pos) = ctx.input(|i| i.pointer.interact_pos()) else {
             return;
         };
-        if source_rect.contains(pos) {
-            self.focused_panel = PanelKind::Source;
-        } else if results_rect.contains(pos) {
-            self.focused_panel = PanelKind::Results;
+        if rect.contains(pos) {
+            self.focused_panel = panel;
+        }
+    }
+
+    /// The window `panel`'s tree is shown in: its own if it has been popped
+    /// out, the main window's otherwise.
+    fn viewport_of(&self, panel: PanelKind) -> egui::ViewportId {
+        let pane = panel.pane();
+        if self.dock.is_popped(pane) {
+            pane.viewport_id()
+        } else {
+            egui::ViewportId::ROOT
+        }
+    }
+
+    /// Bring the window `panel`'s tree is in to the front next frame — for
+    /// something that just happened in it (a row revealed) and may have been
+    /// asked for from another window.
+    fn raise_pane(&mut self, panel: PanelKind) {
+        self.raise_window = Some(self.viewport_of(panel));
+    }
+
+    /// The dialogs that belong to `viewport`: the Find dialog is drawn in the
+    /// window of the tree it searches, and the "copy this much?" warning in
+    /// the window of the tree last clicked — the one the copy was asked in.
+    fn dialogs(&mut self, ctx: &egui::Context, viewport: egui::ViewportId) {
+        if self.viewport_of(self.search_target) == viewport {
+            self.search_dialog(ctx);
+        }
+        if self.viewport_of(self.focused_panel) == viewport {
+            self.clipboard_warning_dialog(ctx);
         }
     }
 
@@ -967,6 +1079,7 @@ impl App {
     /// Expand, scroll to and highlight `path` in `target`'s tree, switching
     /// that panel to its Tree view if it was showing Text.
     fn reveal_in_tree(&mut self, target: PanelKind, path: NodePath) {
+        self.raise_pane(target);
         match target {
             PanelKind::Source => {
                 self.source_tree.reveal(path);
@@ -1179,13 +1292,16 @@ impl App {
         }
     }
 
-    fn handle_drag_and_drop(&mut self, ui: &egui::Ui) -> bool {
+    /// Whether a file is being dragged over this window, opening one that is
+    /// dropped on it — unless `open_dropped` is off, for a pane in an embedded
+    /// window, which shares the main window's input and so its dropped file.
+    fn handle_drag_and_drop(&mut self, ui: &egui::Ui, open_dropped: bool) -> bool {
         let (hovering, dropped_path) = ui.ctx().input(|i| {
             let hovering = !i.raw.hovered_files.is_empty();
             let dropped = i.raw.dropped_files.first().map(|f| f.path().to_path_buf());
             (hovering, dropped)
         });
-        if let Some(path) = dropped_path {
+        if let Some(path) = dropped_path.filter(|_| open_dropped) {
             self.open_file(path);
         }
         hovering
@@ -1279,6 +1395,11 @@ impl App {
                     theme_toggle_button(ui);
                     autocomplete_toggle_button(ui, &mut self.query_suggest);
                     tutorial_button(ui, &mut self.tutorial);
+                    // Only while something is popped out, so the toolbar is
+                    // exactly what it always was the rest of the time.
+                    if self.dock.any_popped() {
+                        dock_all_button(ui, &mut self.dock);
+                    }
                 },
             );
         });
@@ -1608,16 +1729,17 @@ impl App {
                     self.cancel_query();
                 }
             } else {
+                // (Ctrl+Enter is `handle_shortcuts`', so it works in every window.)
                 let clicked = ui
                     .add_enabled(self.doc.is_some(), egui::Button::new("Run  (Ctrl+Enter)"))
                     .clicked();
-                let shortcut = ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Enter));
-                if (clicked || shortcut) && self.doc.is_some() {
+                if clicked && self.doc.is_some() {
                     self.run_query();
                 }
             }
 
-            // Engine picker, pinned to the query box's top right. None
+            // Engine picker, pinned to the query box's top right, just left
+            // of the pop-out icon that has the corner itself. None
             // selected (the default) means "auto" — `Kind::detect` picks a
             // dialect from the query text itself when the query runs.
             // `SelectableLabel` gives selected buttons a subtle tinted
@@ -1625,6 +1747,7 @@ impl App {
             // "small, subtly-highlighted" look the other toggle buttons
             // (theme, view mode) already use elsewhere in this bar.
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                self.pop_button(ui, Pane::Query);
                 for kind in jsonquery_query::Kind::ALL.into_iter().rev() {
                     let selected = self.query_engine == Some(kind);
                     let resp =
@@ -1637,22 +1760,19 @@ impl App {
                 ui.weak(egui::RichText::new("Engine:").small());
             });
         });
-        // Ties the box's minimum height to whatever room the (now resizable)
-        // "query_bar" panel above has for it this frame, so dragging the
-        // panel's bottom edge visibly grows/shrinks the box even when the
-        // query itself is short. `desired_rows` is still just a *minimum* —
-        // a query with more lines than fit still grows the box further, same
-        // as before. Wrapping this in a `ScrollArea` instead (so oversized
-        // queries would scroll rather than grow) was tried and reverted: the
-        // cursor's scroll-into-view request on every keystroke fights the
-        // panel's own content-based auto-sizing and the two feed back into
-        // each other, ballooning the panel to the full window height after
-        // typing as little as a second line.
-        let line_height = ui.text_style_height(&egui::TextStyle::Monospace)
-            + ui.spacing().extra_text_line_spacing;
-        let desired_rows = ((ui.available_height() / line_height).floor() as usize).max(1);
-        self.query_text_edit(ui, desired_rows);
-        ui.add_space(4.0);
+        // The box takes whatever room the panel has left under the header and
+        // scrolls inside it, so the panel's height is only ever what the user
+        // dragged it to. (egui stores a panel's size as the rect of its
+        // *content*, so a box that grew with a long query used to set the
+        // panel's height too — taking the whole window, and undoing every drag
+        // back to the query's full height.) The bottom margin is the gap the
+        // box has always had to the panel's edge.
+        egui::Frame::NONE
+            .inner_margin(egui::Margin {
+                bottom: (ui.spacing().item_spacing.y + 4.0).round() as i8,
+                ..egui::Margin::ZERO
+            })
+            .show(ui, |ui| self.query_text_edit(ui));
     }
 
     /// The query box itself, plus its autocomplete popup
@@ -1664,7 +1784,7 @@ impl App {
     /// keyboard-driven accept splices `self.query_text` and repositions the
     /// widget's persisted cursor state a frame "early", ahead of `show`,
     /// rather than after it the way the popup's mouse-click handling does.
-    fn query_text_edit(&mut self, ui: &mut egui::Ui, desired_rows: usize) {
+    fn query_text_edit(&mut self, ui: &mut egui::Ui) {
         let id = egui::Id::new("query_text_edit_box");
 
         if let Some(idx) = self.query_suggest.intercept_keys(ui.ctx(), id) {
@@ -1683,18 +1803,86 @@ impl App {
             query_highlight::galley(ui, engine, text.as_str(), wrap_width)
         };
 
-        let output = egui::TextEdit::multiline(&mut self.query_text)
-            .id(id)
-            .desired_rows(desired_rows)
-            .desired_width(f32::INFINITY)
-            .code_editor()
-            .layouter(&mut layouter)
-            .hint_text(
-                "e.g. .[] | select(.age > 21) | .name\n\
-                 (auto-detects jq / JSON Pointer / JSONPath / JMESPath — \
-                 or pick one at top right)",
-            )
-            .show(ui);
+        // The `TextEdit` sits in a vertical scroll area that fills the room
+        // the panel has left, so a long query scrolls (egui keeps the cursor
+        // in view as it moves). The box's border is painted here, fixed to
+        // that viewport — a `TextEdit`'s own frame would scroll away with the
+        // text. It is sized in whole rows, the remainder going into the bottom
+        // margin, so the editor — and the clickable area — fills the viewport.
+        let viewport_h = ui.available_height();
+        let line_height = ui.text_style_height(&egui::TextStyle::Monospace)
+            + ui.spacing().extra_text_line_spacing;
+        let rows = (((viewport_h - QUERY_BOX_MARGIN.sum().y) / line_height + 1e-3).floor()
+            as usize)
+            .max(1);
+        let leftover = viewport_h - (rows as f32 * line_height + QUERY_BOX_MARGIN.sum().y);
+        let margin = egui::Margin {
+            bottom: QUERY_BOX_MARGIN.bottom + leftover.clamp(0.0, 100.0).floor() as i8,
+            ..QUERY_BOX_MARGIN
+        };
+        let frame_slot = ui.painter().add(egui::Shape::Noop);
+        let scroll = egui::ScrollArea::vertical()
+            .id_salt("query_scroll")
+            .auto_shrink([false, false])
+            // Scrolling content would otherwise keep the area at least 64px
+            // tall, so a long query couldn't be dragged below that.
+            .min_scrolled_height(line_height)
+            .show(ui, |ui| {
+                let output = egui::TextEdit::multiline(&mut self.query_text)
+                    .id(id)
+                    .desired_rows(rows)
+                    .desired_width(f32::INFINITY)
+                    .code_editor()
+                    .frame(egui::Frame::NONE.inner_margin(margin))
+                    .layouter(&mut layouter)
+                    .hint_text(
+                        "e.g. .[] | select(.age > 21) | .name\n\
+                         (auto-detects jq / JSON Pointer / JSONPath / JMESPath — \
+                         or pick one at top right)",
+                    )
+                    .show(ui);
+                // `TextEdit` scrolls to its cursor the frame it is edited, but
+                // by then the scroll area still has the old, shorter content:
+                // typing grows it a line at a time and gets away with that, a
+                // paste of many lines doesn't — the cursor is left far below
+                // the view. So once more on the following frame, when the
+                // content has its new height.
+                if std::mem::take(&mut self.query_follow_cursor) {
+                    if let Some(range) = output.cursor_range {
+                        let caret = output
+                            .galley
+                            .pos_from_cursor(range.primary)
+                            .translate(output.galley_pos.to_vec2());
+                        ui.scroll_to_rect(caret, None);
+                    }
+                }
+                if output.response.changed() {
+                    self.query_follow_cursor = true;
+                    ui.ctx().request_repaint();
+                }
+                output
+            });
+        let output = scroll.inner;
+        let box_rect = scroll.inner_rect;
+        {
+            // What `TextEdit` paints for its own frame (hover/focus included).
+            let visuals = ui.style().interact(&output.response);
+            let stroke = if output.response.has_focus() {
+                ui.visuals().selection.stroke
+            } else {
+                visuals.bg_stroke
+            };
+            ui.painter().set(
+                frame_slot,
+                egui::epaint::RectShape::new(
+                    box_rect.expand(visuals.expansion),
+                    visuals.corner_radius,
+                    ui.visuals().text_edit_bg_color(),
+                    stroke,
+                    egui::StrokeKind::Inside,
+                ),
+            );
+        }
 
         // Captured *before* the focus check below: clicking anywhere on the
         // popup itself (a separate `egui::Area`, outside the `TextEdit`'s
@@ -1757,7 +1945,7 @@ impl App {
             let force_resize = self.query_suggest.popup_sized_for_rows != Some(row_count);
             self.query_suggest.popup_sized_for_rows = Some(row_count);
 
-            let anchor = output.response.rect.left_bottom();
+            let anchor = box_rect.left_bottom();
             let mut clicked = None;
             let mut expand_clicked = false;
             egui::Area::new(id.with("suggest_popup"))
@@ -1997,11 +2185,12 @@ impl App {
             ui.selectable_value(&mut self.results_view, ViewMode::Text, "Text");
 
             // Pinned to the right edge of the header, mirroring the Source
-            // panel's "Save…".
+            // panel's "Save…" (and its pop-out icon in the corner).
             ui.allocate_ui_with_layout(
                 egui::vec2(ui.available_width(), ui.spacing().interact_size.y),
                 egui::Layout::right_to_left(egui::Align::Center),
                 |ui| {
+                    self.pop_button(ui, Pane::Results);
                     if ui
                         .add_enabled(has_results, egui::Button::new("Save…"))
                         .clicked()
@@ -2366,22 +2555,63 @@ fn info_button(ui: &mut egui::Ui, info: &mut InfoWindow) {
     }
 }
 
-impl eframe::App for App {
+/// The app as eframe runs it: behind a lock, so that the windows panes are
+/// popped out into can reach it too. eframe redraws such a window by itself,
+/// and — unlike the main window's frame — that has to go on while the main
+/// window is hidden: a compositor sends no redraw callbacks to a window that
+/// is completely covered (GNOME does), so a pane maximized over the main
+/// window would otherwise stop responding altogether.
+pub struct Shared(Arc<Mutex<App>>);
+
+impl Shared {
+    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        Self(Arc::new(Mutex::new(App::new(cc))))
+    }
+}
+
+impl eframe::App for Shared {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        self.drain_events(ui.ctx());
-        let hovering_drop = self.handle_drag_and_drop(ui);
+        lock(&self.0).show_with(ui, Some(&self.0));
+    }
+}
+
+/// The app, from behind its lock. (A panic in one window's frame must not make
+/// every other frame panic too.)
+fn lock(app: &Mutex<App>) -> MutexGuard<'_, App> {
+    app.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+impl App {
+    /// One frame of the main window, with nothing to share: popped-out panes
+    /// are drawn inside it (as embedded windows, where there are no real ones).
+    #[cfg(test)]
+    fn show(&mut self, ui: &mut egui::Ui) {
+        self.show_with(ui, None);
+    }
+
+    /// One frame of the main window. `shared` is the app behind its lock
+    /// (`Shared`), which the windows of popped-out panes are given.
+    fn show_with(&mut self, ui: &mut egui::Ui, shared: Option<&Arc<Mutex<App>>>) {
+        let ctx = ui.ctx().clone();
+        self.drain_events(&ctx);
+        let hovering_drop = self.handle_drag_and_drop(ui, true);
         // Shortcuts first, so Ctrl+F's dialog is drawn (and focused) in the
         // frame it was pressed rather than the one after.
-        self.handle_shortcuts(ui.ctx());
-        self.search_dialog(ui.ctx());
-        self.clipboard_warning_dialog(ui.ctx());
+        self.handle_shortcuts(&ctx, None);
+        self.dialogs(&ctx, egui::ViewportId::ROOT);
+        if let Some(window) = self.raise_window.take() {
+            ctx.send_viewport_cmd_to(window, egui::ViewportCommand::Focus);
+        }
 
         egui::Panel::top("toolbar").show(ui, |ui| self.toolbar(ui));
-        egui::Panel::top("query_bar")
-            .resizable(true)
-            .default_size(100.0)
-            .min_size(60.0)
-            .show(ui, |ui| self.query_bar(ui));
+        if !self.dock.is_popped(Pane::Query) {
+            let query = egui::Panel::top("query_bar")
+                .resizable(true)
+                .default_size(QUERY_PANEL_DEFAULT_HEIGHT)
+                .min_size(QUERY_PANEL_MIN_HEIGHT)
+                .show(ui, |ui| self.query_pane(ui));
+            self.dock.note_docked(Pane::Query, query.response.rect);
+        }
         egui::Panel::bottom("status_bar").show(ui, |ui| self.status_bar(ui));
         if self.hit_list.is_some() {
             egui::Panel::bottom("search_results_panel")
@@ -2390,76 +2620,351 @@ impl eframe::App for App {
                 .show(ui, |ui| self.hit_list_panel(ui));
         }
 
-        // Matches `CentralPanel`'s inner margin (`Frame::central_panel` uses
-        // `Margin::same(8)`) so the "Source" and "Results" headers — and
-        // everything below them — line up; `Panel`'s own default
-        // (`Margin::symmetric(8, 2)`) is 6px shorter on top/bottom.
-        let source_frame =
-            egui::Frame::side_top_panel(ui.style()).inner_margin(egui::Margin::same(8));
+        // Whichever of Source and Results are still docked share what is left;
+        // one that has been popped out gives its room to the other.
+        match self.dock.central() {
+            Central::Split => {
+                // Matches `CentralPanel`'s inner margin (`Frame::central_panel`
+                // uses `Margin::same(8)`) so the "Source" and "Results"
+                // headers — and everything below them — line up; `Panel`'s own
+                // default (`Margin::symmetric(8, 2)`) is 6px shorter on
+                // top/bottom.
+                let source_frame =
+                    egui::Frame::side_top_panel(ui.style()).inner_margin(egui::Margin::same(8));
+                let source = egui::Panel::left("source_panel")
+                    .resizable(true)
+                    .default_size(ui.available_width() * 0.5)
+                    .frame(source_frame)
+                    .show(ui, |ui| self.source_pane(ui, hovering_drop));
+                let results = egui::CentralPanel::default().show(ui, |ui| self.results_pane(ui));
+                self.dock.note_docked(Pane::Source, source.response.rect);
+                self.dock.note_docked(Pane::Results, results.response.rect);
+                self.note_panel_click(&ctx, PanelKind::Source, source.response.rect);
+                self.note_panel_click(&ctx, PanelKind::Results, results.response.rect);
+            }
+            Central::SourceOnly => {
+                let source = egui::CentralPanel::default()
+                    .show(ui, |ui| self.source_pane(ui, hovering_drop));
+                self.dock.note_docked(Pane::Source, source.response.rect);
+                self.note_panel_click(&ctx, PanelKind::Source, source.response.rect);
+            }
+            Central::ResultsOnly => {
+                let results = egui::CentralPanel::default().show(ui, |ui| self.results_pane(ui));
+                self.dock.note_docked(Pane::Results, results.response.rect);
+                self.note_panel_click(&ctx, PanelKind::Results, results.response.rect);
+            }
+            Central::Empty => {
+                egui::CentralPanel::default().show(ui, |ui| self.nothing_docked_note(ui));
+            }
+        }
 
-        let source_resp = egui::Panel::left("source_panel")
-            .resizable(true)
-            .default_size(ui.available_width() * 0.5)
-            .frame(source_frame)
-            .show(ui, |ui| match self.doc.clone() {
-                Some(doc) => {
-                    ui.horizontal(|ui| {
-                        ui.heading("Source");
-                        ui.add_space(12.0);
-                        ui.selectable_value(&mut self.source_view, ViewMode::Tree, "Tree");
-                        ui.selectable_value(&mut self.source_view, ViewMode::Text, "Text");
+        self.show_popped_panes(&ctx, shared);
+        // Only now, so that every pane was drawn in one place this frame.
+        self.dock.apply_requests();
+        self.info_window.show(&ctx);
 
-                        // Pinned to the right edge of the header, mirroring
-                        // the toolbar's theme toggle.
-                        ui.allocate_ui_with_layout(
-                            egui::vec2(ui.available_width(), ui.spacing().interact_size.y),
-                            egui::Layout::right_to_left(egui::Align::Center),
-                            |ui| {
-                                if ui.button("Save…").clicked() {
-                                    self.save_source();
-                                }
-                            },
-                        );
-                    });
-                    ui.separator();
-                    match self.source_view {
-                        ViewMode::Tree => {
-                            if let Some(action) =
-                                self.source_tree.ui(ui, "source_tree", &doc.root, false)
-                            {
-                                match action {
-                                    RowAction::Save(node_path) => self.save_source_node(node_path),
-                                    RowAction::Copy(node_path) => self.copy_source_node(node_path),
-                                    RowAction::OpenSearch => {
-                                        self.open_search_dialog(PanelKind::Source)
-                                    }
-                                    RowAction::FindInSource(_) => {}
-                                }
-                            }
-                        }
-                        ViewMode::Text => self.source_text_view(ui, &doc),
-                    }
-                }
-                None => {
-                    ui.heading("Source");
-                    ui.separator();
-                    self.paste_area(ui, hovering_drop);
-                }
-            });
-
-        let results_resp = egui::CentralPanel::default().show(ui, |ui| self.results_panel(ui));
-
-        self.note_panel_click(
-            ui.ctx(),
-            source_resp.response.rect,
-            results_resp.response.rect,
-        );
-
-        self.info_window.show(ui.ctx());
-
-        if let Some(request) = self.tutorial.show(ui.ctx()) {
+        if let Some(request) = self.tutorial.show(&ctx) {
             self.apply_tutorial_request(request);
         }
+    }
+
+    /// Make each pane that is in a window of its own show there.
+    ///
+    /// With real windows each is a *deferred* viewport: eframe redraws it by
+    /// itself and calls back into the app through its lock (`Shared`), so it
+    /// goes on working while the main window is not being redrawn — which is
+    /// the case once the main window is hidden. Without real windows
+    /// (embedded; the layout tests) it is an immediate viewport, drawn inside
+    /// the main window's frame with the same `&mut self` the docked panes
+    /// have. Either way a window the user closes docks its pane back (there
+    /// is nowhere else for it to go).
+    fn show_popped_panes(&mut self, ctx: &egui::Context, shared: Option<&Arc<Mutex<App>>>) {
+        let shared = shared.filter(|_| !ctx.embed_viewports());
+        for pane in Pane::ALL {
+            if !self.dock.is_popped(pane) {
+                continue;
+            }
+            let builder = self.dock.window_builder(pane);
+            if let Some(shared) = shared {
+                let shared = Arc::clone(shared);
+                ctx.show_viewport_deferred(pane.viewport_id(), builder, move |ui, _class| {
+                    lock(&shared).popped_window_frame(ui, pane);
+                });
+                // That window is redrawn on its own, so say that this frame
+                // may have changed what it shows (the theme, the results).
+                ctx.request_repaint_of(pane.viewport_id());
+                continue;
+            }
+            let mut close = false;
+            ctx.show_viewport_immediate(pane.viewport_id(), builder, |ui, class| {
+                // An embedded window (no native windows on this backend) is
+                // drawn inside the main window and shares its input.
+                let native = class != egui::ViewportClass::EmbeddedWindow;
+                if native {
+                    close = ui.ctx().input(|i| i.viewport().close_requested());
+                    let info = ui.ctx().input(|i| i.viewport().clone());
+                    self.dock.note_window(pane, &info);
+                }
+                self.popped_pane_ui(ui, pane, native);
+            });
+            if close {
+                self.dock.request_dock(pane);
+            }
+        }
+    }
+
+    /// One frame of a pane's window, redrawn by eframe on its own (see
+    /// `show_popped_panes`). It does what the main window's frame would have
+    /// done for it, since that frame doesn't happen while the main window is
+    /// hidden.
+    fn popped_window_frame(&mut self, ui: &mut egui::Ui, pane: Pane) {
+        let ctx = ui.ctx().clone();
+        self.drain_events(&ctx);
+        if !self.dock.is_popped(pane) {
+            self.wait_to_be_dropped(ui, pane);
+            return;
+        }
+
+        let (info, clicked) = ctx.input(|i| (i.viewport().clone(), i.pointer.any_click()));
+        self.dock.note_window(pane, &info);
+        if info.close_requested() {
+            self.dock.request_dock(pane);
+        }
+        self.popped_pane_ui(ui, pane, true);
+        // Nothing else will apply what this frame asked for.
+        self.dock.apply_requests();
+        if let Some(window) = self.raise_window.take() {
+            ctx.send_viewport_cmd_to(window, egui::ViewportCommand::Focus);
+        }
+
+        if self.dock.is_popped(pane) {
+            if clicked {
+                // What was done here may show in the main window (a row
+                // revealed in its tree, a status message). Should that window
+                // be hidden, the request stays open and eframe polls until
+                // it is met; a frame of this window soon after ends the
+                // polling.
+                ctx.request_repaint_of(egui::ViewportId::ROOT);
+                ctx.request_repaint_after(Duration::from_millis(150));
+            }
+            return;
+        }
+        // Docked from here. Only the main window's frame can end this
+        // window; if the window covers the main window, uncover it.
+        if info.fullscreen == Some(true) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+        }
+        if info.maximized == Some(true) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(false));
+        }
+        ctx.request_repaint_of(egui::ViewportId::ROOT);
+        ctx.request_repaint();
+    }
+
+    /// The window of a pane that is back in the main window, until the main
+    /// window's next frame leaves it out and egui closes it. A main window
+    /// that is hidden has no frames, so after a moment the window gets out of
+    /// the way itself; the pane is already docked.
+    fn wait_to_be_dropped(&mut self, ui: &mut egui::Ui, pane: Pane) {
+        let ctx = ui.ctx().clone();
+        egui::CentralPanel::default().show(ui, |ui| {
+            ui.centered_and_justified(|ui| ui.weak("Back in the main window"));
+        });
+        ctx.request_repaint_of(egui::ViewportId::ROOT);
+        if self.dock.waited_to_leave(pane, ctx.input(|i| i.time)) > WINDOW_DROP_GRACE_SECS {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+        } else {
+            ctx.request_repaint_after(Duration::from_millis(100));
+        }
+    }
+
+    /// One frame of a popped-out pane's window.
+    fn popped_pane_ui(&mut self, ui: &mut egui::Ui, pane: Pane, native: bool) {
+        let ctx = ui.ctx().clone();
+        let hovering_drop = self.handle_drag_and_drop(ui, native);
+        if native {
+            self.handle_shortcuts(&ctx, panel_kind(pane));
+        }
+        // The same frames the panes have docked, so they look the same.
+        let rect = match pane {
+            Pane::Query => {
+                let frame = egui::Frame::side_top_panel(ui.style());
+                egui::CentralPanel::default()
+                    .frame(frame)
+                    .show(ui, |ui| self.query_pane(ui))
+                    .response
+                    .rect
+            }
+            Pane::Source => {
+                egui::CentralPanel::default()
+                    .show(ui, |ui| self.source_pane(ui, hovering_drop))
+                    .response
+                    .rect
+            }
+            Pane::Results => {
+                egui::CentralPanel::default()
+                    .show(ui, |ui| self.results_pane(ui))
+                    .response
+                    .rect
+            }
+        };
+        if let Some(panel) = panel_kind(pane) {
+            self.note_panel_click(&ctx, panel, rect);
+        }
+        self.dialogs(&ctx, pane.viewport_id());
+    }
+
+    /// What the main window shows in place of Source and Results while both
+    /// are in windows of their own.
+    fn nothing_docked_note(&mut self, ui: &mut egui::Ui) {
+        ui.vertical_centered(|ui| {
+            ui.add_space(40.0);
+            ui.heading("Source and Results are in their own windows");
+            ui.add_space(8.0);
+            if ui.button("Bring them back into this window").clicked() {
+                self.dock.request_dock_all();
+            }
+        });
+    }
+
+    /// The pane header's icon, in its top right corner: opens the pane in a
+    /// window of its own, or — in that window — docks it back. A small dim
+    /// glyph without a button's frame until the pointer is over it, so it stays
+    /// out of the way of the header's own controls.
+    fn pop_button(&mut self, ui: &mut egui::Ui, pane: Pane) {
+        let popped = self.dock.is_popped(pane);
+        let (icon, tip) = if popped {
+            (
+                "⬋",
+                format!("Pop {} back into the main window", pane.label()),
+            )
+        } else {
+            ("⬈", format!("Open {} in its own window", pane.label()))
+        };
+        let (rect, response) =
+            ui.allocate_exact_size(egui::Vec2::splat(POP_BUTTON_SIZE), egui::Sense::click());
+        response.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), &tip)
+        });
+        if ui.is_rect_visible(rect) {
+            let state = ui.style().interact(&response);
+            let (color, backdrop) = if response.hovered() || response.has_focus() {
+                (state.fg_stroke.color, Some(state.weak_bg_fill))
+            } else {
+                (ui.visuals().weak_text_color(), None)
+            };
+            if let Some(fill) = backdrop {
+                ui.painter().rect_filled(rect, state.corner_radius, fill);
+            }
+            ui.painter().text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                icon,
+                egui::FontId::proportional(POP_ICON_FONT_SIZE),
+                color,
+            );
+        }
+        if response.on_hover_text(tip).clicked() {
+            if popped {
+                self.dock.request_dock(pane);
+            } else {
+                let info = ui.ctx().input(|i| i.viewport().clone());
+                self.dock
+                    .request_pop_out(pane, info.inner_rect, info.monitor_size);
+            }
+        }
+    }
+
+    fn query_pane(&mut self, ui: &mut egui::Ui) {
+        pane_scope(ui, Pane::Query, |ui| self.query_bar(ui));
+    }
+
+    fn results_pane(&mut self, ui: &mut egui::Ui) {
+        pane_scope(ui, Pane::Results, |ui| self.results_panel(ui));
+    }
+
+    /// The Source pane: its Tree/Text header, and the document under it — or,
+    /// while nothing is loaded, the paste area.
+    fn source_pane(&mut self, ui: &mut egui::Ui, hovering_drop: bool) {
+        pane_scope(ui, Pane::Source, |ui| match self.doc.clone() {
+            Some(doc) => {
+                ui.horizontal(|ui| {
+                    ui.heading("Source");
+                    ui.add_space(12.0);
+                    ui.selectable_value(&mut self.source_view, ViewMode::Tree, "Tree");
+                    ui.selectable_value(&mut self.source_view, ViewMode::Text, "Text");
+
+                    // Pinned to the right edge of the header, mirroring
+                    // the toolbar's theme toggle — the pop-out icon in the
+                    // corner itself, "Save…" just left of it.
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(ui.available_width(), ui.spacing().interact_size.y),
+                        egui::Layout::right_to_left(egui::Align::Center),
+                        |ui| {
+                            self.pop_button(ui, Pane::Source);
+                            if ui.button("Save…").clicked() {
+                                self.save_source();
+                            }
+                        },
+                    );
+                });
+                ui.separator();
+                match self.source_view {
+                    ViewMode::Tree => {
+                        if let Some(action) =
+                            self.source_tree.ui(ui, "source_tree", &doc.root, false)
+                        {
+                            match action {
+                                RowAction::Save(node_path) => self.save_source_node(node_path),
+                                RowAction::Copy(node_path) => self.copy_source_node(node_path),
+                                RowAction::OpenSearch => self.open_search_dialog(PanelKind::Source),
+                                RowAction::FindInSource(_) => {}
+                            }
+                        }
+                    }
+                    ViewMode::Text => self.source_text_view(ui, &doc),
+                }
+            }
+            None => {
+                ui.horizontal(|ui| {
+                    ui.heading("Source");
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(ui.available_width(), ui.spacing().interact_size.y),
+                        egui::Layout::right_to_left(egui::Align::Center),
+                        |ui| self.pop_button(ui, Pane::Source),
+                    );
+                });
+                ui.separator();
+                self.paste_area(ui, hovering_drop);
+            }
+        });
+    }
+}
+
+/// Runs a pane's contents in a `Ui` whose id is the pane's own, not derived
+/// from whatever panel or window it happens to be in — so everything inside
+/// (scroll positions, the cursor in a text box) is still there when the pane
+/// is popped out or docked back.
+fn pane_scope<R>(
+    ui: &mut egui::Ui,
+    pane: Pane,
+    add_contents: impl FnOnce(&mut egui::Ui) -> R,
+) -> R {
+    let id = egui::Id::new(("jsonquery_pane", pane.label()));
+    ui.scope_builder(egui::UiBuilder::new().id(id), add_contents)
+        .inner
+}
+
+/// Small 🗖 button, shown only while a pane is in a window of its own: docks
+/// them all back. Closing a pane's window docks that one; this is for the
+/// window that got lost behind others, and the all-popped-out case.
+fn dock_all_button(ui: &mut egui::Ui, dock: &mut Dock) {
+    if ui
+        .button("🗖")
+        .on_hover_text("Bring the Query, Source and Results windows back into this window")
+        .clicked()
+    {
+        dock.request_dock_all();
     }
 }
 
@@ -2596,6 +3101,9 @@ fn human_bytes(bytes: u64) -> String {
         format!("{size:.1} {}", UNITS[unit])
     }
 }
+
+#[cfg(test)]
+mod layout_tests;
 
 #[cfg(test)]
 mod tests {

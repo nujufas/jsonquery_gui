@@ -4,6 +4,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod dock;
 mod query_highlight;
 mod query_suggest;
 mod tree_view;
@@ -16,7 +17,7 @@ mod worker;
 /// stick.
 const APP_ID: &str = "jsonquery_gui";
 
-/// The window icon, shared by the main window and the tutorial window.
+/// The window icon, shared by the main window and every other window it opens.
 fn app_icon() -> egui::IconData {
     eframe::icon_data::from_png_bytes(include_bytes!("../../../assets/icon.png"))
         .expect("bundled icon should be a valid PNG")
@@ -36,6 +37,6 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "jsonquery_gui",
         native_options,
-        Box::new(|cc| Ok(Box::new(app::App::new(cc)))),
+        Box::new(|cc| Ok(Box::new(app::Shared::new(cc)))),
     )
 }
