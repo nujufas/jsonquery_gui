@@ -7,7 +7,8 @@
 #
 # Defaults to dist/jsonquery_gui-<version>-x86_64.AppImage. Results, logs and
 # screenshots go to dist/appimage-smoke/. Everything runs in containers; nothing
-# touches the host's display.
+# touches the host's display. It also checks that the AppImage's update
+# information is in order, including the .zsync file that has to sit next to it.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -56,6 +57,40 @@ if [ -n "$floor" ] && [ "$(printf '%s\n%s\n' "$floor" "$GLIBC_FLOOR" | sort -V |
     ok "glibc floor is $floor (at most $GLIBC_FLOOR)"
 else
     bad "glibc floor is '${floor:-unknown}', above the binary's own $GLIBC_FLOOR"
+fi
+
+# Update information, read back the way the catalog does: the runtime prints the
+# AppImage's .upd_info section and exits without starting the app. Updaters then
+# look for the .zsync file named by its pattern on the release, so that has to
+# exist, describe this exact file, and match the pattern.
+upd="$("$APPIMAGE" --appimage-updateinformation 2>/dev/null | tr -d '\0' |
+    sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' || true)"
+# Print the value of header $2 of the .zsync file $1: "Key: value" lines up to
+# the first blank line, followed by binary block checksums.
+zsync_header() { LC_ALL=C sed -n "/^\$/q;s/^$2: //p" "$1"; }
+if [[ "$upd" != gh-releases-zsync\|* ]]; then
+    bad "no gh-releases-zsync update information is embedded (got '${upd:-nothing}')"
+else
+    ok "update information is embedded: $upd"
+    zsync="$APPIMAGE.zsync"
+    if [ ! -f "$zsync" ]; then
+        bad "$(basename "$zsync") is missing next to the AppImage (updaters fetch it from the release)"
+    else
+        if [ "$(zsync_header "$zsync" SHA-1)" = "$(sha1sum "$APPIMAGE" | cut -d' ' -f1)" ] &&
+            [ "$(zsync_header "$zsync" Length)" = "$(stat -c %s "$APPIMAGE")" ] &&
+            [ "$(zsync_header "$zsync" URL)" = "$(basename "$APPIMAGE")" ]; then
+            ok "$(basename "$zsync") describes this AppImage (SHA-1, length and URL)"
+        else
+            bad "$(basename "$zsync") does not describe this AppImage; rebuild both together"
+        fi
+        IFS='|' read -r _ _ _ _ pattern <<<"$upd"
+        # shellcheck disable=SC2053 # $pattern is a glob on purpose
+        if [[ "$(basename "$zsync")" == $pattern ]]; then
+            ok "the update information's pattern ($pattern) matches $(basename "$zsync")"
+        else
+            bad "the update information's pattern ($pattern) does not match $(basename "$zsync")"
+        fi
+    fi
 fi
 
 echo "==> Running it in a bare Ubuntu 22.04 system (the first run builds the images)"

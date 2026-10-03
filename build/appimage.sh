@@ -17,6 +17,9 @@
 #   - the few dlopen()ed libraries such a system may lack are bundled as a
 #     fallback (fetch_fallback_libs below; AppRun prefers the host's own copy).
 # packaging/appimage/ has a smoke test that runs the result in such a system.
+#
+# Update information is embedded too (UPDATE_INFO below), and appimagetool writes
+# the matching .zsync file next to the AppImage: upload both to the release.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 # shellcheck source=./common.sh
@@ -222,8 +225,25 @@ if [ ! -f "$RUNTIME_PATH" ]; then
 fi
 RUNTIME_ARGS=(--runtime-file "$RUNTIME_PATH")
 
+# Update information, so AppImageUpdate (and the launchers built on it) can find
+# newer releases: it names the repository's latest GitHub release and a pattern
+# for the asset to fetch (a .zsync file), from which only the blocks that
+# changed are downloaded. The arch is part of the pattern, so an x86_64 AppImage
+# never picks up the aarch64 update. That .zsync file is written by appimagetool
+# too; it describes exactly this AppImage (SHA-1, length), so it must be uploaded
+# with it and regenerated whenever the AppImage is.
+UPDATE_INFO="gh-releases-zsync|nujufas|jsonquery_gui|latest|$APP_NAME-*-$ARCH.AppImage.zsync"
+
 echo "==> Building AppImage"
-rm -f "$OUTPUT"
-ARCH=$ARCH "$APPIMAGETOOL" "${RUNTIME_ARGS[@]}" "$APPDIR" "$OUTPUT"
+rm -f "$OUTPUT" "$OUTPUT.zsync"
+# appimagetool writes the .zsync into its working directory rather than next to
+# the AppImage, hence the cd.
+(cd "$DIST_DIR" &&
+    ARCH=$ARCH "$APPIMAGETOOL" "${RUNTIME_ARGS[@]}" -u "$UPDATE_INFO" "$APPDIR" "$OUTPUT")
+if [ ! -f "$OUTPUT.zsync" ]; then
+    echo "error: appimagetool did not write $OUTPUT.zsync (it needs zsyncmake)" >&2
+    exit 1
+fi
 
 echo "==> Wrote $OUTPUT"
+echo "==> Wrote $OUTPUT.zsync (upload it with the AppImage)"
