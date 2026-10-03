@@ -187,7 +187,13 @@ Rust toolchain and PowerShell.
 
 The AppImage is desktop-pinnable out of the box: it self-registers a
 `.desktop` entry and icon on first launch (no `appimaged`/AppImageLauncher
-required), so right-click → Pin works from the taskbar/dock immediately.
+required), so right-click → Pin works from the taskbar/dock immediately. It
+embeds the static type 2 runtime (no libfuse2 needed to start it), carries
+fallback copies of the xkbcommon libraries for systems that lack them, and
+embeds update information, so AppImageUpdate (or a launcher built on it) can
+fetch newer releases; each build also writes the `.zsync` file that goes with
+it, to be attached to the release next to the AppImage. See
+[`packaging/appimage/`](packaging/appimage/) for how it is built and tested.
 
 `build/snap.sh` needs `snapcraft` plus a multipass or LXD build backend. It
 isn't wired into `build/all.sh` — it builds in its own sandbox and isn't
