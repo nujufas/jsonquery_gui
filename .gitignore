@@ -5,6 +5,7 @@ __pycache__/
 /build/AppDir/
 /build/appimagetool-*.AppImage
 /build/runtime-*
+/build/fallback-libs/
 /test-data/
 
 /android/app/build/
