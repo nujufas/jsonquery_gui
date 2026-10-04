@@ -53,6 +53,14 @@ thread as one kind of job (`Command::Tool`, answered by `Event::ToolDone`), with
 the open document shared rather than copied; a patched document opens as
 `DocumentSource::Derived`.
 
+Moving a difference in the side-by-side view to the other document is the same
+kind of job: every difference gets a number as the view lays it out (`Row::change`),
+and `diff::take_changes` walks the two documents again in the same order (the
+same `object_items` and `array_items`, so the numbers agree) and builds the one
+that changes with those differences taken from the other. The Diff job does that
+first and then compares again, and its answer carries the new text for the page
+to put back in the document's box.
+
 ## 3. Query engines
 
 `jsonquery_query::QueryEngine` is the trait every dialect implements —

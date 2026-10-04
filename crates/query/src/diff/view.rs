@@ -17,15 +17,22 @@
 //! whose keys are in another order lines up with the other instead of showing
 //! every line as moved.
 //!
+//! Every difference gets a number, in the order the view meets them, and the
+//! rows that are part of it carry it ([`Row::change`]). [`blend`] walks the
+//! documents the same way and so can take some differences, by number, from one
+//! document into the other: that is what moving a difference to the left or to
+//! the right does.
+//!
 //! A document of more than [`MAX_ROWS`] lines is not laid out ([`TooLong`]).
 
 use std::collections::{HashMap, HashSet};
+use std::ops::Range;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use serde_json::{Map, Value};
 
-use super::{push_token, Edit, What};
+use super::{push_token, Cancelled, Edit, Side, What};
 use crate::reformat::{self, Options};
 
 /// The most rows a comparison is laid out in. (Each is two short strings; this
@@ -59,6 +66,11 @@ pub struct Row {
     /// The JSON Pointer of the change this row is part of (as in
     /// [`super::Change::path`]): none for a row that is the same on both sides.
     pub path: Option<Arc<str>>,
+    /// The number of the difference this row is part of, counted 0, 1, 2… in the
+    /// order the view meets them (see [`blend`]): the rows of one value that is
+    /// added, removed or replaced share one. None for a row that is the same on
+    /// both sides.
+    pub change: Option<u32>,
 }
 
 /// A run of rows that differ, between rows that don't.
@@ -80,6 +92,21 @@ pub struct SideBySide {
     /// How many lines each document has.
     pub left_lines: usize,
     pub right_lines: usize,
+}
+
+impl SideBySide {
+    /// The numbers of the differences the rows of `block` are part of, as a
+    /// range (the rows of a block are in the order of the numbers, which have no
+    /// gaps): what [`super::take_changes`] is given to move the block.
+    pub fn changes_of(&self, block: &Block) -> Range<u32> {
+        let rows = self.rows.get(block.start..block.end).unwrap_or_default();
+        let first = rows.iter().find_map(|row| row.change);
+        let last = rows.iter().rev().find_map(|row| row.change);
+        match (first, last) {
+            (Some(first), Some(last)) => first..last + 1,
+            _ => 0..0,
+        }
+    }
 }
 
 /// The documents have more lines than [`MAX_ROWS`] allows.
@@ -110,6 +137,7 @@ pub(super) fn build<'a>(
         width: 0,
         left_lines: 0,
         right_lines: 0,
+        changes: 0,
     };
     layout.pair(
         before,
@@ -198,6 +226,8 @@ struct Gen<'c> {
     width: usize,
     left_lines: usize,
     right_lines: usize,
+    /// How many differences have been met: the number of the next one.
+    changes: u32,
 }
 
 impl<'a> Gen<'_> {
@@ -207,6 +237,7 @@ impl<'a> Gen<'_> {
         left: Option<String>,
         right: Option<String>,
         path: Option<&Arc<str>>,
+        change: Option<u32>,
     ) -> Done {
         if self.rows.len() >= MAX_ROWS {
             return Err(Stop::TooLong);
@@ -229,8 +260,15 @@ impl<'a> Gen<'_> {
             left,
             right,
             path: path.cloned(),
+            change,
         });
         Ok(())
+    }
+
+    /// The number of the next difference.
+    fn next_change(&mut self) -> u32 {
+        self.changes += 1;
+        self.changes - 1
     }
 
     /// The lines of two versions of one value (`edit` says how they differ, if
@@ -282,6 +320,7 @@ impl<'a> Gen<'_> {
             Some(opening(empty.0, at.comma.0)),
             Some(opening(empty.1, at.comma.1)),
             None,
+            None,
         )?;
 
         let last_left = items.iter().rposition(|item| item.left.is_some());
@@ -307,6 +346,7 @@ impl<'a> Gen<'_> {
             Mark::Same,
             closing(empty.0, at.comma.0),
             closing(empty.1, at.comma.1),
+            None,
             None,
         )
     }
@@ -340,11 +380,12 @@ impl<'a> Gen<'_> {
         }
         let comma = if on_left { at.comma.0 } else { at.comma.1 };
         let path: Arc<str> = path.into();
+        let change = Some(self.next_change());
         for line in lines_of(value, at.depth, at.key, comma) {
             if on_left {
-                self.push(Mark::Removed, Some(line), None, Some(&path))?;
+                self.push(Mark::Removed, Some(line), None, Some(&path), change)?;
             } else {
-                self.push(Mark::Added, None, Some(line), Some(&path))?;
+                self.push(Mark::Added, None, Some(line), Some(&path), change)?;
             }
         }
         Ok(())
@@ -365,6 +406,7 @@ impl<'a> Gen<'_> {
         let left = lines_of(before, at.depth, at.key, at.comma.0);
         let right = lines_of(after, at.depth, at.key, at.comma.1);
         let path: Option<Arc<str>> = differs.then(|| path.into());
+        let change = differs.then(|| self.next_change());
         let (mut left, mut right) = (left.into_iter(), right.into_iter());
         loop {
             let (l, r) = (left.next(), right.next());
@@ -375,7 +417,138 @@ impl<'a> Gen<'_> {
                 (Some(_), Some(_), true) => Mark::Changed,
                 (Some(_), Some(_), false) => Mark::Same,
             };
-            self.push(mark, l, r, path.as_ref())?;
+            self.push(mark, l, r, path.as_ref(), change)?;
+        }
+    }
+}
+
+/// The document `into` with the differences numbered in `take` made the same as
+/// the other document has them (see [`super::take_changes`]).
+///
+/// It walks the two documents exactly as [`build`] does — the same items in the
+/// same order, so that a difference gets the same number here as on the rows of
+/// the view — and builds a value instead of rows. What is in neither numbered
+/// difference is the document `into`'s own, as it was written (a number
+/// `1.0` stays `1.0`, an object's members stay in their order).
+pub(super) fn blend(
+    before: &Value,
+    after: &Value,
+    edit: Option<&Edit<'_>>,
+    take: Range<u32>,
+    into: Side,
+    cancel: &AtomicBool,
+) -> Result<Value, Cancelled> {
+    Blend {
+        take,
+        into,
+        met: 0,
+        ticks: 0,
+        cancel,
+    }
+    .pair(before, after, edit)
+}
+
+struct Blend<'c> {
+    take: Range<u32>,
+    into: Side,
+    /// How many differences have been met: the number of the next one.
+    met: u32,
+    ticks: u32,
+    cancel: &'c AtomicBool,
+}
+
+impl<'a> Blend<'_> {
+    fn tick(&mut self) -> Result<(), Cancelled> {
+        self.ticks = self.ticks.wrapping_add(1);
+        if self.ticks & 0x3ff == 0 && self.cancel.load(Ordering::Relaxed) {
+            Err(Cancelled)
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Meets a difference: whether it is one of those to take.
+    fn meet(&mut self) -> bool {
+        self.met += 1;
+        self.take.contains(&(self.met - 1))
+    }
+
+    /// Two versions of one value, as they are in the result. (The conditions are
+    /// those of `Gen::pair`.)
+    fn pair(
+        &mut self,
+        before: &'a Value,
+        after: &'a Value,
+        edit: Option<&'a Edit<'a>>,
+    ) -> Result<Value, Cancelled> {
+        self.tick()?;
+        match (before, after) {
+            (Value::Object(x), Value::Object(y)) if !(x.is_empty() && y.is_empty()) => {
+                // In the order the view meets them, which numbers them…
+                let mut made: HashMap<&str, Value> = HashMap::new();
+                for item in object_items(x, y, edit) {
+                    if let (Token::Key(key), Some(value)) = (item.token, self.item(&item)?) {
+                        made.insert(key, value);
+                    }
+                }
+                // …and in the order of the document that is changed, whose
+                // members keep their places; one that is taken in goes after the
+                // member before it, as `object_items` puts it.
+                let (own, other) = match self.into {
+                    Side::Left => (x, y),
+                    Side::Right => (y, x),
+                };
+                let mut members = Map::new();
+                for item in object_items(own, other, edit) {
+                    if let Token::Key(key) = item.token {
+                        if let Some(value) = made.remove(key) {
+                            members.insert(key.to_owned(), value);
+                        }
+                    }
+                }
+                Ok(Value::Object(members))
+            }
+            (Value::Array(x), Value::Array(y)) if !(x.is_empty() && y.is_empty()) => {
+                let mut elements = Vec::new();
+                for item in array_items(x, y, edit) {
+                    elements.extend(self.item(&item)?);
+                }
+                Ok(Value::Array(elements))
+            }
+            _ => Ok(self.leaf(before, after, edit.is_some())),
+        }
+    }
+
+    /// One thing in an object or an array, as it is in the result: not there at
+    /// all when that is what the difference it is part of comes to.
+    fn item(&mut self, item: &Item<'a>) -> Result<Option<Value>, Cancelled> {
+        match (item.left, item.right) {
+            (Some(before), Some(after)) => self.pair(before, after, item.edit).map(Some),
+            (Some(value), None) => Ok(self.alone(value, Side::Left)),
+            (None, Some(value)) => Ok(self.alone(value, Side::Right)),
+            (None, None) => Ok(None),
+        }
+    }
+
+    /// A value only the document `on` has. The result has it when the document
+    /// that is changed has it and the difference is left, or lacks it and the
+    /// difference is taken.
+    fn alone(&mut self, value: &Value, on: Side) -> Option<Value> {
+        let taken = self.meet();
+        ((on == self.into) != taken).then(|| value.clone())
+    }
+
+    /// Two values that are not both objects or both arrays: the document that is
+    /// changed has its own, unless they differ and the difference is taken.
+    fn leaf(&mut self, before: &Value, after: &Value, differs: bool) -> Value {
+        let (own, other) = match self.into {
+            Side::Left => (before, after),
+            Side::Right => (after, before),
+        };
+        if differs && self.meet() {
+            other.clone()
+        } else {
+            own.clone()
         }
     }
 }
@@ -958,6 +1131,344 @@ mod tests {
             listed.dedup();
             assert_eq!(marked, listed, "round {round}: {before} -> {after}");
             assert_eq!(v.blocks.is_empty(), result.diff.is_empty());
+        }
+    }
+
+    // Taking differences from one document into the other.
+
+    use super::super::{diff, take_changes};
+
+    /// What `take` does to `before` (or `after`, when `into` is right), taken from
+    /// the other.
+    fn taken(before: &Value, after: &Value, take: Range<u32>, into: Side) -> Value {
+        take_changes(before, after, take, into, &AtomicBool::new(false)).unwrap()
+    }
+
+    /// The numbers of the differences of each block of the view, as (first, one
+    /// past the last).
+    fn numbered(v: &SideBySide) -> Vec<(u32, u32)> {
+        v.blocks
+            .iter()
+            .map(|b| {
+                let numbers = v.changes_of(b);
+                (numbers.start, numbers.end)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_differences_are_numbered_in_the_order_of_the_view_and_a_value_is_one() {
+        // A changed value, a member only the left has (several lines), and a
+        // number put in place of an object (lines that are only on the left).
+        let v = view(
+            &parse(r#"{"a":1,"s":0,"b":{"x":[1,2]},"c":{"y":1},"d":true}"#),
+            &parse(r#"{"a":2,"s":0,"c":5,"d":true}"#),
+        );
+        let numbers: Vec<Option<u32>> = v.rows.iter().map(|r| r.change).collect();
+        assert!(v
+            .rows
+            .iter()
+            .all(|r| r.change.is_some() == (r.mark != Mark::Same)));
+        let mut distinct: Vec<u32> = numbers.iter().flatten().copied().collect();
+        distinct.dedup();
+        assert_eq!(distinct, [0, 1, 2], "no gaps, in order: {numbers:?}");
+        // "b" has its lines in one number, "c" (replaced) in another.
+        let of = |line: &str| {
+            v.rows
+                .iter()
+                .find(|r| r.left.as_deref().is_some_and(|l| l.contains(line)))
+                .and_then(|r| r.change)
+        };
+        assert_eq!(of("\"a\": 1"), Some(0));
+        assert_eq!(of("\"x\""), Some(1));
+        assert_eq!(of("\"y\""), Some(2));
+        assert_eq!(numbered(&v), [(0, 1), (1, 3)]);
+    }
+
+    #[test]
+    fn a_changed_value_moves_to_either_side() {
+        let (left, right) = (parse(r#"{"a":1,"b":2}"#), parse(r#"{"a":1,"b":3}"#));
+        let v = view(&left, &right);
+        let block = &v.changes_of(&v.blocks[0]);
+        assert_eq!(*block, 0..1);
+        assert_eq!(taken(&left, &right, 0..1, Side::Left), right);
+        assert_eq!(taken(&left, &right, 0..1, Side::Right), left);
+        // Nothing taken: the document as it was.
+        assert_eq!(taken(&left, &right, 0..0, Side::Left), left);
+        assert_eq!(taken(&left, &right, 1..5, Side::Right), right);
+    }
+
+    #[test]
+    fn a_member_one_side_lacks_is_put_in_or_taken_out() {
+        let (left, right) = (parse(r#"{"a":1,"b":2}"#), parse(r#"{"a":1,"c":3}"#));
+        // b is only in the left, c only in the right. The view puts c, which
+        // follows a on the right, before b: c is 0 and b is 1, in one block.
+        let v = view(&left, &right);
+        assert_eq!(numbered(&v), [(0, 2)]);
+        // Moving b to the right puts it into the right document…
+        assert_eq!(
+            taken(&left, &right, 1..2, Side::Right),
+            parse(r#"{"a":1,"b":2,"c":3}"#)
+        );
+        // …moving it to the left takes it out of the left one.
+        assert_eq!(taken(&left, &right, 1..2, Side::Left), parse(r#"{"a":1}"#));
+        // c the other way round.
+        assert_eq!(
+            taken(&left, &right, 0..1, Side::Left),
+            parse(r#"{"a":1,"b":2,"c":3}"#)
+        );
+        assert_eq!(taken(&left, &right, 0..1, Side::Right), parse(r#"{"a":1}"#));
+    }
+
+    #[test]
+    fn one_difference_among_several_moves_and_the_others_stay() {
+        let left = parse(r#"{"v":"1","n":3,"f":{"t":false},"gone":null,"r":["a","c"]}"#);
+        let right = parse(r#"{"v":"2","n":3,"f":{"t":true,"x":5},"r":["a","b","c"]}"#);
+        let v = view(&left, &right);
+        // v changed; f/t changed and f/x added (they touch, so one block); gone
+        // removed; r/1 added (a line that is the same lies between those two).
+        assert_eq!(numbered(&v), [(0, 1), (1, 3), (3, 4), (4, 5)]);
+        let into_left = |block: usize| {
+            let mut n = taken(&left, &right, v.changes_of(&v.blocks[block]), Side::Left);
+            // What is left over, compared with the right document.
+            let rest = diff(&n, &right, &AtomicBool::new(false)).unwrap();
+            let before = diff(&left, &right, &AtomicBool::new(false)).unwrap();
+            assert!(rest.total() < before.total(), "block {block}: {n}");
+            std::mem::take(&mut n)
+        };
+        assert_eq!(
+            into_left(0),
+            parse(r#"{"v":"2","n":3,"f":{"t":false},"gone":null,"r":["a","c"]}"#)
+        );
+        assert_eq!(
+            into_left(1),
+            parse(r#"{"v":"1","n":3,"f":{"t":true,"x":5},"gone":null,"r":["a","c"]}"#)
+        );
+        assert_eq!(
+            into_left(2),
+            parse(r#"{"v":"1","n":3,"f":{"t":false},"r":["a","c"]}"#)
+        );
+        assert_eq!(
+            into_left(3),
+            parse(r#"{"v":"1","n":3,"f":{"t":false},"gone":null,"r":["a","b","c"]}"#)
+        );
+        let into_right =
+            |block: usize| taken(&left, &right, v.changes_of(&v.blocks[block]), Side::Right);
+        assert_eq!(
+            into_right(0),
+            parse(r#"{"v":"1","n":3,"f":{"t":true,"x":5},"r":["a","b","c"]}"#)
+        );
+        assert_eq!(
+            into_right(2),
+            parse(r#"{"v":"2","n":3,"f":{"t":true,"x":5},"gone":null,"r":["a","b","c"]}"#)
+        );
+        assert_eq!(
+            into_right(3),
+            parse(r#"{"v":"2","n":3,"f":{"t":true,"x":5},"r":["a","c"]}"#)
+        );
+    }
+
+    #[test]
+    fn an_element_goes_in_or_out_at_its_place_in_the_array() {
+        let (left, right) = (json!([1, 2, 3, 4]), json!([1, "x", 2, 3, "y", 4]));
+        let v = view(&left, &right);
+        assert_eq!(numbered(&v), [(0, 1), (1, 2)]);
+        assert_eq!(
+            taken(&left, &right, 0..1, Side::Left),
+            json!([1, "x", 2, 3, 4])
+        );
+        assert_eq!(
+            taken(&left, &right, 1..2, Side::Left),
+            json!([1, 2, 3, "y", 4])
+        );
+        assert_eq!(
+            taken(&left, &right, 1..2, Side::Right),
+            json!([1, "x", 2, 3, 4])
+        );
+        assert_eq!(
+            taken(&left, &right, 0..2, Side::Left),
+            json!([1, "x", 2, 3, "y", 4])
+        );
+    }
+
+    #[test]
+    fn what_is_not_moved_is_kept_as_it_was_written() {
+        // 1.0 and 1 are the same number, so the right one keeps its spelling
+        // and the order of its members, whatever the left one has.
+        let left = parse(r#"{"a":1,"b":2,"c":3}"#);
+        let right = parse(r#"{"c":3.0,"b":9,"a":1.0}"#);
+        let moved = taken(&left, &right, 0..1, Side::Right);
+        assert_eq!(
+            serde_json::to_string(&moved).unwrap(),
+            r#"{"c":3.0,"b":2,"a":1.0}"#
+        );
+        // A member that comes in from the other side goes after the one before it.
+        let left = parse(r#"{"a":1,"b":2,"c":3}"#);
+        let right = parse(r#"{"c":3,"a":1}"#);
+        let moved = taken(&left, &right, 0..1, Side::Right);
+        assert_eq!(
+            serde_json::to_string(&moved).unwrap(),
+            r#"{"c":3,"a":1,"b":2}"#
+        );
+    }
+
+    #[test]
+    fn a_value_of_another_kind_and_the_whole_document_move_too() {
+        let (left, right) = (json!({"a": [1, 2]}), json!({"a": 7}));
+        assert_eq!(taken(&left, &right, 0..1, Side::Left), right);
+        assert_eq!(taken(&left, &right, 0..1, Side::Right), left);
+        let (left, right) = (json!([1]), json!({"x": 1}));
+        let v = view(&left, &right);
+        assert_eq!(numbered(&v), [(0, 1)]);
+        assert_eq!(taken(&left, &right, 0..1, Side::Left), right);
+        assert_eq!(taken(&left, &right, 0..1, Side::Right), left);
+        // An empty container against a full one has the members come one by one.
+        let (left, right) = (json!({}), json!({"a": 1, "b": 2}));
+        let v = view(&left, &right);
+        assert_eq!(numbered(&v), [(0, 2)]);
+        assert_eq!(taken(&left, &right, 1..2, Side::Left), json!({"b": 2}));
+    }
+
+    #[test]
+    fn a_move_can_be_cancelled() {
+        let (left, right) = (json!([1, 2]), json!([1, 3]));
+        assert!(take_changes(&left, &right, 0..1, Side::Left, &AtomicBool::new(true)).is_err());
+    }
+
+    // Round trips over generated documents, as in the patch tests: with few
+    // distinct values, so that equal elements, duplicates and reorderings come
+    // up all the time.
+
+    struct Rng(u64);
+
+    impl Rng {
+        fn below(&mut self, n: u64) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0 % n
+        }
+    }
+
+    fn generate(rng: &mut Rng, depth: u32) -> Value {
+        match rng.below(if depth == 0 { 4 } else { 6 }) {
+            0 => json!(rng.below(4)),
+            1 => json!(["a", "b", "c"][rng.below(3) as usize]),
+            2 => json!(rng.below(2) == 0),
+            3 => Value::Null,
+            4 => Value::Array(
+                (0..rng.below(7))
+                    .map(|_| generate(rng, depth - 1))
+                    .collect(),
+            ),
+            _ => {
+                let mut members = Map::new();
+                for _ in 0..rng.below(4) {
+                    members.insert(format!("k{}", rng.below(5)), generate(rng, depth - 1));
+                }
+                Value::Object(members)
+            }
+        }
+    }
+
+    fn mutate(rng: &mut Rng, value: &mut Value) {
+        match value {
+            Value::Array(items) => match rng.below(5) {
+                0 if !items.is_empty() => {
+                    let at = rng.below(items.len() as u64) as usize;
+                    items.remove(at);
+                }
+                1 => {
+                    let at = rng.below(items.len() as u64 + 1) as usize;
+                    items.insert(at, generate(rng, 1));
+                }
+                2 if !items.is_empty() => {
+                    let at = rng.below(items.len() as u64) as usize;
+                    mutate(rng, &mut items[at]);
+                }
+                3 => items.reverse(),
+                _ => {}
+            },
+            Value::Object(members) => match rng.below(4) {
+                0 if !members.is_empty() => {
+                    let at = rng.below(members.len() as u64) as usize;
+                    let key = members.keys().nth(at).unwrap().clone();
+                    members.shift_remove(&key);
+                }
+                1 => {
+                    members.insert(format!("k{}", rng.below(5)), generate(rng, 1));
+                }
+                2 if !members.is_empty() => {
+                    let at = rng.below(members.len() as u64) as usize;
+                    let key = members.keys().nth(at).unwrap().clone();
+                    mutate(rng, members.get_mut(&key).unwrap());
+                }
+                _ => {}
+            },
+            other => *other = generate(rng, 1),
+        }
+    }
+
+    #[test]
+    fn moving_differences_between_generated_documents_comes_out_right() {
+        let mut rng = Rng(0x2545_f491_4f6c_dd1d);
+        let stop = AtomicBool::new(false);
+        for case in 0..4_000 {
+            let before = generate(&mut rng, 3);
+            let mut after = before.clone();
+            for _ in 0..1 + rng.below(3) {
+                mutate(&mut rng, &mut after);
+            }
+            let found = diff(&before, &after, &stop).unwrap();
+            let v = view(&before, &after);
+            let context = format!("case {case}\n  before {before}\n  after  {after}");
+
+            // The numbers are the rows' own, with none missing, and are as many as
+            // the differences.
+            let mut seen: Vec<u32> = v.rows.iter().filter_map(|r| r.change).collect();
+            seen.dedup();
+            assert_eq!(
+                seen,
+                (0..found.total() as u32).collect::<Vec<_>>(),
+                "{context}"
+            );
+
+            // All of them, one way or the other, makes the two the same; none
+            // changes nothing.
+            let all = 0..found.total() as u32;
+            let left = taken(&before, &after, all.clone(), Side::Left);
+            let right = taken(&before, &after, all, Side::Right);
+            assert!(equal(&left, &after), "{context}\n  left  {left}");
+            assert!(equal(&right, &before), "{context}\n  right {right}");
+            assert_eq!(
+                taken(&before, &after, 0..0, Side::Left),
+                before,
+                "{context}"
+            );
+            assert_eq!(
+                taken(&before, &after, 0..0, Side::Right),
+                after,
+                "{context}"
+            );
+
+            // Each block moved by itself leaves the documents closer than they
+            // were, and is a value that can be moved back.
+            for block in &v.blocks {
+                let numbers = v.changes_of(block);
+                for into in [Side::Left, Side::Right] {
+                    let moved = taken(&before, &after, numbers.clone(), into);
+                    let (a, b) = match into {
+                        Side::Left => (&moved, &after),
+                        Side::Right => (&before, &moved),
+                    };
+                    let rest = diff(a, b, &stop).unwrap().total();
+                    assert!(
+                        rest < found.total(),
+                        "{context}\n  block {numbers:?} into {into:?}: {moved} ({rest} left of {})",
+                        found.total()
+                    );
+                }
+            }
         }
     }
 }

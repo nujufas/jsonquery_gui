@@ -140,7 +140,8 @@ tabs in the command row:
   next difference, and the status bar says which ("Difference 2 of 5").
   **Differences only** folds what is the same into a line ("… 23 lines are the
   same"), keeping three lines around each difference. Click a difference to copy
-  its path.
+  its path. **⏴** and **⏵** move the picked difference into the other document
+  (see [Moving a difference](#moving-a-difference)).
 - **Changes** — a list of what was **Added**, **Removed** or **Changed**, each
   with the JSON Pointer to it, and the value (or both values) at the right.
   Click a row to copy its path; hover for the whole of a long value.
@@ -150,6 +151,36 @@ tabs in the command row:
 
 **Copy patch** and **Save patch…** are at the right of the command row, in every
 view, and take the whole patch.
+
+### Moving a difference
+
+A difference can be moved from one document into the other, so that the two come
+to agree there — what a file-comparison tool calls copying to the left or to the
+right. Pick one in the Side by side view (click its lines, or step to it with
+**⏶** and **⏷**) and press **⏴** (Alt+Left) to move it to the left, so that Left
+takes what Right has there, or **⏵** (Alt+Right) to move it to the right, so that
+Right takes what Left has there. The right-click menu of a difference's lines
+has the same two choices and needs nothing picked first.
+
+What is moved is a difference as the view shows it: lines that differ and touch
+are one. A value that only one side has is put into the other document (at its
+place in an array, after the member before it in an object) or, going the other
+way, taken out of it; a value that is not the same on both sides is replaced by
+the other side's. Everything else stays as it was.
+
+The document that changed is written back into its box, pretty-printed with two
+spaces to a level; its members keep their order and its numbers their spelling,
+and the box is no longer called by the file it was read from — the file itself is
+never touched. The other document is not changed. The comparison then runs again
+and the view goes on to the next difference, so pressing **⏵** over and over
+walks through the whole comparison, and a document that was NDJSON comes back as
+one array.
+
+A text box can only edit about a megabyte, so a document that comes out bigger
+than that is not shown: its box says "Too big to show" and holds it as it is, to
+be used when you compare again, until you clear it or put something else in. A
+move is limited only by what the tools take in all (128 MB, with the other
+document), and says so if it is over.
 
 The lines are the pretty-printed documents (two spaces to a level, numbers as
 they were written), and what is marked is exactly what is in the patch. Both

@@ -11,7 +11,8 @@
 //! a bar of its own under the rows (or Shift+wheel). Beside the scroll bar is an
 //! overview of the whole document with a tick for each difference, that can be
 //! clicked or dragged. Previous and Next step from one difference to the next,
-//! and "Differences only" folds what is the same into a line that says how many
+//! the menu of a difference's lines moves it to the left or the right, and
+//! "Differences only" folds what is the same into a line that says how many
 //! lines it hides.
 
 use std::ops::Range;
@@ -19,7 +20,7 @@ use std::ops::Range;
 use eframe::egui::{
     self, Align, Align2, Color32, FontId, Layout, Pos2, Rect, RichText, Sense, TextStyle,
 };
-use jsonquery_query::diff::{Block, Mark, Row, SideBySide};
+use jsonquery_query::diff::{Block, Mark, Row, Side, SideBySide};
 
 use super::widgets::{tint, Tint};
 use crate::pane_header;
@@ -151,6 +152,9 @@ pub(super) struct Viewer {
 pub(super) struct Shown {
     /// The path of the difference that was clicked, to copy.
     pub clicked: Option<String>,
+    /// A difference (its place in the list) that was asked, from the menu of
+    /// its lines, to be moved to the left or to the right.
+    pub moved: Option<(usize, Side)>,
 }
 
 impl Viewer {
@@ -211,6 +215,19 @@ impl Viewer {
     fn go_to(&mut self, view: &SideBySide, block: usize) {
         self.current = Some(block);
         self.jump = Some(position_of(&self.items, view.blocks[block].start));
+    }
+
+    /// The difference Previous and Next are on, which a move acts on.
+    pub fn current(&self) -> Option<usize> {
+        self.current
+    }
+
+    /// Go to difference `block`, as Next does.
+    pub fn pick(&mut self, view: &SideBySide, block: usize) {
+        self.ensure_items(view);
+        if block < view.blocks.len() {
+            self.go_to(view, block);
+        }
     }
 
     /// "Difference 2 of 5", when one is picked.
@@ -320,6 +337,7 @@ impl Viewer {
         }
         let current = self.current.and_then(|at| view.blocks.get(at)).copied();
         let mut clicked_row = None;
+        let mut moved = None;
         let scrolled = area.show_rows(&mut rows_ui, ROW, items.len(), |ui, range| {
             for item in &items[range] {
                 let (rect, response) =
@@ -342,7 +360,28 @@ impl Viewer {
                                         path
                                     });
                                     ui.weak("Click to copy the path");
+                                    ui.weak("Right-click to move it to the other side");
                                 });
+                            let block = block_at(&view.blocks, index as usize);
+                            response.context_menu(|ui| {
+                                for (label, tip, into) in [
+                                    (
+                                        "Move to the left",
+                                        "Left takes what Right has here",
+                                        Side::Left,
+                                    ),
+                                    (
+                                        "Move to the right",
+                                        "Right takes what Left has here",
+                                        Side::Right,
+                                    ),
+                                ] {
+                                    if ui.button(label).on_hover_text(tip).clicked() {
+                                        moved = block.map(|block| (block, into));
+                                        ui.close();
+                                    }
+                                }
+                            });
                             if response.clicked() {
                                 clicked_row = Some(index as usize);
                             }
@@ -393,9 +432,12 @@ impl Viewer {
             clicked = view.rows[index].path.as_deref().map(str::to_owned);
             self.current = block_at(&view.blocks, index);
         }
+        if let Some((block, _)) = moved {
+            self.current = Some(block);
+        }
         self.items = items;
         ui.allocate_rect(full, Sense::hover());
-        Shown { clicked }
+        Shown { clicked, moved }
     }
 
     /// What is over each side: which document it is, what it is called, and, at

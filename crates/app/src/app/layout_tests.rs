@@ -142,6 +142,20 @@ impl Harness {
 
     /// Two clicks in a row, close enough in time and place to be a double click
     /// (and not, with an earlier click close behind, a triple one).
+    /// Press and release the secondary button, as for a context menu.
+    fn right_click(&mut self, x: f32, y: f32) {
+        self.pointer(x, y);
+        for pressed in [true, false] {
+            self.frame_with(vec![egui::Event::PointerButton {
+                pos: egui::pos2(x, y),
+                button: egui::PointerButton::Secondary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            }]);
+        }
+        self.settle();
+    }
+
     fn double_click(&mut self, x: f32, y: f32) {
         self.pause(1.0);
         self.pointer(x, y);
@@ -2481,6 +2495,268 @@ fn clicking_a_difference_in_the_side_by_side_view_copies_its_path() {
     let copies = h.copied.len();
     press(&mut h, "  \"list\": [");
     assert_eq!(h.copied.len(), copies);
+}
+
+/// The command row's button drawn as `glyph` (⏷, ⏴…): the one beside Compare,
+/// not one of the main window's.
+fn command_button(h: &Harness, glyph: &str) -> egui::Pos2 {
+    let row = center_of(h, "Compare").y;
+    *h.pop_buttons(glyph)
+        .iter()
+        .find(|p| (p.y - row).abs() < 3.0)
+        .unwrap_or_else(|| panic!("{glyph} is in the command row: {:?}", h.texts()))
+}
+
+fn as_json(text: &str) -> serde_json::Value {
+    serde_json::from_str(text).unwrap_or_else(|e| panic!("{e}: {text:?}"))
+}
+
+#[test]
+fn the_move_buttons_wait_for_a_difference_to_be_picked_and_leave_the_boxes_alone_until_then() {
+    let mut h = Harness::new();
+    open_tool(&mut h, Tool::Diff);
+    h.app.tools.fill(Tool::Diff, "Left", r#"{"a":1,"b":2}"#);
+    h.app.tools.fill(Tool::Diff, "Right", r#"{"a":1,"b":3}"#);
+    h.settle();
+    // Not on the page of the two boxes, nor on the list of changes…
+    assert!(!is_drawn(&h, "⏵"));
+    press(&mut h, "Compare");
+    wait_for(&mut h, "the changes", |h| is_drawn(h, "Changes (1)"));
+    assert!(is_drawn(&h, "⏴") && is_drawn(&h, "⏵"), "{:?}", h.texts());
+    press(&mut h, "Changes (1)");
+    assert!(!is_drawn(&h, "⏵"), "only the side-by-side view moves");
+    press(&mut h, "Side by side");
+
+    // …and with none picked, pressing one does nothing.
+    let right = command_button(&h, "⏵");
+    h.click(right.x, right.y);
+    h.settle();
+    assert_eq!(h.app.tools.box_text(Tool::Diff, "Left"), r#"{"a":1,"b":2}"#);
+    assert_eq!(
+        h.app.tools.box_text(Tool::Diff, "Right"),
+        r#"{"a":1,"b":3}"#
+    );
+    assert!(!is_drawn_containing(&h, "Moved the difference"));
+}
+
+#[test]
+fn moving_a_difference_to_the_right_gives_the_right_document_what_the_left_has() {
+    // b changed, and, with a line that is the same between, c put in: two
+    // differences.
+    let mut h = compared_diff(
+        r#"{"b":2,"s":0,"a":1}"#,
+        r#"{"b":3,"s":0,"a":1,"c":true}"#,
+        "Changes (2)",
+    );
+    let next = command_button(&h, "⏷");
+    h.click(next.x, next.y);
+    assert!(is_drawn(&h, "Difference 1 of 2"), "{:?}", h.texts());
+
+    let right = command_button(&h, "⏵");
+    h.click(right.x, right.y);
+    wait_for(&mut h, "the new comparison", |h| is_drawn(h, "1 added"));
+    // The right box has b as the left has it, and still has c; the left box is
+    // as it was, the way it was typed.
+    assert_eq!(
+        as_json(&h.app.tools.box_text(Tool::Diff, "Right")),
+        serde_json::json!({"b": 2, "s": 0, "a": 1, "c": true})
+    );
+    assert_eq!(
+        h.app.tools.box_text(Tool::Diff, "Left"),
+        r#"{"b":2,"s":0,"a":1}"#
+    );
+    assert!(
+        is_drawn_containing(&h, "Moved the difference to the right"),
+        "{:?}",
+        h.texts()
+    );
+    // The new document is what is shown, with c the one difference left, picked
+    // as the one that has taken the place of the moved one.
+    assert!(is_drawn(&h, "Changes (1)"), "{:?}", h.texts());
+    assert!(is_drawn(&h, "Difference 1 of 1"), "{:?}", h.texts());
+}
+
+#[test]
+fn moving_a_difference_to_the_left_with_the_keyboard_changes_the_left_box() {
+    let mut h = compared_diff(
+        r#"{"a":1,"b":2}"#,
+        r#"{"a":1,"b":3,"c":true}"#,
+        "Changes (2)",
+    );
+    // Nothing is picked: the keys do nothing.
+    h.key(egui::Key::ArrowLeft, egui::Modifiers::ALT);
+    h.settle();
+    assert_eq!(h.app.tools.box_text(Tool::Diff, "Left"), r#"{"a":1,"b":2}"#);
+
+    h.key(egui::Key::ArrowDown, egui::Modifiers::ALT);
+    assert!(is_drawn(&h, "Difference 1 of 1"), "{:?}", h.texts());
+    h.key(egui::Key::ArrowLeft, egui::Modifiers::ALT);
+    wait_for(&mut h, "the new comparison", |h| {
+        is_drawn(h, "Moved the difference to the left")
+    });
+    assert_eq!(
+        as_json(&h.app.tools.box_text(Tool::Diff, "Left")),
+        serde_json::json!({"a": 1, "b": 3, "c": true}),
+        "Left took what Right has: b changed and c put in"
+    );
+    assert_eq!(
+        h.app.tools.box_text(Tool::Diff, "Right"),
+        r#"{"a":1,"b":3,"c":true}"#
+    );
+    assert!(is_drawn(&h, "same"), "{:?}", h.texts());
+}
+
+#[test]
+fn moving_the_last_difference_makes_the_documents_the_same() {
+    let mut h = compared_diff("[1, 2]", "[1, 3]", "Changes (1)");
+    let next = command_button(&h, "⏷");
+    h.click(next.x, next.y);
+    let left = command_button(&h, "⏴");
+    h.click(left.x, left.y);
+    wait_for(&mut h, "the new comparison", |h| is_drawn(h, "same"));
+    assert_eq!(
+        as_json(&h.app.tools.box_text(Tool::Diff, "Left")),
+        as_json("[1, 3]")
+    );
+    // Nothing is left to pick, so the buttons are not pressed on with no effect.
+    assert!(!is_drawn_containing(&h, "Difference "), "{:?}", h.texts());
+}
+
+#[test]
+fn after_a_move_the_next_difference_is_the_one_that_is_picked() {
+    let mut h = compared_diff(
+        r#"{"a":1,"s":0,"b":2,"t":0,"c":3}"#,
+        r#"{"a":9,"s":0,"b":8,"t":0,"c":7}"#,
+        "Changes (3)",
+    );
+    let next = command_button(&h, "⏷");
+    h.click(next.x, next.y);
+    let next = command_button(&h, "⏷");
+    h.click(next.x, next.y);
+    assert!(is_drawn(&h, "Difference 2 of 3"), "{:?}", h.texts());
+    // Moving the second leaves two, and the third is now the second.
+    let right = command_button(&h, "⏵");
+    h.click(right.x, right.y);
+    wait_for(&mut h, "the new comparison", |h| is_drawn(h, "Changes (2)"));
+    assert!(is_drawn(&h, "Difference 2 of 2"), "{:?}", h.texts());
+    assert_eq!(
+        as_json(&h.app.tools.box_text(Tool::Diff, "Right")),
+        serde_json::json!({"a": 9, "s": 0, "b": 2, "t": 0, "c": 7})
+    );
+}
+
+#[test]
+fn a_difference_has_a_menu_that_moves_it_to_either_side() {
+    let mut h = compared_diff(
+        r#"{"a":1,"s":0,"b":2}"#,
+        r#"{"a":9,"s":0,"b":8}"#,
+        "Changes (2)",
+    );
+    // Nothing is picked; the menu of the line of the second difference moves
+    // that one.
+    let line = center_of(&h, "  \"b\": 8");
+    h.right_click(line.x, line.y);
+    assert!(is_drawn(&h, "Move to the left"), "{:?}", h.texts());
+    assert!(is_drawn(&h, "Move to the right"), "{:?}", h.texts());
+    press(&mut h, "Move to the left");
+    wait_for(&mut h, "the new comparison", |h| is_drawn(h, "Changes (1)"));
+    assert_eq!(
+        as_json(&h.app.tools.box_text(Tool::Diff, "Left")),
+        serde_json::json!({"a": 1, "s": 0, "b": 8})
+    );
+    assert_eq!(
+        h.app.tools.box_text(Tool::Diff, "Right"),
+        r#"{"a":9,"s":0,"b":8}"#
+    );
+
+    // A line that is the same has no such menu.
+    let same = center_of(&h, "  \"s\": 0,");
+    h.right_click(same.x, same.y);
+    assert!(!is_drawn(&h, "Move to the right"), "{:?}", h.texts());
+}
+
+#[test]
+fn a_box_that_held_a_file_holds_the_moved_text_and_is_no_longer_called_by_the_file() {
+    let file = temp_json("moved-left.json", r#"{"a":1,"b":2}"#);
+    let mut h = Harness::new();
+    open_tool(&mut h, Tool::Diff);
+    h.app.tools.fill_file(Tool::Diff, "Left", &file);
+    h.app.tools.fill(Tool::Diff, "Right", r#"{"a":1,"b":3}"#);
+    h.settle();
+    press(&mut h, "Compare");
+    wait_for(&mut h, "the changes", |h| is_drawn(h, "Changes (1)"));
+    assert!(
+        is_drawn_containing(&h, "moved-left.json"),
+        "{:?}",
+        h.texts()
+    );
+
+    let next = command_button(&h, "⏷");
+    h.click(next.x, next.y);
+    let left = command_button(&h, "⏴");
+    h.click(left.x, left.y);
+    wait_for(&mut h, "the new comparison", |h| is_drawn(h, "same"));
+    assert!(
+        !is_drawn_containing(&h, "moved-left.json"),
+        "the left document is not that file any more: {:?}",
+        h.texts()
+    );
+    assert_eq!(
+        as_json(&h.app.tools.box_text(Tool::Diff, "Left")),
+        serde_json::json!({"a": 1, "b": 3})
+    );
+    // The file itself is not touched.
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), r#"{"a":1,"b":2}"#);
+}
+
+#[test]
+fn a_move_that_makes_a_document_too_big_for_its_box_leaves_it_held_unseen() {
+    // Two files of a megabyte and a half, which a text box can not edit, so they
+    // are not shown but read when the tool runs. They differ in one string.
+    let strings = |changed: &str| {
+        let mut items: Vec<String> = (0..5_000)
+            .map(|n| format!("\"{n:04}{}\"", "x".repeat(300)))
+            .collect();
+        items[2_500] = format!("\"{changed}\"");
+        format!("[{}]", items.join(","))
+    };
+    let (left, right) = (strings("left"), strings("right"));
+    assert!(left.len() as u64 > 1024 * 1024);
+    let (left_file, right_file) = (
+        temp_json("held-left.json", &left),
+        temp_json("held-right.json", &right),
+    );
+    let mut h = Harness::new();
+    open_tool(&mut h, Tool::Diff);
+    h.app.tools.fill_file(Tool::Diff, "Left", &left_file);
+    h.app.tools.fill_file(Tool::Diff, "Right", &right_file);
+    h.settle();
+    press(&mut h, "Compare");
+    wait_for(&mut h, "the changes", |h| is_drawn(h, "Changes (1)"));
+
+    let next = command_button(&h, "⏷");
+    h.click(next.x, next.y);
+    let left_button = command_button(&h, "⏴");
+    h.click(left_button.x, left_button.y);
+    wait_for(&mut h, "the new comparison", |h| is_drawn(h, "same"));
+
+    // The left box holds the new text, all of it, though a text box would not.
+    let held = h.app.tools.box_text(Tool::Diff, "Left");
+    assert!(held.len() as u64 > 1024 * 1024, "{} bytes", held.len());
+    assert_eq!(as_json(&held), as_json(&right));
+    // It is not the file any more, and the file is as it was.
+    assert!(
+        !is_drawn_containing(&h, "held-left.json"),
+        "{:?}",
+        h.texts()
+    );
+    assert_eq!(std::fs::read_to_string(&left_file).unwrap(), left);
+    // Comparing again uses it as it is.
+    press(&mut h, "Compare");
+    wait_for(&mut h, "the comparison", |h| {
+        is_drawn_containing(h, "Compared in")
+    });
+    assert!(is_drawn(&h, "same"), "{:?}", h.texts());
 }
 
 #[test]

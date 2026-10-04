@@ -18,6 +18,7 @@
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+use std::ops::Range;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde_json::{Number, Value};
@@ -28,6 +29,24 @@ use crate::reformat::{self, Indent};
 mod view;
 
 pub use view::{Block, Mark, Row, SideBySide, TooLong, MAX_ROWS};
+
+/// One of the two documents of a comparison.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Side {
+    /// The first document, `before`.
+    Left,
+    /// The second document, `after`.
+    Right,
+}
+
+impl Side {
+    pub fn other(self) -> Self {
+        match self {
+            Side::Left => Side::Right,
+            Side::Right => Side::Left,
+        }
+    }
+}
 
 /// Changes kept in [`Diff::changes`] — the counts and the patch are complete
 /// whatever this is; it only bounds what a window has to list.
@@ -132,6 +151,28 @@ pub fn compare(
         Err(view::Stop::Cancelled) => return Err(Cancelled),
     };
     Ok(Comparison { diff, view })
+}
+
+/// The document `into` with some of the differences made the same as the other
+/// document has them: a difference that is a value only the other document has
+/// is put in, one that is a value only this one has is taken out, and one that is
+/// a value that is not the same in both gets the other document's. Which
+/// differences is said by number, as the rows of [`SideBySide`] carry them
+/// ([`Row::change`]; [`SideBySide::changes_of`] gives those of a [`Block`]). The
+/// documents must be the ones the view was made of.
+///
+/// This is moving a difference to the left (`into` is [`Side::Left`]: Left takes
+/// what Right has) or to the right. The rest of the document is as it was,
+/// including the order of an object's members and how its numbers are written.
+pub fn take_changes(
+    before: &Value,
+    after: &Value,
+    changes: Range<u32>,
+    into: Side,
+    cancel: &AtomicBool,
+) -> Result<Value, Cancelled> {
+    let (_, edit) = run(before, after, cancel)?;
+    view::blend(before, after, edit.as_ref(), changes, into, cancel)
 }
 
 /// The differences, and the tree they were read from.

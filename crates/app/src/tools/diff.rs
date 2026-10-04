@@ -5,16 +5,18 @@
 //! typed or pasted, files, or the document open in the main window.
 //!
 //! The command row has Compare and Swap, the four views as tabs, Previous and
-//! Next difference for the side-by-side view, and — pinned at the right, in
-//! every view — Copy patch and Save patch…. Documents is where the two documents
+//! Next difference for the side-by-side view, Move to the left and Move to the
+//! right for the difference that is picked there (or one that is right-clicked),
+//! and — pinned at the right, in every view — Copy patch and Save patch….
+//! Documents is where the two documents
 //! are put in, next to each other; Compare opens the side-by-side view, which is
 //! two read-only columns (`side_by_side.rs`); Changes is the list; Patch the
 //! patch text.
 
 use eframe::egui::{self, Align, Color32, Key, Layout, Modifiers, Rect, RichText};
-use jsonquery_query::diff::{Change, ChangeKind, MAX_ROWS};
+use jsonquery_query::diff::{Change, ChangeKind, Side, MAX_ROWS};
 
-use super::jobs::{Compared, Job};
+use super::jobs::{Compared, Job, Take};
 use super::operand::{deliver, drop_target, dropped_files, Operand};
 use super::shared::{Env, Run};
 use super::side_by_side::Viewer;
@@ -54,6 +56,12 @@ pub(super) struct Diff {
     /// What the two documents were called when they were compared (a file's
     /// name, the open document), for the side-by-side view's headings.
     names: [Option<String>; 2],
+    /// A move that is on the worker: which difference of the view it was (its
+    /// place in the list, which the one that follows it takes) and which
+    /// document it changes.
+    moving: Option<(usize, Side)>,
+    /// A move that has been made and not yet announced.
+    moved: Option<Side>,
 }
 
 impl Default for Diff {
@@ -65,6 +73,8 @@ impl Default for Diff {
             run: Run::default(),
             viewer: Viewer::default(),
             names: [None, None],
+            moving: None,
+            moved: None,
         }
     }
 }
@@ -86,9 +96,29 @@ impl Diff {
         if !self.run.finish(gen, result) {
             return;
         }
+        let moving = self.moving.take();
+        // A move has changed one of the documents: its box has the new text.
+        if let Some(moved) = self.run.outcome().and_then(|c| c.moved.as_ref()) {
+            let text = moved.text.clone();
+            let (operand, name) = match moved.into {
+                Side::Left => (&mut self.left, &mut self.names[0]),
+                Side::Right => (&mut self.right, &mut self.names[1]),
+            };
+            operand.set_moved(text);
+            *name = None;
+            self.moved = Some(moved.into);
+        }
         self.viewer.reset();
         if self.page == Page::Documents && !cancelled {
             self.page = Page::SideBySide;
+        }
+        // On to the difference that has taken the place of the one that was
+        // moved (the last one, if that was the last).
+        let view = self.run.outcome().and_then(|c| c.view.as_ref().ok());
+        if let (Some((block, _)), Some(view)) = (moving, view) {
+            if !view.blocks.is_empty() {
+                self.viewer.pick(view, block.min(view.blocks.len() - 1));
+            }
         }
     }
 
@@ -118,6 +148,9 @@ impl Diff {
         let mut swap = false;
         let mut act = None;
         let mut step = None;
+        // A difference of the view to move, and to which side.
+        let mut take: Option<(usize, Side)> = None;
+        let picked = self.viewer.current();
         let patch = self.run.outcome().map(|c| c.patch.clone());
         // Whether Previous and Next have anywhere to go: none when the view is
         // not the one on show.
@@ -171,6 +204,33 @@ impl Diff {
                             step = Some(forward);
                         }
                     }
+                    ui.separator();
+                    let free = picked.filter(|_| !self.run.running());
+                    for (label, into, tip) in [
+                        (
+                            "⏴",
+                            Side::Left,
+                            "Move the difference to the left: Left takes what Right has there \
+                             (Alt+Left)",
+                        ),
+                        (
+                            "⏵",
+                            Side::Right,
+                            "Move the difference to the right: Right takes what Left has there \
+                             (Alt+Right)",
+                        ),
+                    ] {
+                        let button = ui
+                            .add_enabled(free.is_some(), egui::Button::new(label))
+                            .on_hover_text(tip)
+                            .on_disabled_hover_text(
+                                "Pick a difference to move first: click it, or use Previous and \
+                                 Next",
+                            );
+                        if button.clicked() {
+                            take = free.map(|block| (block, into));
+                        }
+                    }
                 }
 
                 pane_header::pinned_right(ui, |ui| {
@@ -204,6 +264,13 @@ impl Diff {
             if ui.input_mut(|i| i.consume_key(Modifiers::ALT, Key::ArrowUp)) {
                 step = Some(false);
             }
+            if let Some(block) = picked.filter(|_| !self.run.running()) {
+                for (key, into) in [(Key::ArrowLeft, Side::Left), (Key::ArrowRight, Side::Right)] {
+                    if ui.input_mut(|i| i.consume_key(Modifiers::ALT, key)) {
+                        take = Some((block, into));
+                    }
+                }
+            }
             let view = self.run.outcome().and_then(|c| c.view.as_ref().ok());
             if let (Some(forward), Some(view)) = (step, view) {
                 self.viewer.step(view, forward);
@@ -216,7 +283,7 @@ impl Diff {
                     self.documents(ui, env);
                     None
                 }
-                _ => self.result(ui),
+                _ => self.result(ui, &mut take),
             })
             .inner;
         if let Some(path) = copied_path {
@@ -228,6 +295,24 @@ impl Diff {
             ui.ctx().copy_text(path);
             env.shared
                 .say(Tool::Diff, format!("Copied the path to {shown}"), false);
+        }
+
+        if let Some((block, into)) = take {
+            // (Not while Compare has just been pressed: that one is asked for.)
+            if request.is_none() {
+                request = self.start_move(block, into);
+            }
+        }
+        if let Some(side) = self.moved.take() {
+            let to = match side {
+                Side::Left => "left",
+                Side::Right => "right",
+            };
+            env.shared.say(
+                Tool::Diff,
+                format!("Moved the difference to the {to}"),
+                false,
+            );
         }
 
         // Not `?`: with no patch yet, or nothing pressed, `request` (Compare,
@@ -283,15 +368,41 @@ impl Diff {
         let (gen, cancel) = self.run.start();
         Some(Request::Job {
             tool: Tool::Diff,
-            job: Job::Diff { left, right },
+            job: Job::Diff {
+                left,
+                right,
+                take: None,
+            },
+            gen,
+            cancel,
+        })
+    }
+
+    /// Ask the worker to move the difference `block` of the view (counting
+    /// them from the top) to the left or the right: it makes the new document,
+    /// and compares again, and the answer puts the new text in the box.
+    fn start_move(&mut self, block: usize, into: Side) -> Option<Request> {
+        let view = self.run.outcome()?.view.as_ref().ok()?;
+        let changes = view.changes_of(view.blocks.get(block)?);
+        let (left, right) = (self.left.input()?, self.right.input()?);
+        let (gen, cancel) = self.run.start();
+        self.moving = Some((block, into));
+        Some(Request::Job {
+            tool: Tool::Diff,
+            job: Job::Diff {
+                left,
+                right,
+                take: Some(Take { changes, into }),
+            },
             gen,
             cancel,
         })
     }
 
     /// The answer, on the view the page is on. Gives the path of a difference
-    /// that was clicked, which the caller copies.
-    fn result(&mut self, ui: &mut egui::Ui) -> Option<String> {
+    /// that was clicked, which the caller copies; `take` is set to a difference
+    /// that was asked to be moved, from its menu.
+    fn result(&mut self, ui: &mut egui::Ui, take: &mut Option<(usize, Side)>) -> Option<String> {
         let page = self.page;
         let names = [self.names[0].as_deref(), self.names[1].as_deref()];
         let mut copied_path = None;
@@ -302,7 +413,11 @@ impl Diff {
             "What differs appears here",
             |ui, compared| match (page, &compared.view) {
                 (Page::SideBySide, Ok(view)) => {
-                    copied_path = self.viewer.show(ui, view, names).clicked;
+                    let shown = self.viewer.show(ui, view, names);
+                    copied_path = shown.clicked;
+                    if shown.moved.is_some() {
+                        *take = shown.moved;
+                    }
                 }
                 (Page::SideBySide, Err(_)) => {
                     ui.weak(format!(
@@ -549,6 +664,7 @@ mod tests {
                 truncated: false,
             },
             view: Ok(SideBySide::default()),
+            moved: None,
             elapsed: Duration::ZERO,
         }
     }

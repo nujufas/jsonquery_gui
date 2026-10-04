@@ -2,7 +2,9 @@
 //! the window; "Open file…"; or "Open document", the document open in the main
 //! window. A file that fits is read into the box, where it can be edited; one too
 //! big for a text box (see [`TEXT_LIMIT`]) is not shown but read when the tool
-//! runs, and the open document is shared rather than copied.
+//! runs, and the open document is shared rather than copied. The text a move in
+//! the Diff page's side-by-side view makes, if too big for a text box too, is
+//! held without being shown ([`Operand::set_moved`]).
 //!
 //! Format uses one box; Diff, Patch and Validate use two.
 
@@ -29,6 +31,9 @@ enum Content {
     Big { path: PathBuf, bytes: u64 },
     /// The document open in the main window, as it was when it was picked.
     Open(Arc<Document>),
+    /// Text that was made here but is too big to show: what a move leaves in the
+    /// box it changed. Used as it is when the tool runs.
+    Held(Arc<str>),
 }
 
 pub(super) struct Operand {
@@ -76,6 +81,7 @@ impl Operand {
             Content::Text => Some(Input::Text(self.text.clone())),
             Content::Big { path, .. } => Some(Input::File(path.clone())),
             Content::Open(doc) => Some(Input::Document(doc.clone())),
+            Content::Held(text) => Some(Input::Text(text.to_string())),
         }
     }
 
@@ -99,9 +105,23 @@ impl Operand {
         self.problem = None;
     }
 
+    /// Put in the text a move made. One that is too big for a text box to edit
+    /// (see [`TEXT_LIMIT`]) is kept without being shown, and the box says so.
+    pub fn set_moved(&mut self, text: Arc<str>) {
+        if text.len() as u64 <= TEXT_LIMIT {
+            self.set_text(&*text);
+        } else {
+            self.set_text(String::new());
+            self.content = Content::Held(text);
+        }
+    }
+
     #[cfg(test)]
     pub fn text(&self) -> &str {
-        &self.text
+        match &self.content {
+            Content::Held(text) => text,
+            _ => &self.text,
+        }
     }
 
     #[cfg(test)]
@@ -219,6 +239,15 @@ impl Operand {
                 accent,
                 "The open document",
                 &format!("{} · {}", short_source(doc), human_bytes(doc.byte_len)),
+            ),
+            Content::Held(text) => note_box(
+                ui,
+                accent,
+                "Too big to show",
+                &format!(
+                    "{} · made by a move · used as it is when you run it",
+                    human_bytes(text.len() as u64)
+                ),
             ),
         }
         changed
@@ -364,6 +393,32 @@ mod tests {
 
     fn operand() -> Operand {
         Operand::new("Document", "t", "hint")
+    }
+
+    #[test]
+    fn moved_text_that_fits_a_box_goes_in_it_and_bigger_text_is_held_unseen() {
+        let mut o = operand();
+        o.load_file(&{
+            let dir = temp_dir("moved");
+            let path = dir.join("a.json");
+            std::fs::write(&path, "[1]").unwrap();
+            path
+        });
+        assert_eq!(o.label(), Some("a.json"));
+        o.set_moved(Arc::from("[2]"));
+        assert_eq!(o.text(), "[2]");
+        assert_eq!(o.label(), None, "no longer the file");
+        assert!(matches!(o.input(), Some(Input::Text(text)) if text == "[2]"));
+
+        let big: Arc<str> = Arc::from(format!("[{}]", "1,".repeat(TEXT_LIMIT as usize) + "1"));
+        o.set_moved(big.clone());
+        assert!(!o.is_empty());
+        assert_eq!(o.text().len(), big.len());
+        assert!(matches!(o.input(), Some(Input::Text(text)) if text.len() == big.len()));
+        // Clearing empties it, and typing goes in the text box again.
+        o.clear();
+        assert!(o.is_empty());
+        assert!(o.input().is_none());
     }
 
     #[test]

@@ -190,6 +190,22 @@ impl Tools {
             .set_text(text);
     }
 
+    /// The text in the box called `title` on `tool`'s page.
+    #[cfg(test)]
+    pub fn box_text(&mut self, tool: Tool, title: &str) -> String {
+        let operand = match tool {
+            Tool::Merge => None,
+            Tool::Format => self.format.operand(title),
+            Tool::Diff => self.diff.operand(title),
+            Tool::Patch => self.patch.operand(title),
+            Tool::Validate => self.validate.operand(title),
+        };
+        operand
+            .unwrap_or_else(|| panic!("there is no box called {title:?} on {tool:?}"))
+            .text()
+            .to_owned()
+    }
+
     /// Read the file at `path` into the box called `title` on `tool`'s page, as
     /// "Open file…" does.
     #[cfg(test)]

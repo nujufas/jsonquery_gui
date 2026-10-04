@@ -7,6 +7,7 @@
 //! large: a job is refused when what it is given adds up to more than
 //! [`MAX_TOOL_BYTES`].
 
+use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -14,7 +15,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context};
 use jsonquery_core::{Document, DocumentSource};
-use jsonquery_query::diff::{self, Change, SideBySide, TooLong};
+use jsonquery_query::diff::{self, Change, Side, SideBySide, TooLong};
 use jsonquery_query::reformat::{self, Indent};
 use jsonquery_query::{patch, schema};
 use serde_json::Value;
@@ -120,8 +121,14 @@ pub enum Job {
         input: Input,
         options: reformat::Options,
     },
-    /// The patch it makes turns the left document into the right one.
-    Diff { left: Input, right: Input },
+    /// The patch it makes turns the left document into the right one. With
+    /// `take`, some differences are first moved from one document into the
+    /// other, and what is left of them is what is compared.
+    Diff {
+        left: Input,
+        right: Input,
+        take: Option<Take>,
+    },
     Patch {
         document: Input,
         patch: Input,
@@ -134,6 +141,18 @@ pub enum Job {
         schema: Input,
         check_formats: bool,
     },
+}
+
+/// Differences to move from one document into the other before comparing: what
+/// moving a difference to the left or to the right in the side-by-side view asks
+/// for.
+#[derive(Clone, Debug)]
+pub struct Take {
+    /// The numbers of the differences, as the rows of the view carry them (see
+    /// `diff::take_changes`).
+    pub changes: Range<u32>,
+    /// The document that takes them in.
+    pub into: Side,
 }
 
 pub enum Outcome {
@@ -195,7 +214,15 @@ pub struct Compared {
     /// The two documents line by line, with what differs marked — or that they
     /// are too long to lay out.
     pub view: Result<SideBySide, TooLong>,
+    /// The document a move changed, to put back in its box.
+    pub moved: Option<Moved>,
     pub elapsed: Duration,
+}
+
+/// A document that a move changed, written out.
+pub struct Moved {
+    pub into: Side,
+    pub text: Arc<str>,
 }
 
 impl Compared {
@@ -243,13 +270,45 @@ fn run_job(job: Job, cancel: &AtomicBool) -> anyhow::Result<Outcome> {
                 elapsed: start.elapsed(),
             }))
         }
-        Job::Diff { left, right } => {
+        Job::Diff { left, right, take } => {
             check_size(&[&left, &right])?;
             let first = left.load().context("Left")?;
             let second = right.load().context("Right")?;
             stop_if_cancelled(cancel)?;
-            let compared = diff::compare(first.held.value(), second.held.value(), cancel)
-                .map_err(|_| anyhow::anyhow!("cancelled"))?;
+            let merged: Value;
+            let (mut before, mut after) = (first.held.value(), second.held.value());
+            let mut moved = None;
+            if let Some(take) = take {
+                merged = diff::take_changes(before, after, take.changes, take.into, cancel)
+                    .map_err(|_| anyhow::anyhow!("cancelled"))?;
+                let text = reformat::render(&merged, &reformat::Options::default());
+                let kept = match take.into {
+                    Side::Left => second.bytes,
+                    Side::Right => first.bytes,
+                };
+                if text.len() as u64 + kept > MAX_TOOL_BYTES {
+                    bail!(
+                        "the {} document would be {}, which with the other is over the {} \
+                         these tools can take — they work in memory",
+                        match take.into {
+                            Side::Left => "Left",
+                            Side::Right => "Right",
+                        },
+                        human_bytes(text.len() as u64),
+                        human_bytes(MAX_TOOL_BYTES)
+                    );
+                }
+                match take.into {
+                    Side::Left => before = &merged,
+                    Side::Right => after = &merged,
+                }
+                moved = Some(Moved {
+                    into: take.into,
+                    text: text.into(),
+                });
+            }
+            let compared =
+                diff::compare(before, after, cancel).map_err(|_| anyhow::anyhow!("cancelled"))?;
             let found = compared.diff;
             let patch = operations_text(&found.operations);
             Ok(Outcome::Diff(Compared {
@@ -261,6 +320,7 @@ fn run_job(job: Job, cancel: &AtomicBool) -> anyhow::Result<Outcome> {
                 patch_preview: Preview::of(&patch),
                 patch: patch.into(),
                 view: compared.view,
+                moved,
                 elapsed: start.elapsed(),
             }))
         }
@@ -538,6 +598,7 @@ mod tests {
         let Err(error) = go(Job::Diff {
             left: Input::File(a),
             right: Input::File(b),
+            take: None,
         }) else {
             panic!("should be refused")
         };
@@ -581,6 +642,7 @@ mod tests {
         let Ok(Outcome::Diff(d)) = go(Job::Diff {
             left: text(r#"{"a":1,"b":[1,2,3]}"#),
             right: text(r#"{"a":2,"b":[1,3],"c":true}"#),
+            take: None,
         }) else {
             panic!("should compare")
         };
@@ -599,11 +661,85 @@ mod tests {
         );
     }
 
+    /// A comparison of `left` and `right` that first moves `changes` into `into`.
+    fn compared_after_moving(left: &str, right: &str, changes: Range<u32>, into: Side) -> Compared {
+        let Ok(Outcome::Diff(d)) = go(Job::Diff {
+            left: text(left),
+            right: text(right),
+            take: Some(Take { changes, into }),
+        }) else {
+            panic!("should compare")
+        };
+        d
+    }
+
+    #[test]
+    fn a_move_changes_one_document_and_compares_again() {
+        let (left, right) = (r#"{"a":1,"b":[1,2,3]}"#, r#"{"a":2,"b":[1,3],"c":true}"#);
+        // The view numbers the changes a (0), the 2 taken out of b (1) and c (2).
+        let d = compared_after_moving(left, right, 0..1, Side::Right);
+        let moved = d.moved.expect("the right document was changed");
+        assert_eq!(moved.into, Side::Right);
+        assert_eq!(
+            serde_json::from_str::<Value>(&moved.text).unwrap(),
+            json!({"a": 1, "b": [1, 3], "c": true})
+        );
+        assert!(moved.text.contains("\n  \"b\": ["), "written out in full");
+        assert_eq!(
+            (d.added, d.removed, d.changed),
+            (1, 1, 0),
+            "what is left to compare"
+        );
+
+        // Into the left one, and the second difference.
+        let d = compared_after_moving(left, right, 1..2, Side::Left);
+        let moved = d.moved.expect("the left document was changed");
+        assert_eq!(moved.into, Side::Left);
+        assert_eq!(
+            serde_json::from_str::<Value>(&moved.text).unwrap(),
+            json!({"a": 1, "b": [1, 3]})
+        );
+        assert_eq!((d.added, d.removed, d.changed), (1, 0, 1));
+
+        // Everything moved: the two are the same.
+        let d = compared_after_moving(left, right, 0..3, Side::Left);
+        assert!(d.equal);
+        assert_eq!(&*d.patch, "[]");
+    }
+
+    #[test]
+    fn a_comparison_without_a_move_has_nothing_to_put_back() {
+        let Ok(Outcome::Diff(d)) = go(Job::Diff {
+            left: text("[1]"),
+            right: text("[2]"),
+            take: None,
+        }) else {
+            panic!("should compare")
+        };
+        assert!(d.moved.is_none());
+    }
+
+    #[test]
+    fn a_move_whose_text_is_too_big_for_a_box_is_still_made() {
+        // The text goes back in a box that holds it without showing it, so a
+        // text box's limit does not stop a move.
+        let big = format!(
+            "[{}]",
+            vec!["\"abcdefghijklmnopqrstuvwxyz\""; 50_000].join(",")
+        );
+        let d = compared_after_moving(&big, "[]", 0..50_000, Side::Right);
+        let moved = d.moved.expect("the right document was changed");
+        assert_eq!(moved.into, Side::Right);
+        assert!(moved.text.len() as u64 > crate::tools::operand::TEXT_LIMIT);
+        assert!(d.equal, "the right document has what the left has");
+    }
+
     #[test]
     fn the_same_documents_have_an_empty_patch() {
         let Ok(Outcome::Diff(d)) = go(Job::Diff {
             left: text(r#"{"a":1,"b":2}"#),
             right: text(r#"{"b":2,"a":1}"#),
+            take: None,
         }) else {
             panic!("should compare")
         };
@@ -616,6 +752,7 @@ mod tests {
         let Err(error) = go(Job::Diff {
             left: text("[1]"),
             right: text("[1,"),
+            take: None,
         }) else {
             panic!("should fail")
         };
