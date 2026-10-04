@@ -173,15 +173,13 @@ point inside the schema.
   X11 ([rust-windowing/winit#1881](https://github.com/rust-windowing/winit/issues/1881)).
   The **Source** field (and its **…** file picker), the Tools window's **Add
   files…** and **Open file…** buttons and pasting all work fine everywhere.
-  Workaround: run under XWayland instead (if `DISPLAY` is set, it's
-  available):
-  ```sh
-  WAYLAND_DISPLAY= cargo run --release -p jsonquery_gui
-  ```
+  Workaround: run under XWayland instead, one click away once it is set up;
+  see [Dropping files on a Wayland desktop](#dropping-files-on-a-wayland-desktop).
 - **Pop-out windows open wherever the compositor puts them on native
   Wayland** — `winit` can neither set nor read a window's position there, so
   a popped-out pane can't open over the spot it left or reopen where you
-  moved it. (Windows, macOS and X11 can; only X11 has been tried.)
+  moved it. (Windows, macOS and X11 can; only X11 has been tried — the
+  XWayland entry above gets you there on a Wayland desktop.)
 - Multi-gigabyte files are not yet backed by a memory-mapped, lazily-resolved
   index, so very large documents load fully into memory. See
   [Scaling beyond in-memory](docs/architecture.md#scaling-beyond-in-memory).
@@ -209,7 +207,8 @@ Also available on the [Snap Store](https://snapcraft.io/jsonquery-gui), for
 both x86-64 (amd64) and ARM (arm64) machines. The snap is sandboxed: it reads
 files in your home folder directly. For files on an external drive or under
 `/mnt`, run `sudo snap connect jsonquery-gui:removable-media` once (the **…**
-file picker works for any file without it).
+file picker works for any file without it). To drop files on its window under
+Wayland, see [Dropping files on a Wayland desktop](#dropping-files-on-a-wayland-desktop).
 
 ### Scoop (Windows)
 
@@ -236,7 +235,61 @@ required), so right-click → Pin works from the taskbar/dock immediately. It
 embeds the static type 2 runtime (no libfuse2 needed to start it), carries
 fallback copies of the xkbcommon libraries for systems that lack them, and
 embeds update information, so AppImageUpdate (or a launcher built on it) can
-fetch newer releases.
+fetch newer releases. On a Wayland desktop it also adds a **jsonquery (X11)**
+entry, for dropping files on the window (see
+[Dropping files on a Wayland desktop](#dropping-files-on-a-wayland-desktop)).
+
+### Dropping files on a Wayland desktop
+
+Most current Linux desktops (Ubuntu, Fedora and others) run Wayland, where
+jsonquery can't take a file dropped on its window (see
+[Known limitations](#known-limitations)). Everything else works. To be able to
+drop files, start jsonquery under X11 instead (XWayland, which the desktop
+provides on request). Which one you have:
+
+```sh
+echo $XDG_SESSION_TYPE    # wayland: read on. x11: nothing to do
+```
+
+What you need is a **jsonquery (X11)** entry in your application menu, next to
+the regular **jsonquery**: click that one, and drop files on its window.
+
+- **AppImage:** nothing to do. On a Wayland desktop the AppImage adds that entry
+  by itself the first time you start it, and again if you move it or replace it
+  with a newer one. (AppImages made before this was added don't: use the script
+  below.) To get rid of it, delete
+  `~/.local/share/applications/jsonquery-gui-x11.desktop`; it stays gone until
+  you move or replace the AppImage.
+- **Everything else** (the tar.gz, the snap, the Arch package, an older
+  AppImage): [`scripts/jsonquery-x11.sh`](scripts/jsonquery-x11.sh) adds the
+  entry (and, if you ask, a shortcut on the Desktop) with one command. The
+  tar.gz has the script inside; for the others download it first:
+
+```sh
+curl -fLO https://raw.githubusercontent.com/nujufas/jsonquery_gui/master/scripts/jsonquery-x11.sh
+bash jsonquery-x11.sh              # add "jsonquery (X11)" to the application menu
+bash jsonquery-x11.sh --desktop    # ... and put a shortcut on the Desktop too
+```
+
+Then press the Super key, type `jsonquery`, click **jsonquery (X11)**, and drop
+files on its window.
+
+- The script finds jsonquery by itself: the program next to it, the snap, or
+  the Arch package. If you keep an AppImage somewhere, name it (make it
+  executable first with `chmod +x`):
+  `bash jsonquery-x11.sh ~/Apps/jsonquery_gui-0.5.0-x86_64.AppImage`
+- **Moved or updated the program?** Run the script again; it rewrites the
+  entry.
+- `bash jsonquery-x11.sh run` starts jsonquery under X11 once, without adding
+  anything; `remove` takes the entry and the shortcut away; `check` says what
+  it found. On a desktop that is not Wayland the script does nothing.
+- With no script at all, the same thing from a terminal: `env -u
+  WAYLAND_DISPLAY -u WAYLAND_SOCKET jsonquery_gui` (for an AppImage, its file
+  instead; the snap's program is `/snap/bin/jsonquery-gui`; from source,
+  `env -u WAYLAND_DISPLAY -u WAYLAND_SOCKET cargo run --release -p jsonquery_gui`).
+- It needs XWayland. If the script says `DISPLAY` is not set, your desktop has
+  it switched off: look for an XWayland or "X11 apps" setting, then log in
+  again.
 
 ### Build from source
 

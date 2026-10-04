@@ -1980,7 +1980,7 @@ dependencies = [
 
 [[package]]
 name = "jsonquery-core"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "memmap2",
@@ -1991,7 +1991,7 @@ dependencies = [
 
 [[package]]
 name = "jsonquery-query"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "crossbeam-channel",
@@ -2008,7 +2008,7 @@ dependencies = [
 
 [[package]]
 name = "jsonquery_gui"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "crossbeam-channel",
