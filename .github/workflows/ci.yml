@@ -4,6 +4,16 @@ on:
   push:
     branches: [main, master]
   pull_request:
+  # The GUI suite lives in the jsonquery_test repository and takes over an hour,
+  # so it runs on demand and once a week instead of on every push.
+  workflow_dispatch:
+    inputs:
+      suite:
+        description: "Suite to run, relative to jsonquery_test/suites/ (empty = all), e.g. query_engines or tools/tools_diff.robot"
+        required: false
+        default: ""
+  schedule:
+    - cron: "23 3 * * 1" # Mondays, 03:23 UTC
 
 env:
   CARGO_TERM_COLOR: always
@@ -11,6 +21,7 @@ env:
 jobs:
   test:
     name: test (${{ matrix.os }})
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
     strategy:
       fail-fast: false
       matrix:
@@ -36,3 +47,50 @@ jobs:
 
       - name: Build (release)
         run: cargo build --release -p jsonquery_gui
+
+  gui-tests:
+    name: GUI tests (jsonquery_test)
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360 # a full run takes over an hour on one display
+    env:
+      JQ_APP_DIR: ${{ github.workspace }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check out the GUI tests
+        uses: actions/checkout@v4
+        with:
+          repository: nujufas/jsonquery_test
+          path: jsonquery_test
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: System packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            xvfb fluxbox xdotool wmctrl xclip tesseract-ocr gnome-screenshot \
+            python3-venv python3-pip python3-tk python3-dev \
+            libxkbcommon-x11-0 libxcb-xkb1 libgl1-mesa-dri libegl1 mesa-vulkan-drivers libvulkan1
+
+      # python-xlib (pulled in by pyautogui) refuses to connect to an X server unless
+      # ~/.Xauthority exists, even for Xvfb, which needs no authorization.
+      - name: Create an empty Xauthority file
+        run: touch "$HOME/.Xauthority"
+
+      # run.sh builds the app from JQ_APP_DIR, starts Xvfb and fluxbox, and runs Robot.
+      - name: Run the GUI suite
+        env:
+          SUITE: ${{ inputs.suite }}
+        run: ./jsonquery_test/run.sh ${SUITE:+"jsonquery_test/suites/$SUITE"}
+
+      - name: Keep the report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gui-test-results
+          path: jsonquery_test/results
+          if-no-files-found: ignore

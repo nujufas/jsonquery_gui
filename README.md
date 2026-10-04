@@ -233,6 +233,11 @@ export JQ_APP_DIR=../jsonquery_gui   # this checkout
 Its README lists the system packages it needs (Xvfb, fluxbox, tesseract and a
 few more) and how to run suites in parallel.
 
+The CI workflow ([`ci.yml`](.github/workflows/ci.yml)) runs fmt, clippy, the unit
+tests and a release build on Linux, Windows and macOS for every push and pull
+request. The GUI suite runs on Linux from the Actions tab (**Run workflow**,
+optionally just one suite) and every Monday.
+
 ## Architecture
 
 The design — pipeline, concurrency model, crate layout — is written up in
