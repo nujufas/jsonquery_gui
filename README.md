@@ -2,10 +2,11 @@
 
 A native desktop tool for browsing and querying large JSON files — drag in a
 file (or paste JSON directly) and query it with **jq**, **JSON Pointer**,
-**JSONPath**, or **JMESPath**. Built in Rust with
+**JSONPath**, or **JMESPath**. A **Tools** window merges, formats, diffs,
+patches and validates documents too. Built in Rust with
 [egui](https://github.com/emilk/egui)/[eframe](https://github.com/emilk/egui).
 
-![jsonquery screenshot](docs/images/screenshot.png)
+![jsonquery: a jq query over a list of users, each step of the query tinted, the source and the results side by side](docs/images/screenshot.png)
 
 ## Features
 
@@ -15,39 +16,31 @@ file (or paste JSON directly) and query it with **jq**, **JSON Pointer**,
   auto-detect it from what you type.
 - **Inline autocomplete** — as-you-type suggestions for each dialect's
   built-in functions (with a short doc string) and for the loaded document's
-  own keys and array indices — type `.` or `[` to see what's there. In jq it
-  follows pipes and calls too: inside `.members | map(select(.` it offers the
-  fields of each member. Accepted text is spelled for the dialect
-  (`.["first name"]` in jq, `$["first name"]` in JSONPath, `."first name"` in
-  JMESPath). Off by default — switch it on with the 💡 button in the toolbar.
+  own keys and array indices — type `.` or `[` to see what's there, with a
+  sample value next to each key. In jq it follows pipes and calls too: inside
+  `.[] | select(.` it offers the fields of each record. Accepted text is
+  spelled for the dialect (`.["first name"]` in jq, `$["first name"]` in
+  JSONPath, `."first name"` in JMESPath). Off by default — switch it on with
+  the 💡 button in the toolbar.
 
-  ![Autocomplete suggestions in the query box](docs/images/screenshot-autocomplete.png)
+  ![Autocomplete inside select( offering the fields of each record, with a sample value for each](docs/images/screenshot-autocomplete.png)
 - **Colour-coded queries** — the query box tints each step of what you type
-  (`.members`, `[]`, `select(…)`, `.name`; a Pointer's `/segments`) in the same
-  palette the tutorial uses, leaving pipes, commas and operators plain, so a
-  long query's structure is visible at a glance. It follows the selected
-  dialect and copes with half-typed queries.
+  (`.[]`, `select(…)`, `sort_by(…)`, `.user.name`; a Pointer's `/segments`)
+  in the same palette the tutorial uses, leaving pipes, commas and operators
+  plain, so a long query's structure is visible at a glance — see the query
+  at the top of this page. A call inside a call gets its own tint, the
+  colours follow the selected dialect, and half-typed queries are fine.
 - **Built-in tutorial** — the 📖 icon in the toolbar (or `F1`) opens a
   separate window with a lesson tree for each dialect. Every lesson has short
   examples with the query broken down piece by piece and a live result;
   **▶ Try it** loads an example's data and query into the main window so you
   can edit and experiment. See [Tutorial](docs/tutorial.md).
 
-  ![The tutorial window](docs/images/screenshot-tutorial.png)
-- **Tools** — the dim 🛠 icon next to the tutorial opens a window of small
-  utilities that go with the viewer:
-  **Merge JSON** combines several files into one document with a jq filter,
-  the way `jq -s` does (drop the files on it, or on the main window);
-  **Format JSON** pretty-prints with 2 or 4 spaces or a tab, minifies, sorts
-  the keys; **Diff JSON** shows two documents side by side, with what was added,
-  removed and changed marked as a file-comparison tool does, lists the changes
-  and gives the RFC 6902 JSON Patch for it (copy or save); **Patch JSON** applies a
-  JSON Patch or a JSON Merge Patch; **Validate schema** checks a document
-  against a JSON Schema (drafts 4 to 2020-12) and shows a problem in the
-  document that is open. JSON goes in by pasting, dropping a file, or from the
-  document open in the main window; results can be opened there, copied or
-  saved. They work in memory, so they are for documents that are not very
-  large. See [Tools](docs/tools.md).
+  ![The tutorial window on the jq lesson about select](docs/images/screenshot-tutorial.png)
+- **Tools** — the 🛠 icon next to the tutorial opens the Tools window, with a
+  tab for each of five utilities that go with the viewer: **Merge JSON**,
+  **Format JSON**, **Diff JSON**, **Patch JSON** and **Validate schema**. Each
+  is shown in action under [Tools](#tools) below.
 - **Streamed, cancellable queries** — results appear as jq produces them, so
   `first(...)`/`limit(...)` genuinely stop early; starting a new query aborts
   whatever was still running.
@@ -62,7 +55,7 @@ file (or paste JSON directly) and query it with **jq**, **JSON Pointer**,
 - **Search** — `Ctrl+F` opens a Notepad++-style Find dialog with the cursor
   already in its field: a case-insensitive substring or regex search across
   the source or the results tree. **Find** (or `Enter`) jumps to each match in
-  turn — expanded, scrolled to and highlighted — with a running "3 of 17",
+  turn — expanded, scrolled to and highlighted — with a running "2 of 3",
   wrapping past the last one; **Find All** lists every match in a panel below,
   where a click reveals it.
 
@@ -93,10 +86,84 @@ file (or paste JSON directly) and query it with **jq**, **JSON Pointer**,
   window back at once. The Source pane's window has a **Source** field of its
   own on top (with **…**, **Load** and **Clear**), so a document can be opened
   from there. Shortcuts and search work in each window.
+
+  ![The Results pane popped out into a window of its own; the main window gives the Source pane the full width](docs/images/screenshot-popout.png)
 - **Light and dark themes**, switchable from the toolbar.
 - **Keyboard shortcuts** — `Ctrl+Enter` run/apply, `Ctrl+F` search,
   `Ctrl+S` save (both scoped to whichever panel you last clicked), `F1`
   tutorial.
+
+## Tools
+
+The 🛠 icon in the toolbar opens the **Tools** window: five small utilities,
+each on a tab of its own, laid out like the main window — a command row with
+the tool's main button and its options, what goes in on the left, what came
+out on the right, and a status bar that says what happened. JSON goes into a
+box by pasting, by dropping a file on the window, with **Open file…**, or with
+**Open document** (the one in the main window). A result can be copied, saved,
+or opened in the main window as a document of its own, to query like any
+other. `Ctrl+Enter` runs the tab's main button and **Cancel** stops a job. The
+tools work in memory, so they are for documents that are not very large (what
+a run is given may add up to 128 MB). Details in [docs/tools.md](docs/tools.md).
+
+### Merge JSON
+
+Combines several files into one document with a jq filter, the way `jq -s`
+does: the files are read in the order listed and slurped into one array, which
+is the filter's input, and `$files` holds their names. Drop the files on the
+window (or several at once on the main window), or press **Add files…**; pick a
+ready-made filter from **Merge as** — append arrays, append sorted and
+de-duplicated, deep-merge objects, bundle by file name — or edit it into your
+own, and press **Merge**. The result can be saved, or opened in the main
+window.
+
+![Merge JSON: three monthly order files appended into one array of ten orders](docs/images/screenshot-tools-merge.png)
+
+### Format JSON
+
+Pretty-prints with 2 or 4 spaces or a tab, minifies, sorts the keys at every
+depth, and can write everything outside ASCII as `\uXXXX` escapes. Numbers come
+out exactly as they went in, however many digits they have.
+
+![Format JSON: a minified document pretty-printed with its keys sorted](docs/images/screenshot-tools-format.png)
+
+### Diff JSON
+
+Compares a Left and a Right document the way a file-comparison tool does.
+**Side by side** shows both pretty-printed, line by line: what only Left has in
+red, what only Right has in green, what changed in amber with the differing
+characters picked out. The sides scroll together, the strip at the right edge
+has a tick for every difference, ▲/▼ (`Alt+Up`, `Alt+Down`) step through them,
+and **Differences only** folds what is the same. **Changes** lists each change
+with its JSON Pointer, and **Patch** is the RFC 6902 JSON Patch that turns Left
+into Right — **Copy patch** or **Save patch…** it. Key order is not a
+difference, numbers are compared by value with their exact digits, and arrays
+are aligned by content, so an inserted element is one change rather than a
+change to every element after it. Pick a difference and **⏴** or **⏵**
+(`Alt+Left`, `Alt+Right`) moves it into the other document, so that Left takes
+what Right has there or the other way round, as a file-comparison tool's "copy to
+left/right" does; the comparison runs again and goes on to the next difference.
+The right-click menu of a difference's lines does the same.
+
+![Diff JSON: two versions of a configuration side by side, with the added, removed and changed lines marked, the second difference picked and its right-click menu offering to move it to the left or the right](docs/images/screenshot-tools-diff.png)
+
+### Patch JSON
+
+Applies an RFC 6902 JSON Patch (a list of operations) or an RFC 7386 JSON Merge
+Patch to a document. A patch is all or nothing, and an error names the
+operation that failed.
+
+![Patch JSON: six operations applied to a document, the result on the right](docs/images/screenshot-tools-patch.png)
+
+### Validate schema
+
+Checks a document against a JSON Schema (drafts 4, 6, 7, 2019-09 and 2020-12,
+read from `$schema`) and lists every problem with its pointer and what is
+wrong. For the document that is open in the main window, **Show in main
+window** reveals a problem there. Nothing is ever fetched: a `$ref` has to
+point inside the schema.
+
+![Validate schema: a document checked against a schema, six problems listed with their pointers](docs/images/screenshot-tools-validate.png)
 
 ## Known limitations
 
@@ -105,8 +172,9 @@ file (or paste JSON directly) and query it with **jq**, **JSON Pointer**,
   library), which only implements OS-level file drop on Windows, macOS, and
   X11 ([rust-windowing/winit#1881](https://github.com/rust-windowing/winit/issues/1881)).
   The **Source** field (and its **…** file picker), the Tools window's **Add
-  files…** button and pasting all work fine everywhere. Workaround: run under XWayland instead (if `DISPLAY` is set,
-  it's available):
+  files…** and **Open file…** buttons and pasting all work fine everywhere.
+  Workaround: run under XWayland instead (if `DISPLAY` is set, it's
+  available):
   ```sh
   WAYLAND_DISPLAY= cargo run --release -p jsonquery_gui
   ```
@@ -189,9 +257,12 @@ cargo run --release -p jsonquery_gui
    `.users[] | select(.active) | {name, roles}` for jq, `/users/0` for
    Pointer, `$.users[*].name` for JSONPath, or `users[?active].name` for
    JMESPath. New to one of them? The 📖 tutorial has short lessons for all
-   four.
+   four, and the 💡 autocomplete knows the document's keys.
 3. Press **Run** (or `Ctrl+Enter`). Results stream into the right-hand
-   panel — toggle it between **Tree** and **Text**, search it, or save it.
+   panel — toggle it between **Tree** and **Text**, search it, pop it out
+   into its own window, or save it.
+4. To merge, format, diff, patch or validate documents instead, open the 🛠
+   [Tools](#tools) window.
 
 ## Building
 
@@ -205,7 +276,7 @@ cargo build --release -p jsonquery_gui
 ## Development
 
 ```sh
-cargo test --workspace     # unit tests (core parsing/tree logic, query engines)
+cargo test --workspace     # unit tests: parsing and tree logic, the query engines and tools, headless window tests
 cargo clippy --workspace --all-targets
 ```
 
@@ -213,30 +284,55 @@ The workspace is split into three crates so the non-GUI logic can be tested
 without pulling in a GUI toolkit:
 
 - **`crates/core`** — file ingest (mmap + parse) and the virtualized-tree data layer.
-- **`crates/query`** — the four query engines, dispatched through a shared `QueryEngine` trait.
+- **`crates/query`** — the four query engines, dispatched through a shared
+  `QueryEngine` trait, plus the merge, format, diff, patch and schema logic
+  behind the Tools window.
 - **`crates/app`** — the eframe/egui application itself.
 
-The end-to-end GUI tests are a separate repository,
-[jsonquery_test](https://github.com/nujufas/jsonquery_test): a Robot Framework
-suite (screen-driven, OCR-assisted) that drives the real application on an
-isolated Xvfb display. Clone it, point it at this checkout and run it; it
-builds the app itself:
+### GUI tests: jsonquery_test
+
+The end-to-end tests live in their own repository,
+[**jsonquery_test**](https://github.com/nujufas/jsonquery_test). It is a
+[Robot Framework](https://robotframework.org) suite that starts the real
+application on a virtual X display of its own (Xvfb with the fluxbox window
+manager, so it never touches your desktop), clicks and types into it the way a
+person would, and reads the screen back with Tesseract OCR, pixel checks and
+the clipboard — egui draws everything itself and has no accessibility tree to
+query. As of October 2026 it has 369 test cases in 18 suites, one directory
+per area of the app (launch and window, opening sources, the toolbar and
+status bar, query engines, query highlighting, the query box, autocomplete,
+tree and text views, context menus, search, saving, keyboard shortcuts,
+pop-out panes, the Tools window, the tutorial and About windows, pane headers,
+drag and drop). Each area is specified by a document in the suite's `docs/`,
+and a traceability matrix gives every case's status with its reason.
+
+It needs Linux, Python 3.12, a Rust toolchain and a few system packages
+(`xvfb fluxbox xdotool wmctrl xclip tesseract-ocr gnome-screenshot python3-venv
+python3-tk python3-dev` on Debian/Ubuntu). Clone it beside this checkout and
+run it — `run.sh` builds the app, creates a Python virtual environment and
+starts the display itself:
 
 ```sh
 git clone https://github.com/nujufas/jsonquery_test.git
 cd jsonquery_test
-export JQ_APP_DIR=../jsonquery_gui   # this checkout
-./run.sh                             # every suite (a full run takes over an hour)
-./run.sh suites/query_engines/       # just one
+./run.sh suites/launch_and_window/                           # four quick cases: is everything set up?
+./run.sh suites/query_engines/                               # one suite
+./run.sh suites/tools/tools_diff.robot --test 'TC-DIF-007*'  # one case
+./run.sh                                                     # every suite (over an hour on one display)
 ```
 
-Its README lists the system packages it needs (Xvfb, fluxbox, tesseract and a
-few more) and how to run suites in parallel.
+It finds this checkout as `../jsonquery_gui`, or wherever `JQ_APP_DIR` points.
+Results land in `results/report.html` and `results/log.html`, with a
+screenshot of the window at the end of every case. The suite's README covers
+running several lanes in parallel, testing a binary you built yourself, the
+environment variables and troubleshooting, and links the guide to writing new
+cases.
 
-The CI workflow ([`ci.yml`](.github/workflows/ci.yml)) runs fmt, clippy, the unit
-tests and a release build on Linux, Windows and macOS for every push and pull
-request. The GUI suite runs on Linux from the Actions tab (**Run workflow**,
-optionally just one suite) and every Monday.
+The CI workflow ([`ci.yml`](.github/workflows/ci.yml)) runs fmt, clippy, the
+unit tests and a release build on Linux, Windows and macOS for every push and
+pull request. The GUI suite runs on Linux from the Actions tab (**Run
+workflow**, optionally just one suite) and every Monday; its report is kept as
+the `gui-test-results` artifact.
 
 ## Architecture
 
@@ -246,10 +342,12 @@ The design — pipeline, concurrency model, crate layout — is written up in
 - [`docs/index.md`](docs/index.md) — problem statement, goals, high-level shape.
 - [`docs/architecture.md`](docs/architecture.md) — the full system design.
 - [`docs/query-engines.md`](docs/query-engines.md) — the query-dialect landscape and why these four were picked.
+- [`docs/tools.md`](docs/tools.md) — the Tools window, tool by tool.
 
 ## License
 
-[MIT](LICENSE)
+[MIT](LICENSE). The app has no accounts, telemetry, crash reporting or update
+checks of its own — see [PRIVACY.md](PRIVACY.md).
 
 Built with the help of [Claude](https://claude.com) — see
 [`docs/`](docs/index.md) for the architecture docs behind it.
