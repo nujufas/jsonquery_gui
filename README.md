@@ -153,15 +153,22 @@ scoop install jsonquery-gui/jsonquery-gui
 This installs the release's Windows zip with a Start-menu shortcut and a
 `jsonquery-gui` command; `scoop update jsonquery-gui` follows new releases. The
 executable is not code-signed, so Windows SmartScreen may warn the first time
-it runs. Packaging notes: [`packaging/scoop/`](packaging/scoop/).
+it runs.
 
 ### Download a build
 
 Prebuilt Linux and Windows binaries are attached to each
 [GitHub Release](https://github.com/nujufas/jsonquery_gui/releases). An AUR
-package (`jsonquery-gui-bin`) is also available for Arch-based distros — see
-[`packaging/aur/`](packaging/aur/). You can also build everything yourself
-with the scripts in [`build/`](build/) — see [Building](#building) below.
+package (`jsonquery-gui-bin`) is also available for Arch-based distros. To
+build the app yourself, see [Build from source](#build-from-source) below.
+
+The AppImage is desktop-pinnable out of the box: it self-registers a
+`.desktop` entry and icon on first launch (no `appimaged`/AppImageLauncher
+required), so right-click → Pin works from the taskbar/dock immediately. It
+embeds the static type 2 runtime (no libfuse2 needed to start it), carries
+fallback copies of the xkbcommon libraries for systems that lack them, and
+embeds update information, so AppImageUpdate (or a launcher built on it) can
+fetch newer releases.
 
 ### Build from source
 
@@ -195,42 +202,6 @@ cargo build --release -p jsonquery_gui
 # binary at target/release/jsonquery_gui
 ```
 
-Cross-platform packaged builds live in [`build/`](build/), output to `dist/`:
-
-```sh
-build/linux.sh      # x86_64 .tar.gz, cross-compiled via `cross`/Docker
-build/appimage.sh   # x86_64 .AppImage, likewise
-build/linux.sh aarch64      # arm64 .tar.gz, cross-compiled via `cross`/Docker
-build/appimage.sh aarch64   # arm64 .AppImage, likewise
-build/windows.sh    # cross-compiled via `cross`/Docker -> .zip
-build/all.sh        # all of the above, plus a listing of dist/
-build/snap.sh       # sandboxed build via snapcraft -> dist/*.snap
-```
-
-`build/linux.sh`, `build/appimage.sh` and `build/windows.sh` all need a
-working Docker daemon (they cross-compile inside a container with the
-toolchain already installed, linking against an old glibc so the binaries
-run on distros much older than the machine that built them). `build/appimage.sh`
-downloads `appimagetool` on first use and needs FUSE to run it. On an actual
-Windows machine,
-`build\windows.bat` builds natively instead — same output layout, just needs a
-Rust toolchain and PowerShell.
-
-The AppImage is desktop-pinnable out of the box: it self-registers a
-`.desktop` entry and icon on first launch (no `appimaged`/AppImageLauncher
-required), so right-click → Pin works from the taskbar/dock immediately. It
-embeds the static type 2 runtime (no libfuse2 needed to start it), carries
-fallback copies of the xkbcommon libraries for systems that lack them, and
-embeds update information, so AppImageUpdate (or a launcher built on it) can
-fetch newer releases; each build also writes the `.zsync` file that goes with
-it, to be attached to the release next to the AppImage. See
-[`packaging/appimage/`](packaging/appimage/) for how it is built and tested.
-
-`build/snap.sh` needs `snapcraft` plus a multipass or LXD build backend. It
-isn't wired into `build/all.sh` — it builds in its own sandbox and isn't
-needed for the tarball/AppImage/Windows release artifacts. See
-[`packaging/snap/`](packaging/snap/) for build/test/publish details.
-
 ## Development
 
 ```sh
@@ -245,8 +216,22 @@ without pulling in a GUI toolkit:
 - **`crates/query`** — the four query engines, dispatched through a shared `QueryEngine` trait.
 - **`crates/app`** — the eframe/egui application itself.
 
-A Robot Framework GUI test suite (screen-driven, OCR-assisted) lives under
-[`test/`](test/README.md) — see that README for how to run it.
+The end-to-end GUI tests are a separate repository,
+[jsonquery_test](https://github.com/nujufas/jsonquery_test): a Robot Framework
+suite (screen-driven, OCR-assisted) that drives the real application on an
+isolated Xvfb display. Clone it, point it at this checkout and run it; it
+builds the app itself:
+
+```sh
+git clone https://github.com/nujufas/jsonquery_test.git
+cd jsonquery_test
+export JQ_APP_DIR=../jsonquery_gui   # this checkout
+./run.sh                             # every suite (a full run takes over an hour)
+./run.sh suites/query_engines/       # just one
+```
+
+Its README lists the system packages it needs (Xvfb, fluxbox, tesseract and a
+few more) and how to run suites in parallel.
 
 ## Architecture
 

@@ -13,10 +13,9 @@ mod tree_view;
 mod tutorial;
 mod worker;
 
-/// Must match the AppImage's `.desktop` file (`StartupWMClass=jsonquery_gui`,
-/// see `build/appimage.sh`) so window managers associate the running window
-/// with the launcher icon — otherwise "pin to taskbar" after launch doesn't
-/// stick.
+/// Must match the AppImage's `.desktop` file (`StartupWMClass=jsonquery_gui`)
+/// so window managers associate the running window with the launcher icon —
+/// otherwise "pin to taskbar" after launch doesn't stick.
 const APP_ID: &str = "jsonquery_gui";
 
 /// The window icon, shared by the main window and every other window it opens.
