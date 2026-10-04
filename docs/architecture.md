@@ -42,6 +42,15 @@ document (`Document::from_value`, `DocumentSource::Merged`). It parses every
 file up front, so it is capped at 128 MB of input in total and is separate from
 the memory-mapped path above.
 
+The window's other tools work the same way: **Format**, **Diff**, **Patch** and
+**Validate schema** are functions over `serde_json::Value` in `crates/query`
+(`reformat`, `diff`, `patch` — RFC 6902 and RFC 7386 — and `schema`, a thin
+layer over the `jsonschema` crate built without its network and file features,
+so a `$ref` can't make the app fetch anything). The app runs them on the worker
+thread as one kind of job (`Command::Tool`, answered by `Event::ToolDone`), with
+the open document shared rather than copied; a patched document opens as
+`DocumentSource::Derived`.
+
 ## 3. Query engines
 
 `jsonquery_query::QueryEngine` is the trait every dialect implements —
@@ -161,6 +170,7 @@ text on the clipboard.
 | `jaq-core` / `jaq-std` / `jaq-json` | Embedded jq-compatible query language and evaluator. |
 | `jsonpath-rust` | JSONPath (RFC 9535) engine. |
 | `jmespath` | JMESPath engine. |
+| `jsonschema` | JSON Schema validation for the Tools window's Validate schema (drafts 4–2020-12), without its HTTP and file features. |
 | `crossbeam-channel` | UI ⇄ worker-thread messaging. |
 | `rfd` | Native file dialog behind the toolbar's "…" button, alongside OS-level drag-and-drop (handled directly by egui/winit). |
 | `ureq` | Loading a document from a URL. |
@@ -177,7 +187,7 @@ jsonquery/
 ├── Cargo.toml                # workspace
 ├── crates/
 │   ├── core/                 # file ingest, the tree data layer
-│   ├── query/                # the four query engines + suggest.rs (autocomplete) + highlight.rs (query colouring)
+│   ├── query/                # the four query engines + suggest.rs (autocomplete) + highlight.rs (query colouring) + the Tools window's logic (merge, reformat, diff, patch, schema)
 │   └── app/                  # eframe app: panels, virtualized tree widget, worker thread
 ├── docs/                     # this site
 └── benches/                  # criterion benchmarks against synthetic large files

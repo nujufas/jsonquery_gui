@@ -16,6 +16,13 @@ pub enum DocumentSource {
     /// Built by the Tools window's merge from these files, in this order. It
     /// lives in memory only, until it is saved.
     Merged(Vec<PathBuf>),
+    /// Made by another of the Tools window's tools (a patch applied to a
+    /// document). It lives in memory only, until it is saved. `label` is what
+    /// the toolbar calls it, `file_name` what a save suggests.
+    Derived {
+        label: &'static str,
+        file_name: &'static str,
+    },
 }
 
 impl DocumentSource {
@@ -28,6 +35,7 @@ impl DocumentSource {
                 1 => "(merged from 1 file)".to_string(),
                 n => format!("(merged from {n} files)"),
             },
+            DocumentSource::Derived { label, .. } => (*label).to_string(),
         }
     }
 }
@@ -170,6 +178,15 @@ mod tests {
         assert_eq!(doc.byte_len, 12);
         assert_eq!(doc.top_level_values, 1);
         assert_eq!(doc.root, json!([1, 2]));
+    }
+
+    #[test]
+    fn a_derived_document_names_itself() {
+        let source = DocumentSource::Derived {
+            label: "(patched)",
+            file_name: "patched.json",
+        };
+        assert_eq!(source.label(), "(patched)");
     }
 
     #[test]

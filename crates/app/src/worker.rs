@@ -16,6 +16,8 @@ use jsonquery_query::merge;
 use serde_json::Value;
 
 use crate::app::human_bytes;
+use crate::tools::jobs::{self, Job, Outcome};
+use crate::tools::Tool;
 
 /// Cap on a URL download's response body, matching the "a few GB" v1 scale
 /// ceiling (Architecture §3) — protects against a malicious or misbehaving
@@ -143,6 +145,19 @@ pub enum Command {
         gen: u64,
         cancel: Arc<AtomicBool>,
     },
+    /// One of the Tools window's other jobs: format, diff, patch or validate
+    /// (see `tools::jobs`). `cancel` stops it.
+    Tool {
+        tool: Tool,
+        job: Job,
+        gen: u64,
+        cancel: Arc<AtomicBool>,
+    },
+    /// Write `text` to `path`, as the Tools window's Save does.
+    SaveText {
+        text: Arc<str>,
+        path: PathBuf,
+    },
     Query {
         doc: Arc<Document>,
         text: String,
@@ -185,6 +200,12 @@ pub enum Event {
     MergeDone {
         gen: u64,
         result: Result<MergeOutcome, String>,
+    },
+    /// `Command::Tool` finished (`tool` and `gen` say which one).
+    ToolDone {
+        tool: Tool,
+        gen: u64,
+        result: Result<Outcome, String>,
     },
     /// `Command::CopyNode` finished serializing — the UI thread still has
     /// to decide whether to copy it straight to the clipboard or hold it
@@ -361,6 +382,23 @@ pub fn spawn(cmd_rx: Receiver<Command>, evt_tx: Sender<Event>, wake: impl Fn() +
                     let result =
                         merge_files(&paths, &filter, &cancel).map_err(|e| format!("{e:#}"));
                     send(&evt_tx, Event::MergeDone { gen, result }, &wake);
+                }
+                Command::Tool {
+                    tool,
+                    job,
+                    gen,
+                    cancel,
+                } => {
+                    let result = jobs::run(job, &cancel);
+                    send(&evt_tx, Event::ToolDone { tool, gen, result }, &wake);
+                }
+                Command::SaveText { text, path } => {
+                    let result = std::fs::write(&path, text.as_bytes())
+                        .with_context(|| format!("writing {}", path.display()));
+                    match result {
+                        Ok(()) => send(&evt_tx, Event::Saved(path), &wake),
+                        Err(e) => send(&evt_tx, Event::SaveError(format!("{e:#}")), &wake),
+                    }
                 }
                 Command::Query {
                     doc,
@@ -657,6 +695,102 @@ mod tests {
             .err()
             .expect("an array and an object do not add");
         assert!(format!("{err:#}").contains("cannot calculate"));
+    }
+
+    const WAIT: Duration = Duration::from_secs(20);
+
+    fn start_worker() -> (Sender<Command>, Receiver<Event>) {
+        let (cmd_tx, cmd_rx) = crossbeam_channel::unbounded();
+        let (evt_tx, evt_rx) = crossbeam_channel::unbounded();
+        spawn(cmd_rx, evt_tx, || {});
+        (cmd_tx, evt_rx)
+    }
+
+    #[test]
+    fn saved_text_is_written_as_given_and_reported() {
+        let dir = temp_dir("save-text");
+        let path = dir.join("out.json");
+        let (commands, events) = start_worker();
+        commands
+            .send(Command::SaveText {
+                text: Arc::from("[\n  1\n]"),
+                path: path.clone(),
+            })
+            .unwrap();
+        match events.recv_timeout(WAIT).unwrap() {
+            Event::Saved(saved) => assert_eq!(saved, path),
+            _ => panic!("expected the save to be reported"),
+        }
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "[\n  1\n]");
+    }
+
+    #[test]
+    fn saving_text_where_it_cannot_go_is_an_error_naming_the_file() {
+        let path = temp_dir("save-text-missing")
+            .join("no-such-folder")
+            .join("out.json");
+        let (commands, events) = start_worker();
+        commands
+            .send(Command::SaveText {
+                text: Arc::from("[]"),
+                path: path.clone(),
+            })
+            .unwrap();
+        match events.recv_timeout(WAIT).unwrap() {
+            Event::SaveError(message) => {
+                assert!(message.contains(&path.display().to_string()), "{message}");
+            }
+            _ => panic!("expected an error"),
+        }
+    }
+
+    #[test]
+    fn a_tool_job_is_answered_under_its_tool_and_generation() {
+        let (commands, events) = start_worker();
+        commands
+            .send(Command::Tool {
+                tool: Tool::Format,
+                job: Job::Format {
+                    input: jobs::Input::Text("[1]".to_owned()),
+                    options: jsonquery_query::reformat::Options::default(),
+                },
+                gen: 7,
+                cancel: Arc::new(AtomicBool::new(false)),
+            })
+            .unwrap();
+        match events.recv_timeout(WAIT).unwrap() {
+            Event::ToolDone { tool, gen, result } => {
+                assert_eq!((tool, gen), (Tool::Format, 7));
+                match result {
+                    Ok(Outcome::Format(formatted)) => assert_eq!(&*formatted.text, "[\n  1\n]"),
+                    _ => panic!("expected the formatted text"),
+                }
+            }
+            _ => panic!("expected the job's answer"),
+        }
+    }
+
+    #[test]
+    fn a_tool_job_that_was_cancelled_says_so() {
+        let (commands, events) = start_worker();
+        commands
+            .send(Command::Tool {
+                tool: Tool::Diff,
+                job: Job::Diff {
+                    before: jobs::Input::Text("[1]".to_owned()),
+                    after: jobs::Input::Text("[2]".to_owned()),
+                },
+                gen: 1,
+                cancel: Arc::new(AtomicBool::new(true)),
+            })
+            .unwrap();
+        match events.recv_timeout(WAIT).unwrap() {
+            Event::ToolDone { tool, result, .. } => {
+                assert_eq!(tool, Tool::Diff);
+                assert!(matches!(result, Err(e) if e == "cancelled"));
+            }
+            _ => panic!("expected the job's answer"),
+        }
     }
 
     #[test]

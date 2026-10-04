@@ -17,6 +17,8 @@ struct Harness {
     shapes: Vec<egui::epaint::ClippedShape>,
     /// Every viewport command any frame has sent.
     commands: Vec<egui::ViewportCommand>,
+    /// Everything any frame has put on the clipboard, oldest first.
+    copied: Vec<String>,
 }
 
 impl Harness {
@@ -29,6 +31,7 @@ impl Harness {
             time: 0.0,
             shapes: Vec::new(),
             commands: Vec::new(),
+            copied: Vec::new(),
         };
         // A couple of frames so every panel has measured itself.
         h.settle();
@@ -51,6 +54,11 @@ impl Harness {
         self.shapes = output.shapes;
         for viewport in output.viewport_output.values() {
             self.commands.extend(viewport.commands.iter().cloned());
+        }
+        for command in &output.platform_output.commands {
+            if let egui::OutputCommand::CopyText(text) = command {
+                self.copied.push(text.clone());
+            }
         }
     }
 
@@ -122,6 +130,25 @@ impl Harness {
         self.pointer(x, y);
         self.button(x, y, true);
         self.button(x, y, false);
+        self.settle();
+    }
+
+    /// Let `seconds` go by, a frame at a time.
+    fn pause(&mut self, seconds: f64) {
+        for _ in 0..(seconds * 60.0) as usize {
+            self.frame();
+        }
+    }
+
+    /// Two clicks in a row, close enough in time and place to be a double click
+    /// (and not, with an earlier click close behind, a triple one).
+    fn double_click(&mut self, x: f32, y: f32) {
+        self.pause(1.0);
+        self.pointer(x, y);
+        for _ in 0..2 {
+            self.button(x, y, true);
+            self.button(x, y, false);
+        }
         self.settle();
     }
 
@@ -1414,4 +1441,540 @@ fn a_cancelled_merge_is_not_shown_as_an_error() {
     h.settle();
     assert!(is_drawn(&h, "Cancelled."), "{:?}", h.texts());
     assert!(!is_drawn(&h, "cancelled"));
+}
+
+// The other tools of the Tools window: Format, Diff, Patch and Validate.
+
+use crate::tools::Tool;
+
+fn open_tool(h: &mut Harness, tool: Tool) {
+    let ctx = h.ctx.clone();
+    h.app.tools.open_on(&ctx, tool);
+    h.settle();
+}
+
+/// Click the button (or label) drawn as `text`.
+fn press(h: &mut Harness, text: &str) {
+    let at = center_of(h, text);
+    h.click(at.x, at.y);
+}
+
+fn rect_of(h: &Harness, text: &str) -> egui::Rect {
+    text_rects(&h.shapes)
+        .into_iter()
+        .find(|(t, _)| t == text)
+        .unwrap_or_else(|| panic!("{text:?} is drawn: {:?}", h.texts()))
+        .1
+}
+
+fn is_drawn_containing(h: &Harness, part: &str) -> bool {
+    h.texts().iter().any(|(t, _)| t.contains(part))
+}
+
+#[test]
+fn the_tools_window_lists_every_tool_and_each_opens_its_page() {
+    let mut h = Harness::new();
+    open_tool(&mut h, Tool::Merge);
+    for name in [
+        "Merge JSON",
+        "Format JSON",
+        "Diff JSON",
+        "Patch JSON",
+        "Validate schema",
+    ] {
+        assert!(is_drawn(&h, name), "{name}: {:?}", h.texts());
+    }
+    for (entry, heading) in [
+        ("Format JSON", "Format JSON"),
+        ("Diff JSON", "Diff JSON"),
+        ("Patch JSON", "Patch JSON"),
+        ("Validate schema", "Validate against a schema"),
+        ("Merge JSON", "Merge JSON files"),
+    ] {
+        press(&mut h, entry);
+        assert!(
+            is_drawn(&h, heading),
+            "{entry} opens {heading:?}: {:?}",
+            h.texts()
+        );
+    }
+}
+
+#[test]
+fn formatting_json_typed_into_the_box_and_changing_an_option() {
+    let mut h = Harness::new();
+    open_tool(&mut h, Tool::Format);
+    press(&mut h, "Paste JSON here, or drop a file");
+    h.type_text(r#"{"b":1,"a":[1,2]}"#);
+    h.settle();
+    press(&mut h, "Format");
+    wait_for(&mut h, "the formatted text", |h| {
+        is_drawn(h, "{\n  \"b\": 1,\n  \"a\": [\n    1,\n    2\n  ]\n}")
+    });
+
+    // An option changes what the answer would be, so the old one goes.
+    press(&mut h, "Sort keys");
+    assert!(
+        is_drawn(&h, "The formatted document appears here"),
+        "{:?}",
+        h.texts()
+    );
+    press(&mut h, "Format");
+    wait_for(&mut h, "the sorted text", |h| {
+        is_drawn(h, "{\n  \"a\": [\n    1,\n    2\n  ],\n  \"b\": 1\n}")
+    });
+}
+
+#[test]
+fn text_that_is_not_json_is_reported_with_its_line() {
+    let mut h = Harness::new();
+    open_tool(&mut h, Tool::Format);
+    h.app.tools.fill(Tool::Format, "Input", "{\n  \"a\": \n}");
+    h.settle();
+    press(&mut h, "Format");
+    wait_for(&mut h, "the error", |h| {
+        h.texts()
+            .iter()
+            .any(|(t, _)| t.starts_with("Input: ") && t.contains("line 3"))
+    });
+}
+
+#[test]
+fn diff_lists_what_changed_and_gives_the_patch() {
+    let mut h = Harness::new();
+    open_tool(&mut h, Tool::Diff);
+    h.app
+        .tools
+        .fill(Tool::Diff, "Before", r#"{"a":1,"b":[1,2,3]}"#);
+    h.app
+        .tools
+        .fill(Tool::Diff, "After", r#"{"a":2,"b":[1,3],"c":true}"#);
+    h.settle();
+    press(&mut h, "Compare");
+    wait_for(&mut h, "the changes", |h| is_drawn(h, "Changes (3)"));
+    for text in [
+        "/a",
+        "/b/1",
+        "/c",
+        "Changed",
+        "Removed",
+        "Added",
+        "1 added · 1 removed · 1 changed",
+    ] {
+        assert!(is_drawn(&h, text), "{text:?}: {:?}", h.texts());
+    }
+
+    press(&mut h, "Patch");
+    assert!(
+        is_drawn_containing(&h, r#"{"op": "replace", "path": "/a", "value": 2}"#),
+        "{:?}",
+        h.texts()
+    );
+}
+
+#[test]
+fn documents_that_are_the_same_are_said_to_be() {
+    let mut h = Harness::new();
+    open_tool(&mut h, Tool::Diff);
+    // Another order of keys, and another way to write a number.
+    h.app.tools.fill(Tool::Diff, "Before", r#"{"a":1,"b":2}"#);
+    h.app.tools.fill(Tool::Diff, "After", r#"{"b":2,"a":1.0}"#);
+    h.settle();
+    press(&mut h, "Compare");
+    wait_for(&mut h, "the answer", |h| {
+        is_drawn(h, "The documents are the same")
+    });
+    assert!(is_drawn(&h, "same"));
+}
+
+#[test]
+fn patching_a_document_and_opening_the_result_in_the_main_window() {
+    let mut h = Harness::new();
+    open_tool(&mut h, Tool::Patch);
+    h.app.tools.fill(Tool::Patch, "Document", r#"{"a":1}"#);
+    h.app.tools.fill(
+        Tool::Patch,
+        "Patch",
+        r#"[{"op":"add","path":"/b","value":2}]"#,
+    );
+    h.settle();
+    press(&mut h, "Apply");
+    wait_for(&mut h, "the patched document", |h| {
+        is_drawn(h, "{\n  \"a\": 1,\n  \"b\": 2\n}")
+    });
+    assert!(h.app.doc.is_none(), "nothing is opened until asked");
+
+    press(&mut h, "Open in main window");
+    let doc = h.app.doc.clone().expect("the result opened");
+    assert_eq!(doc.root, serde_json::json!({"a": 1, "b": 2}));
+    assert_eq!(doc.source.label(), "(patched)");
+    assert_eq!(h.app.source_input, "", "nothing to reload from the field");
+    assert!(is_drawn(&h, "(patched)"), "{:?}", h.texts());
+    assert_toolbar_does_not_overlap(&h, "patched");
+}
+
+#[test]
+fn a_patch_that_fails_names_the_operation() {
+    let mut h = Harness::new();
+    open_tool(&mut h, Tool::Patch);
+    h.app.tools.fill(Tool::Patch, "Document", r#"{"a":1}"#);
+    h.app
+        .tools
+        .fill(Tool::Patch, "Patch", r#"[{"op":"remove","path":"/zzz"}]"#);
+    h.settle();
+    press(&mut h, "Apply");
+    wait_for(&mut h, "the error", |h| {
+        is_drawn_containing(h, "operation 1 (remove /zzz)")
+    });
+}
+
+#[test]
+fn validating_the_open_document_and_showing_a_problem_in_it() {
+    let mut h = Harness::new();
+    load(&mut h, r#"{"age": -1}"#);
+    open_tool(&mut h, Tool::Validate);
+    h.app.tools.fill(
+        Tool::Validate,
+        "Schema",
+        r#"{"properties":{"age":{"minimum":0}},"required":["name"]}"#,
+    );
+    h.settle();
+    let open = h.pop_buttons("Open document");
+    assert_eq!(open.len(), 2, "one in each box: {:?}", h.texts());
+    // The document's box is the upper one.
+    h.click(open[0].x, open[0].y);
+
+    press(&mut h, "Validate");
+    wait_for(&mut h, "the problems", |h| is_drawn(h, "2 problems"));
+    assert!(is_drawn(&h, "(document)") && is_drawn(&h, "/age"));
+
+    press(&mut h, "/age");
+    press(&mut h, "Show in main window");
+    assert_eq!(h.app.query_text, "/age");
+    assert_eq!(h.app.query_engine, Some(jsonquery_query::Kind::JsonPointer));
+}
+
+#[test]
+fn a_document_that_fits_the_schema_is_valid() {
+    let mut h = Harness::new();
+    open_tool(&mut h, Tool::Validate);
+    h.app.tools.fill(Tool::Validate, "Document", r#"{"n": 1}"#);
+    h.app
+        .tools
+        .fill(Tool::Validate, "Schema", r#"{"type":"object"}"#);
+    h.settle();
+    press(&mut h, "Validate");
+    wait_for(&mut h, "the answer", |h| {
+        is_drawn(h, "The document is valid")
+    });
+    assert!(is_drawn(&h, "Valid"));
+}
+
+#[test]
+fn a_schema_that_cannot_be_used_is_explained() {
+    let mut h = Harness::new();
+    open_tool(&mut h, Tool::Validate);
+    h.app.tools.fill(Tool::Validate, "Document", "1");
+    h.app.tools.fill(Tool::Validate, "Schema", r#"{"type": 5}"#);
+    h.settle();
+    press(&mut h, "Validate");
+    wait_for(&mut h, "the error", |h| {
+        is_drawn_containing(h, "The schema can't be used")
+    });
+}
+
+#[test]
+fn the_two_boxes_of_a_page_are_stacked_with_the_button_under_them() {
+    for (tool, first, second, button) in [
+        (Tool::Diff, "Before", "After", "Compare"),
+        (Tool::Patch, "Document", "Patch", "Apply"),
+        (Tool::Validate, "Document", "Schema", "Validate"),
+    ] {
+        let mut h = Harness::new();
+        open_tool(&mut h, tool);
+        let (a, b, c) = (rect_of(&h, first), rect_of(&h, second), rect_of(&h, button));
+        assert!(
+            a.min.y < b.min.y && b.min.y < c.min.y,
+            "{tool:?}: {a:?} {b:?} {c:?}"
+        );
+        assert!(
+            (a.min.x - b.min.x).abs() < 1.0,
+            "{tool:?}: both titles start at the left edge: {a:?} {b:?}"
+        );
+        // The second box starts about half way down the room there is.
+        assert!(
+            (b.min.y - a.min.y) > 100.0,
+            "{tool:?}: the boxes have room: {a:?} {b:?}"
+        );
+    }
+}
+
+#[test]
+fn the_buttons_of_both_halves_are_on_one_line_at_the_bottom() {
+    for (tool, left, right) in [
+        (Tool::Merge, "Merge", "Open in main window"),
+        (Tool::Format, "Format", "Save…"),
+        (Tool::Diff, "Compare", "Save patch…"),
+        (Tool::Patch, "Apply", "Open in main window"),
+        (Tool::Validate, "Validate", "Show in main window"),
+    ] {
+        let mut h = Harness::new();
+        open_tool(&mut h, tool);
+        // The main window has a "Save…" of its own, higher up: the page's is the
+        // lowest.
+        let lowest = |text: &str| *h.pop_buttons(text).last().expect("is drawn");
+        let (l, r) = (lowest(left), lowest(right));
+        assert!(
+            (l.y - r.y).abs() < 3.0,
+            "{tool:?}: {left:?} at {l:?} and {right:?} at {r:?} are one line"
+        );
+        assert!(l.x < r.x, "{tool:?}: the right half is on the right");
+    }
+}
+
+#[test]
+fn swapping_the_documents_swaps_what_the_diff_says() {
+    let mut h = Harness::new();
+    open_tool(&mut h, Tool::Diff);
+    h.app.tools.fill(Tool::Diff, "Before", "[1]");
+    h.app.tools.fill(Tool::Diff, "After", "[1, 2]");
+    h.settle();
+    press(&mut h, "Compare");
+    wait_for(&mut h, "the answer", |h| is_drawn(h, "1 added"));
+
+    // Swapping drops the old answer; comparing again says the opposite.
+    press(&mut h, "Swap");
+    assert!(is_drawn(&h, "What differs appears here"), "{:?}", h.texts());
+    press(&mut h, "Compare");
+    wait_for(&mut h, "the opposite answer", |h| is_drawn(h, "1 removed"));
+    assert!(!is_drawn(&h, "1 added"));
+}
+
+#[test]
+fn clicking_a_change_copies_its_path_and_the_patch_can_be_copied() {
+    let mut h = Harness::new();
+    open_tool(&mut h, Tool::Diff);
+    h.app
+        .tools
+        .fill(Tool::Diff, "Before", r#"{"a/b": 1, "list": [1, 2]}"#);
+    h.app
+        .tools
+        .fill(Tool::Diff, "After", r#"{"a/b": 2, "list": [1, 2, 3]}"#);
+    h.settle();
+    press(&mut h, "Compare");
+    wait_for(&mut h, "the changes", |h| is_drawn(h, "Changes (2)"));
+
+    // A path is copied the way a JSON Pointer writes it.
+    press(&mut h, "/a~1b");
+    assert_eq!(h.copied.last().map(String::as_str), Some("/a~1b"));
+    assert!(
+        is_drawn_containing(&h, "Copied the path to /a~1b"),
+        "{:?}",
+        h.texts()
+    );
+
+    press(&mut h, "Copy patch");
+    let patch = h.copied.last().expect("the patch was copied");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(patch).unwrap(),
+        serde_json::json!([
+            {"op": "replace", "path": "/a~1b", "value": 2},
+            {"op": "add", "path": "/list/2", "value": 3},
+        ])
+    );
+}
+
+#[test]
+fn the_formatted_text_can_be_copied() {
+    let mut h = Harness::new();
+    open_tool(&mut h, Tool::Format);
+    h.app
+        .tools
+        .fill(Tool::Format, "Input", r#"{"b":[1,2],"a":null}"#);
+    h.settle();
+
+    // Nothing to copy before there is a result.
+    press(&mut h, "Copy");
+    assert!(h.copied.is_empty());
+
+    press(&mut h, "Format");
+    wait_for(&mut h, "the formatted text", |h| {
+        is_drawn(h, "{\n  \"b\": [\n    1,\n    2\n  ],\n  \"a\": null\n}")
+    });
+    press(&mut h, "Copy");
+    assert_eq!(
+        h.copied.last().map(String::as_str),
+        Some("{\n  \"b\": [\n    1,\n    2\n  ],\n  \"a\": null\n}")
+    );
+    assert!(is_drawn(&h, "Copied to the clipboard"));
+}
+
+#[test]
+fn a_patched_document_can_be_copied() {
+    let mut h = Harness::new();
+    open_tool(&mut h, Tool::Patch);
+    h.app
+        .tools
+        .fill(Tool::Patch, "Document", r#"{"a":1,"b":2}"#);
+    h.app
+        .tools
+        .fill(Tool::Patch, "Patch", r#"{"a":null,"c":3}"#);
+    h.settle();
+    // The default kind of patch is a list of operations, which this isn't.
+    press(&mut h, "Apply");
+    wait_for(&mut h, "the error", |h| {
+        is_drawn_containing(h, "array of operations")
+    });
+}
+
+#[test]
+fn a_report_can_be_copied_and_a_problem_shown_by_double_clicking() {
+    let mut h = Harness::new();
+    load(&mut h, r#"{"age": -1}"#);
+    open_tool(&mut h, Tool::Validate);
+    h.app.tools.fill(
+        Tool::Validate,
+        "Schema",
+        r#"{"properties":{"age":{"minimum":0}}}"#,
+    );
+    h.settle();
+    let open = h.pop_buttons("Open document");
+    h.click(open[0].x, open[0].y);
+    press(&mut h, "Validate");
+    wait_for(&mut h, "the problem", |h| is_drawn(h, "1 problem"));
+
+    press(&mut h, "Copy report");
+    let report = h.copied.last().expect("the report was copied").clone();
+    assert!(
+        report.starts_with("1 problem (Draft 2020-12)\n"),
+        "{report}"
+    );
+    assert!(report.contains("/age: -1 is less than the minimum of 0 [minimum]"));
+
+    // Nothing is picked yet, so Show is not available...
+    press(&mut h, "Show in main window");
+    assert_eq!(h.app.query_text, "");
+    // ...but a double click on the problem shows it.
+    let row = center_of(&h, "/age");
+    h.double_click(row.x, row.y);
+    assert_eq!(h.app.query_text, "/age");
+    assert_eq!(h.app.query_engine, Some(jsonquery_query::Kind::JsonPointer));
+}
+
+#[test]
+fn a_problem_is_shown_in_the_main_window_only_for_the_document_that_is_open() {
+    let mut h = Harness::new();
+    load(&mut h, r#"{"age": -1}"#);
+    open_tool(&mut h, Tool::Validate);
+    // The same document, but typed in rather than the open one.
+    h.app
+        .tools
+        .fill(Tool::Validate, "Document", r#"{"age": -1}"#);
+    h.app.tools.fill(
+        Tool::Validate,
+        "Schema",
+        r#"{"properties":{"age":{"minimum":0}}}"#,
+    );
+    h.settle();
+    press(&mut h, "Validate");
+    wait_for(&mut h, "the problem", |h| is_drawn(h, "1 problem"));
+
+    press(&mut h, "/age");
+    press(&mut h, "Show in main window");
+    assert_eq!(
+        h.app.query_text, "",
+        "a pointer means nothing to another document"
+    );
+}
+
+#[test]
+fn a_cancelled_job_is_not_shown_as_an_error_on_any_page() {
+    for (tool, hint) in [
+        (Tool::Format, "The formatted document appears here"),
+        (Tool::Diff, "What differs appears here"),
+        (Tool::Patch, "The patched document appears here"),
+        (Tool::Validate, "What does not fit the schema appears here"),
+    ] {
+        let mut h = Harness::new();
+        open_tool(&mut h, tool);
+        assert!(is_drawn(&h, hint), "{tool:?}: {:?}", h.texts());
+        h.app.tools.job_done(tool, 0, Err("cancelled".to_owned()));
+        h.settle();
+        assert!(is_drawn(&h, "Cancelled."), "{tool:?}: {:?}", h.texts());
+        assert!(!is_drawn(&h, "cancelled"), "{tool:?}");
+    }
+}
+
+#[test]
+fn an_answer_for_another_tool_is_reported_not_trusted() {
+    let mut h = Harness::new();
+    open_tool(&mut h, Tool::Diff);
+    let formatted = crate::tools::jobs::run(
+        crate::tools::jobs::Job::Format {
+            input: crate::tools::jobs::Input::Text("[1]".to_owned()),
+            options: jsonquery_query::reformat::Options::default(),
+        },
+        &std::sync::atomic::AtomicBool::new(false),
+    );
+    h.app.tools.job_done(Tool::Diff, 0, formatted);
+    h.settle();
+    assert!(
+        is_drawn_containing(&h, "answer was for another tool"),
+        "{:?}",
+        h.texts()
+    );
+}
+
+#[test]
+fn clearing_a_box_brings_back_its_hint_and_the_open_document_needs_one_to_be_open() {
+    let mut h = Harness::new();
+    open_tool(&mut h, Tool::Format);
+    h.app.tools.fill(Tool::Format, "Input", "[1]");
+    h.settle();
+    assert!(!is_drawn(&h, "Paste JSON here, or drop a file"));
+    // The main window has a Clear of its own, higher up: the box's is the lowest.
+    let clear = *h.pop_buttons("Clear").last().expect("is drawn");
+    h.click(clear.x, clear.y);
+    assert!(
+        is_drawn(&h, "Paste JSON here, or drop a file"),
+        "{:?}",
+        h.texts()
+    );
+
+    // With no document open, the button does nothing.
+    assert!(h.app.doc.is_none());
+    press(&mut h, "Open document");
+    assert!(is_drawn(&h, "Paste JSON here, or drop a file"));
+
+    // With one open, the box holds it, and says so.
+    load(&mut h, r#"{"k": [true]}"#);
+    press(&mut h, "Open document");
+    assert!(is_drawn(&h, "The open document"), "{:?}", h.texts());
+    press(&mut h, "Format");
+    wait_for(&mut h, "the formatted open document", |h| {
+        is_drawn(h, "{\n  \"k\": [\n    true\n  ]\n}")
+    });
+}
+
+#[test]
+fn a_patched_document_leaves_room_in_the_toolbar() {
+    let mut h = Harness::new();
+    open_tool(&mut h, Tool::Patch);
+    h.app.tools.fill(Tool::Patch, "Document", "[1]");
+    h.app.tools.fill(
+        Tool::Patch,
+        "Patch",
+        r#"[{"op":"add","path":"/-","value":2}]"#,
+    );
+    h.settle();
+    press(&mut h, "Apply");
+    wait_for(&mut h, "the patched document", |h| {
+        is_drawn(h, "[\n  1,\n  2\n]")
+    });
+    press(&mut h, "Open in main window");
+    assert!(is_drawn(&h, "(patched)"), "{:?}", h.texts());
+    assert_toolbar_does_not_overlap(&h, "patched");
+    h.app.dock.pop_out(Pane::Query, None, None);
+    h.settle();
+    assert_toolbar_does_not_overlap(&h, "patched, a pane out");
 }

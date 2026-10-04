@@ -34,13 +34,19 @@ file (or paste JSON directly) and query it with **jq**, **JSON Pointer**,
   can edit and experiment. See [Tutorial](docs/tutorial.md).
 
   ![The tutorial window](docs/images/screenshot-tutorial.png)
-- **Merge JSON files** — the dim 🛠 icon next to the tutorial opens a Tools
-  window; **Merge JSON** combines several files into one document with a jq
-  filter, the way `jq -s` does. Drop the files on it (or on the main window),
-  or add them with a button; pick *Append arrays* (the default, jq's `add`),
-  *Deep-merge objects* and the like, or write your own filter, then open the
-  result in the main window or save it. For files that are not very large —
-  a merge happens in memory. See [Tools](docs/tools.md).
+- **Tools** — the dim 🛠 icon next to the tutorial opens a window of small
+  utilities that go with the viewer:
+  **Merge JSON** combines several files into one document with a jq filter,
+  the way `jq -s` does (drop the files on it, or on the main window);
+  **Format JSON** pretty-prints with 2 or 4 spaces or a tab, minifies, sorts
+  the keys; **Diff JSON** lists what was added, removed and changed between two
+  documents and gives the RFC 6902 JSON Patch for it; **Patch JSON** applies a
+  JSON Patch or a JSON Merge Patch; **Validate schema** checks a document
+  against a JSON Schema (drafts 4 to 2020-12) and shows a problem in the
+  document that is open. JSON goes in by pasting, dropping a file, or from the
+  document open in the main window; results can be opened there, copied or
+  saved. They work in memory, so they are for documents that are not very
+  large. See [Tools](docs/tools.md).
 - **Streamed, cancellable queries** — results appear as jq produces them, so
   `first(...)`/`limit(...)` genuinely stop early; starting a new query aborts
   whatever was still running.

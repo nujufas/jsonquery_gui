@@ -20,12 +20,16 @@
 //! lower-level function.
 
 mod convert;
+pub mod diff;
 pub mod highlight;
 pub mod jmespath_engine;
 pub mod jq;
 pub mod json_pointer;
 pub mod jsonpath;
 pub mod merge;
+pub mod patch;
+pub mod reformat;
+pub mod schema;
 pub mod suggest;
 pub mod tutorial;
 

@@ -457,7 +457,9 @@ impl App {
         // Pasted JSON and a merge have no address to name, so the field goes
         // back to empty, ready for the next source.
         self.source_input = match &doc.source {
-            DocumentSource::Pasted | DocumentSource::Merged(_) => String::new(),
+            DocumentSource::Pasted | DocumentSource::Merged(_) | DocumentSource::Derived { .. } => {
+                String::new()
+            }
             source => source.label(),
         };
         self.doc = Some(doc);
@@ -493,6 +495,7 @@ impl App {
                     self.save_error = Some(e);
                 }
                 Event::MergeDone { gen, result } => self.tools.merge_done(gen, result),
+                Event::ToolDone { tool, gen, result } => self.tools.job_done(tool, gen, result),
                 Event::CopyReady(text) => {
                     self.copy_error = None;
                     if text.len() <= CLIPBOARD_WARN_BYTES {
@@ -1329,6 +1332,19 @@ impl App {
                 self.document_loaded(doc);
                 ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Focus);
             }
+            tools::Request::Job {
+                tool,
+                job,
+                gen,
+                cancel,
+            } => {
+                let _ = self.cmd_tx.send(Command::Tool {
+                    tool,
+                    job,
+                    gen,
+                    cancel,
+                });
+            }
             tools::Request::Save { doc, path } => {
                 let _ = self.cmd_tx.send(Command::SaveFile {
                     doc,
@@ -1336,7 +1352,22 @@ impl App {
                     path,
                 });
             }
+            tools::Request::SaveText { text, path } => {
+                let _ = self.cmd_tx.send(Command::SaveText { text, path });
+            }
+            tools::Request::Show(pointer) => self.show_pointer(ctx, pointer),
         }
+    }
+
+    /// Show the value at a JSON Pointer in the open document, which is what the
+    /// Tools window's Validate does for a problem: the pointer goes in the
+    /// query box, under the Pointer engine, and runs.
+    fn show_pointer(&mut self, ctx: &egui::Context, pointer: String) {
+        self.query_engine = Some(jsonquery_query::Kind::JsonPointer);
+        self.query_text = pointer;
+        self.query_suggest.close();
+        self.run_query();
+        ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Focus);
     }
 
     /// Whether a file is being dragged over this window, opening one that is
@@ -1383,8 +1414,13 @@ impl App {
             // longer than "(pasted JSON)"; and either of those labels leaves
             // too little room for the "dock all" button while a pane is out.
             let merged = doc.is_some_and(|d| matches!(d.source, DocumentSource::Merged(_)));
-            let labelled =
-                merged || doc.is_some_and(|d| matches!(d.source, DocumentSource::Pasted));
+            let labelled = merged
+                || doc.is_some_and(|d| {
+                    matches!(
+                        d.source,
+                        DocumentSource::Pasted | DocumentSource::Derived { .. }
+                    )
+                });
             let mut reserve = TOOLBAR_TRAILING_RESERVE;
             if ndjson_note {
                 reserve += NDJSON_NOTE_WIDTH;
@@ -1447,7 +1483,9 @@ impl App {
             if let Some(doc) = &self.doc {
                 if matches!(
                     doc.source,
-                    DocumentSource::Pasted | DocumentSource::Merged(_)
+                    DocumentSource::Pasted
+                        | DocumentSource::Merged(_)
+                        | DocumentSource::Derived { .. }
                 ) {
                     ui.label(doc.source.label());
                 }
@@ -2743,7 +2781,7 @@ impl App {
         if let Some(request) = self.tutorial.show(&ctx) {
             self.apply_tutorial_request(request);
         }
-        if let Some(request) = self.tools.show(&ctx) {
+        if let Some(request) = self.tools.show(&ctx, self.doc.as_ref()) {
             self.apply_tools_request(&ctx, request);
         }
     }
@@ -3103,6 +3141,7 @@ fn default_filename_for_source(source: &DocumentSource) -> String {
             .unwrap_or_else(|| "data.json".to_string()),
         DocumentSource::Pasted => "data.json".to_string(),
         DocumentSource::Merged(_) => "merged.json".to_string(),
+        DocumentSource::Derived { file_name, .. } => (*file_name).to_string(),
         DocumentSource::Url(url) => url
             .split(['?', '#'])
             .next()
@@ -3250,6 +3289,28 @@ mod tests {
         assert_eq!(parse_source_input(""), None);
         assert_eq!(parse_source_input("  \t "), None);
         assert_eq!(parse_source_input("\"\""), None);
+    }
+
+    #[test]
+    fn a_save_suggests_a_name_that_fits_where_the_document_came_from() {
+        let name = |source| default_filename_for_source(&source);
+        assert_eq!(
+            name(DocumentSource::File(PathBuf::from("/a/b.json"))),
+            "b.json"
+        );
+        assert_eq!(name(DocumentSource::Pasted), "data.json");
+        assert_eq!(name(DocumentSource::Merged(Vec::new())), "merged.json");
+        assert_eq!(
+            name(DocumentSource::Derived {
+                label: "(patched)",
+                file_name: "patched.json"
+            }),
+            "patched.json"
+        );
+        assert_eq!(
+            name(DocumentSource::Url("https://x.org/a/c.json?q=1".to_owned())),
+            "c.json"
+        );
     }
 
     #[test]
