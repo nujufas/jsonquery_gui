@@ -15,14 +15,21 @@
 //! does — to do whatever has to be done outside the window: start a job, open
 //! a result in the main window, save a file.
 //!
-//! The pages share one look (`widgets.rs`): a heading over two halves, each with
-//! a title row, a box that takes all the height there is, and its buttons pinned
-//! at the bottom. The JSON a tool works on goes in the same kind of box
-//! everywhere (`operand.rs`). Explanations are tooltips rather than paragraphs.
+//! The window looks like the main window, and is made of the same parts
+//! (`widgets.rs`): a row of tabs on top, one for each tool; a command row with
+//! the page's main button and options, as the Query row has Run; two panes, each
+//! with a heading, its buttons and a line in a header, as Source and Results
+//! have; and a status bar at the bottom. The JSON a tool works on goes in the
+//! same kind of box everywhere (`operand.rs`). Explanations are tooltips rather
+//! than paragraphs.
 //!
-//! It is an *immediate* viewport, so it runs inside the main window's frame with
-//! plain `&mut self` access, and egui falls back to an embedded floating window
-//! when the backend can't open native ones.
+//! On a desktop it is a *deferred* viewport — eframe redraws the window by
+//! itself and calls back into the app through its lock (`App::satellite_frame`)
+//! — so it keeps working when the main window is not being redrawn, which is
+//! the case once something covers the main window completely (GNOME sends no
+//! redraw callbacks then). Where there are no real windows (an embedded
+//! viewport; the headless tests) it is an immediate viewport, drawn inside the
+//! main window's frame, and egui shows it as a floating window.
 
 mod diff;
 mod format;
@@ -31,6 +38,7 @@ mod merge;
 mod operand;
 mod patch;
 mod shared;
+mod side_by_side;
 mod validate;
 mod widgets;
 
@@ -49,7 +57,7 @@ use merge::Merge;
 use patch::Patch;
 use shared::{Env, Shared};
 use validate::Validate;
-use widgets::{tool_row, PAGE_MARGIN, SIDEBAR_WIDTH};
+use widgets::ERROR;
 
 /// What the window asks the app to do.
 pub enum Request {
@@ -137,7 +145,7 @@ impl Default for Tools {
     }
 }
 
-fn viewport_id() -> egui::ViewportId {
+pub(crate) fn viewport_id() -> egui::ViewportId {
     egui::ViewportId::from_hash_of("jsonquery_tools_window")
 }
 
@@ -151,9 +159,13 @@ impl Tools {
         }
     }
 
-    #[cfg(test)]
     pub fn is_open(&self) -> bool {
         self.open
+    }
+
+    /// The window was closed (by the user): stop showing it.
+    pub fn close(&mut self) {
+        self.open = false;
     }
 
     /// Open the window on `tool`'s page.
@@ -176,6 +188,22 @@ impl Tools {
         operand
             .unwrap_or_else(|| panic!("there is no box called {title:?} on {tool:?}"))
             .set_text(text);
+    }
+
+    /// Read the file at `path` into the box called `title` on `tool`'s page, as
+    /// "Open file…" does.
+    #[cfg(test)]
+    pub fn fill_file(&mut self, tool: Tool, title: &str, path: &Path) {
+        let operand = match tool {
+            Tool::Merge => None,
+            Tool::Format => self.format.operand(title),
+            Tool::Diff => self.diff.operand(title),
+            Tool::Patch => self.patch.operand(title),
+            Tool::Validate => self.validate.operand(title),
+        };
+        operand
+            .unwrap_or_else(|| panic!("there is no box called {title:?} on {tool:?}"))
+            .load_file(path);
     }
 
     /// Put `paths` in the Merge tool's list (after the files already there)
@@ -256,9 +284,37 @@ impl Tools {
         }
     }
 
-    /// Draw the window (if open) for this frame. `open_doc` is the document
-    /// open in the main window, which the tools can work on. Returns what the
-    /// window asks the app to do, if anything.
+    /// The window the page is shown in. The same every frame it is open: egui
+    /// patches the real window to match a builder that changed.
+    pub fn builder(&mut self) -> egui::ViewportBuilder {
+        let icon = self
+            .icon
+            .get_or_insert_with(|| Arc::new(crate::app_icon()))
+            .clone();
+        egui::ViewportBuilder::default()
+            .with_title("jsonquery — Tools")
+            .with_inner_size([900.0, 580.0])
+            .with_min_inner_size([760.0, 440.0])
+            .with_app_id(crate::APP_ID)
+            .with_icon(icon)
+    }
+
+    /// One frame of the window when it is a window of its own, redrawn by
+    /// eframe by itself. `open_doc` is the document open in the main window.
+    /// Returns what the window asks the app to do, if anything.
+    pub fn window_frame(
+        &mut self,
+        ui: &mut egui::Ui,
+        open_doc: Option<&Arc<Document>>,
+    ) -> Option<Request> {
+        self.contents(ui, true, open_doc)
+    }
+
+    /// Draw the window (if open) for this frame as an immediate viewport, inside
+    /// the main window's frame — where there are no real windows to redraw by
+    /// themselves. `open_doc` is the document open in the main window, which the
+    /// tools can work on. Returns what the window asks the app to do, if
+    /// anything.
     pub fn show(
         &mut self,
         ctx: &egui::Context,
@@ -268,17 +324,7 @@ impl Tools {
             return None;
         }
 
-        let icon = self
-            .icon
-            .get_or_insert_with(|| Arc::new(crate::app_icon()))
-            .clone();
-        let builder = egui::ViewportBuilder::default()
-            .with_title("jsonquery — Tools")
-            .with_inner_size([940.0, 620.0])
-            .with_min_inner_size([900.0, 540.0])
-            .with_app_id(crate::APP_ID)
-            .with_icon(icon);
-
+        let builder = self.builder();
         let mut request = None;
         let mut close = false;
         ctx.show_viewport_immediate(viewport_id(), builder, |ui, class| {
@@ -300,31 +346,23 @@ impl Tools {
         own_input: bool,
         open_doc: Option<&Arc<Document>>,
     ) -> Option<Request> {
-        let mut request = None;
+        self.shared.expire(ui.ctx());
+        egui::Panel::top("tools_tabs").show(ui, |ui| self.tabs(ui));
+        egui::Panel::bottom("tools_status").show(ui, |ui| self.status_bar(ui));
 
-        let sidebar = egui::Frame::side_top_panel(ui.style()).inner_margin(egui::Margin::same(10));
-        egui::Panel::left("tools_list")
-            .resizable(false)
-            .exact_size(SIDEBAR_WIDTH)
-            .frame(sidebar)
-            .show(ui, |ui| self.tool_list(ui));
-
-        let page =
-            egui::Frame::central_panel(ui.style()).inner_margin(egui::Margin::same(PAGE_MARGIN));
-        egui::CentralPanel::default().frame(page).show(ui, |ui| {
-            let mut env = Env {
-                open_doc,
-                own_input,
-                shared: &mut self.shared,
-            };
-            request = match self.tool {
-                Tool::Merge => self.merge.ui(ui, &mut env),
-                Tool::Format => self.format.ui(ui, &mut env),
-                Tool::Diff => self.diff.ui(ui, &mut env),
-                Tool::Patch => self.patch.ui(ui, &mut env),
-                Tool::Validate => self.validate.ui(ui, &mut env),
-            };
-        });
+        // The page takes what is left: its command row, then its two panes.
+        let mut env = Env {
+            open_doc,
+            own_input,
+            shared: &mut self.shared,
+        };
+        let request = match self.tool {
+            Tool::Merge => self.merge.ui(ui, &mut env),
+            Tool::Format => self.format.ui(ui, &mut env),
+            Tool::Diff => self.diff.ui(ui, &mut env),
+            Tool::Patch => self.patch.ui(ui, &mut env),
+            Tool::Validate => self.validate.ui(ui, &mut env),
+        };
 
         // A save the window asked for: remember which, to say how it went.
         if let Some(Request::Save { path, .. } | Request::SaveText { path, .. }) = &request {
@@ -334,13 +372,41 @@ impl Tools {
         request
     }
 
-    fn tool_list(&mut self, ui: &mut egui::Ui) {
-        ui.spacing_mut().item_spacing.y = 2.0;
-        for tool in Tool::ALL {
-            if tool_row(ui, tool.label(), self.tool == tool).clicked() {
-                self.tool = tool;
+    /// The tools, as tabs: what the Tree and Text tabs of the main window's
+    /// panes are.
+    fn tabs(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            for tool in Tool::ALL {
+                ui.selectable_value(&mut self.tool, tool, tool.label());
             }
-        }
+        });
+    }
+
+    /// What the page says about its result, then the line about what was last
+    /// done (a save, a copy), as the main window's status bar says such things.
+    fn status_bar(&mut self, ui: &mut egui::Ui) {
+        // The bar keeps its height when there is nothing to say.
+        let row = ui.spacing().interact_size.y;
+        ui.set_min_height(row);
+        ui.horizontal_wrapped(|ui| {
+            let said = match self.tool {
+                Tool::Merge => self.merge.status_line(ui),
+                Tool::Format => self.format.status_line(ui),
+                Tool::Diff => self.diff.status_line(ui),
+                Tool::Patch => self.patch.status_line(ui),
+                Tool::Validate => self.validate.status_line(ui),
+            };
+            if let Some(notice) = self.shared.notice_for(self.tool) {
+                if said {
+                    ui.separator();
+                }
+                if notice.error {
+                    ui.colored_label(ERROR, notice.text.as_str());
+                } else {
+                    ui.weak(notice.text.as_str());
+                }
+            }
+        });
     }
 }
 

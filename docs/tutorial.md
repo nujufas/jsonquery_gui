@@ -126,11 +126,16 @@ get removed when an upgrade fixes them:
 
 ## Implementation notes
 
-- **An immediate viewport.** The window is opened with
-  `Context::show_viewport_immediate`, so it runs inside the main window's
-  frame with plain `&mut` access to its state — no `Arc<Mutex<…>>`. egui
-  falls back to an embedded floating window on a backend without native
-  multi-window support.
+- **A deferred viewport.** The window is opened with
+  `Context::show_viewport_deferred`: eframe redraws it by itself and calls
+  back into the app, which `Shared` keeps behind a lock, so it keeps
+  responding while it is maximized over the main window (a Wayland compositor
+  sends a completely covered window no redraw callbacks, so a window drawn
+  inside the main window's frame would freeze with it; see
+  [Architecture](architecture.md)). Where there are no real windows
+  (embedded viewports, the headless tests) it is an immediate viewport
+  instead, drawn inside the main window's frame, which egui shows as a
+  floating window.
 - **Missing glyphs.** egui's bundled *proportional* font has no `→`, `←` or
   `✓` (they draw as empty boxes); its monospace font has the arrows. Prose
   therefore draws arrows through `push_text` in `tutorial.rs`, and the UI

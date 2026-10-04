@@ -777,8 +777,8 @@ mod tests {
             .send(Command::Tool {
                 tool: Tool::Diff,
                 job: Job::Diff {
-                    before: jobs::Input::Text("[1]".to_owned()),
-                    after: jobs::Input::Text("[2]".to_owned()),
+                    left: jobs::Input::Text("[1]".to_owned()),
+                    right: jobs::Input::Text("[2]".to_owned()),
                 },
                 gen: 1,
                 cancel: Arc::new(AtomicBool::new(true)),

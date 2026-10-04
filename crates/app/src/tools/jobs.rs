@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context};
 use jsonquery_core::{Document, DocumentSource};
-use jsonquery_query::diff::{self, Change};
+use jsonquery_query::diff::{self, Change, SideBySide, TooLong};
 use jsonquery_query::reformat::{self, Indent};
 use jsonquery_query::{patch, schema};
 use serde_json::Value;
@@ -120,10 +120,8 @@ pub enum Job {
         input: Input,
         options: reformat::Options,
     },
-    Diff {
-        before: Input,
-        after: Input,
-    },
+    /// The patch it makes turns the left document into the right one.
+    Diff { left: Input, right: Input },
     Patch {
         document: Input,
         patch: Input,
@@ -194,6 +192,9 @@ pub struct Compared {
     /// to a line.
     pub patch: Arc<str>,
     pub patch_preview: Preview,
+    /// The two documents line by line, with what differs marked — or that they
+    /// are too long to lay out.
+    pub view: Result<SideBySide, TooLong>,
     pub elapsed: Duration,
 }
 
@@ -242,13 +243,14 @@ fn run_job(job: Job, cancel: &AtomicBool) -> anyhow::Result<Outcome> {
                 elapsed: start.elapsed(),
             }))
         }
-        Job::Diff { before, after } => {
-            check_size(&[&before, &after])?;
-            let first = before.load().context("Before")?;
-            let second = after.load().context("After")?;
+        Job::Diff { left, right } => {
+            check_size(&[&left, &right])?;
+            let first = left.load().context("Left")?;
+            let second = right.load().context("Right")?;
             stop_if_cancelled(cancel)?;
-            let found = diff::diff(first.held.value(), second.held.value(), cancel)
+            let compared = diff::compare(first.held.value(), second.held.value(), cancel)
                 .map_err(|_| anyhow::anyhow!("cancelled"))?;
+            let found = compared.diff;
             let patch = operations_text(&found.operations);
             Ok(Outcome::Diff(Compared {
                 equal: found.is_empty(),
@@ -258,6 +260,7 @@ fn run_job(job: Job, cancel: &AtomicBool) -> anyhow::Result<Outcome> {
                 changes: found.changes,
                 patch_preview: Preview::of(&patch),
                 patch: patch.into(),
+                view: compared.view,
                 elapsed: start.elapsed(),
             }))
         }
@@ -533,8 +536,8 @@ mod tests {
                 .unwrap();
         }
         let Err(error) = go(Job::Diff {
-            before: Input::File(a),
-            after: Input::File(b),
+            left: Input::File(a),
+            right: Input::File(b),
         }) else {
             panic!("should be refused")
         };
@@ -576,8 +579,8 @@ mod tests {
     #[test]
     fn comparing_two_documents() {
         let Ok(Outcome::Diff(d)) = go(Job::Diff {
-            before: text(r#"{"a":1,"b":[1,2,3]}"#),
-            after: text(r#"{"a":2,"b":[1,3],"c":true}"#),
+            left: text(r#"{"a":1,"b":[1,2,3]}"#),
+            right: text(r#"{"a":2,"b":[1,3],"c":true}"#),
         }) else {
             panic!("should compare")
         };
@@ -585,6 +588,9 @@ mod tests {
         assert_eq!((d.added, d.removed, d.changed), (1, 1, 1));
         assert_eq!(d.total(), 3);
         assert_eq!(d.changes.len(), 3);
+        let view = d.view.as_ref().expect("short enough to lay out");
+        assert_eq!(view.blocks.len(), 3, "a change, a removal and an addition");
+        assert_eq!((view.left_lines, view.right_lines), (8, 8));
         assert_eq!(
             &*d.patch,
             "[\n  {\"op\": \"replace\", \"path\": \"/a\", \"value\": 2},\n  \
@@ -596,8 +602,8 @@ mod tests {
     #[test]
     fn the_same_documents_have_an_empty_patch() {
         let Ok(Outcome::Diff(d)) = go(Job::Diff {
-            before: text(r#"{"a":1,"b":2}"#),
-            after: text(r#"{"b":2,"a":1}"#),
+            left: text(r#"{"a":1,"b":2}"#),
+            right: text(r#"{"b":2,"a":1}"#),
         }) else {
             panic!("should compare")
         };
@@ -608,12 +614,12 @@ mod tests {
     #[test]
     fn a_bad_document_is_named_by_its_side() {
         let Err(error) = go(Job::Diff {
-            before: text("[1]"),
-            after: text("[1,"),
+            left: text("[1]"),
+            right: text("[1,"),
         }) else {
             panic!("should fail")
         };
-        assert!(error.starts_with("After: "), "{error}");
+        assert!(error.starts_with("Right: "), "{error}");
     }
 
     #[test]

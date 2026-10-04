@@ -4,28 +4,22 @@
 //! a file, or the document open in the main window; the result is previewed and
 //! can be copied or saved.
 //!
-//! The left half is the input with the options and the Format button pinned
-//! under it, the right half the result with Save and Copy under it.
+//! The command row has the Format button and the options; the left pane is the
+//! input, the right pane the result, with Copy and Save in its header.
 
 use std::path::Path;
 
-use eframe::egui::{self, Align, Layout, RichText};
+use eframe::egui;
 use jsonquery_query::reformat::{Indent, Options};
 
 use super::jobs::{Formatted, Job};
 use super::operand::{deliver, dropped_files, Operand};
 use super::shared::{Env, Run};
 use super::widgets::{
-    action_row, fill, halves, heading, notice_line, pinned, preview_box, primary_button,
-    result_box, run_row, secondary_button, title_row,
+    command_bar, halves, header, preview_box, result_area, run_button, RIGHT_MIN,
 };
 use super::{Request, Tool};
 use crate::app::human_bytes;
-
-/// Heights (margin included) the pinned parts are given on the first frame,
-/// before egui has measured them.
-const OPTIONS_HEIGHT_GUESS: f32 = 100.0;
-const RESULT_ACTIONS_HEIGHT_GUESS: f32 = 44.0;
 
 /// The most text Copy puts on the clipboard; Save takes any amount.
 pub(super) const COPY_LIMIT: usize = 16 * 1024 * 1024;
@@ -69,27 +63,25 @@ impl Format {
             self.run.clear();
         }
 
-        heading(ui, "Format JSON");
         let mut request = None;
-        let (left, right) = halves(ui, "format_halves");
-        left.show(ui, |ui| request = self.input_half(ui, env));
+        command_bar(ui, "format_command", |ui| request = self.command_ui(ui));
+        let (left, right) = halves(ui, "format_panes", RIGHT_MIN);
+        left.show(ui, |ui| self.input_pane(ui, env));
         right.show(ui, |ui| {
-            if let Some(r) = self.result_half(ui, env) {
+            if let Some(r) = self.result_pane(ui, env) {
                 request = Some(r);
             }
         });
         request
     }
 
-    fn input_half(&mut self, ui: &mut egui::Ui, env: &Env) -> Option<Request> {
+    /// The Format button and the options.
+    fn command_ui(&mut self, ui: &mut egui::Ui) -> Option<Request> {
         let busy = self.run.running();
         let mut request = None;
-
-        pinned("format_options", OPTIONS_HEIGHT_GUESS).show(ui, |ui| {
-            ui.add_enabled_ui(!busy, |ui| self.options_ui(ui));
-            ui.add_space(12.0);
+        ui.horizontal(|ui| {
             let ready = !self.input.is_empty();
-            if run_row(
+            if run_button(
                 ui,
                 &self.run,
                 "Format",
@@ -98,14 +90,7 @@ impl Format {
             ) {
                 request = self.start();
             }
-        });
-
-        fill().show(ui, |ui| {
-            ui.add_enabled_ui(!busy, |ui| {
-                if self.input.ui(ui, env.open_doc, true) {
-                    self.run.clear();
-                }
-            });
+            ui.add_enabled_ui(!busy, |ui| self.options_ui(ui));
         });
         request
     }
@@ -113,29 +98,34 @@ impl Format {
     /// Indent, and the two checkboxes. Changing one drops an old result.
     fn options_ui(&mut self, ui: &mut egui::Ui) {
         let before = self.options;
-        ui.horizontal_wrapped(|ui| {
-            ui.label("Indent");
-            let shown = INDENTS
-                .iter()
-                .find(|(indent, _)| *indent == self.options.indent)
-                .map_or("2 spaces", |(_, label)| *label);
-            egui::ComboBox::from_id_salt("format_indent")
-                .selected_text(shown)
-                .width(100.0)
-                .show_ui(ui, |ui| {
-                    for (indent, label) in INDENTS {
-                        ui.selectable_value(&mut self.options.indent, indent, label);
-                    }
-                });
-            ui.add_space(8.0);
-            ui.checkbox(&mut self.options.sort_keys, "Sort keys")
-                .on_hover_text("Put the keys of every object in order, at every depth");
-            ui.checkbox(&mut self.options.ascii_only, "ASCII only")
-                .on_hover_text("Write characters outside ASCII as \\uXXXX escapes");
-        });
+        ui.label("Indent");
+        let shown = INDENTS
+            .iter()
+            .find(|(indent, _)| *indent == self.options.indent)
+            .map_or("2 spaces", |(_, label)| *label);
+        egui::ComboBox::from_id_salt("format_indent")
+            .selected_text(shown)
+            .width(90.0)
+            .show_ui(ui, |ui| {
+                for (indent, label) in INDENTS {
+                    ui.selectable_value(&mut self.options.indent, indent, label);
+                }
+            });
+        ui.checkbox(&mut self.options.sort_keys, "Sort keys")
+            .on_hover_text("Put the keys of every object in order, at every depth");
+        ui.checkbox(&mut self.options.ascii_only, "ASCII only")
+            .on_hover_text("Write characters outside ASCII as \\uXXXX escapes");
         if self.options != before {
             self.run.clear();
         }
+    }
+
+    fn input_pane(&mut self, ui: &mut egui::Ui, env: &Env) {
+        ui.add_enabled_ui(!self.run.running(), |ui| {
+            if self.input.ui(ui, env.open_doc, true) {
+                self.run.clear();
+            }
+        });
     }
 
     fn start(&mut self) -> Option<Request> {
@@ -152,74 +142,59 @@ impl Format {
         })
     }
 
-    fn result_half(&mut self, ui: &mut egui::Ui, env: &mut Env) -> Option<Request> {
-        env.shared.expire(ui.ctx());
-        let mut request = None;
-
-        title_row(ui, |ui| {
-            ui.label(RichText::new("Result").strong());
-            if let Some(formatted) = self.run.outcome() {
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    ui.label(RichText::new(summary(formatted)).small().weak())
-                        .on_hover_text(format!("Formatted in {:.1?}.", formatted.elapsed));
-                });
-            }
-        });
-        ui.add_space(6.0);
-
-        pinned("format_result_actions", RESULT_ACTIONS_HEIGHT_GUESS)
-            .show(ui, |ui| request = self.result_actions(ui, env));
-
-        fill().show(ui, |ui| {
-            result_box(
-                ui,
-                "format",
-                &self.run,
-                "The formatted document appears here",
-                |ui, formatted| {
-                    preview_box(
-                        ui,
-                        "format",
-                        &formatted.preview.text,
-                        formatted.preview.truncated,
-                    );
-                },
-            );
-        });
-        request
-    }
-
-    /// Save… and Copy, at the right — there from the start, usable once there
-    /// is a result — and the line about what was last done.
-    fn result_actions(&self, ui: &mut egui::Ui, env: &mut Env) -> Option<Request> {
+    /// The result, with Copy and Save… in the header — there from the start,
+    /// usable once there is a result.
+    fn result_pane(&mut self, ui: &mut egui::Ui, env: &mut Env) -> Option<Request> {
         enum Act {
             Save,
             Copy,
         }
 
         let text = self.run.outcome().map(|f| f.text.clone());
+        let too_big = text.as_ref().is_some_and(|t| t.len() > COPY_LIMIT);
         let mut act = None;
-        action_row(ui, |ui| {
-            ui.add_enabled_ui(text.is_some(), |ui| {
+        header(
+            ui,
+            "Result",
+            |_| {},
+            |ui| {
+                // Right to left: Save… is the right-most.
                 if ui
-                    .add(primary_button(ui, "Save…"))
+                    .add_enabled(text.is_some(), egui::Button::new("Save…"))
                     .on_hover_text("Write the formatted text to a file")
                     .clicked()
                 {
                     act = Some(Act::Save);
                 }
-                let too_big = text.as_ref().is_some_and(|t| t.len() > COPY_LIMIT);
                 if ui
-                    .add_enabled(!too_big, secondary_button("Copy"))
+                    .add_enabled(text.is_some() && !too_big, egui::Button::new("Copy"))
                     .on_hover_text("Copy the formatted text")
-                    .on_disabled_hover_text("Too big to copy; save it instead")
+                    .on_disabled_hover_text(if too_big {
+                        "Too big to copy; save it instead"
+                    } else {
+                        "Nothing to copy yet"
+                    })
                     .clicked()
                 {
                     act = Some(Act::Copy);
                 }
-            });
-            notice_line(ui, env.shared.notice_for(Tool::Format));
-        });
+            },
+        );
+
+        result_area(
+            ui,
+            "format",
+            &self.run,
+            "The formatted document appears here",
+            |ui, formatted| {
+                preview_box(
+                    ui,
+                    "format",
+                    &formatted.preview.text,
+                    formatted.preview.truncated,
+                );
+            },
+        );
 
         let text = text?;
         match act? {
@@ -241,6 +216,18 @@ impl Format {
                 Some(Request::SaveText { text, path })
             }
         }
+    }
+
+    /// What the status bar says about the result: its size against the input's,
+    /// and how long it took. False when there is nothing to say.
+    pub(super) fn status_line(&self, ui: &mut egui::Ui) -> bool {
+        let Some(formatted) = self.run.outcome() else {
+            return false;
+        };
+        ui.label(summary(formatted));
+        ui.separator();
+        ui.weak(format!("Formatted in {:.1?}", formatted.elapsed));
+        true
     }
 }
 

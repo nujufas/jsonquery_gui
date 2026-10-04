@@ -3,10 +3,10 @@
 //! schema said so (see `jsonquery_query::schema`). Both boxes take typed or
 //! pasted JSON, a file, or the document open in the main window.
 //!
-//! The left half is the document and the schema with the Validate button
-//! pinned under them; the right half is the list of problems. A problem in the
-//! document that is open in the main window can be shown there: that puts its
-//! JSON Pointer in the query box.
+//! The command row has the Validate button and the option to check formats; the
+//! left pane is the document and the schema, one above the other; the right pane
+//! is the list of problems. A problem in the document that is open in the main
+//! window can be shown there: that puts its JSON Pointer in the query box.
 
 use std::sync::Arc;
 
@@ -18,14 +18,10 @@ use super::jobs::{Job, Validated};
 use super::operand::{deliver, dropped_files, stacked, Operand};
 use super::shared::{Env, Run};
 use super::widgets::{
-    action_row, centered_pair, fill, halves, heading, notice_line, pinned, primary_button,
-    result_box, run_row, secondary_button, tint, title_row, PathColumn, Tint,
+    command_bar, halves, header, result_area, row_background, run_button, tint, PathColumn, Tint,
+    RIGHT_MIN, ROW_HEIGHT,
 };
 use super::{Request, Tool};
-
-const OPTIONS_HEIGHT_GUESS: f32 = 100.0;
-const RESULT_ACTIONS_HEIGHT_GUESS: f32 = 44.0;
-const ROW_HEIGHT: f32 = 26.0;
 
 pub(super) struct Validate {
     document: Operand,
@@ -80,12 +76,12 @@ impl Validate {
             self.changed();
         }
 
-        heading(ui, "Validate against a schema");
         let mut request = None;
-        let (left, right) = halves(ui, "validate_halves");
-        left.show(ui, |ui| request = self.inputs_half(ui, env));
+        command_bar(ui, "validate_command", |ui| request = self.command_ui(ui));
+        let (left, right) = halves(ui, "validate_panes", RIGHT_MIN);
+        left.show(ui, |ui| self.inputs_pane(ui, env));
         right.show(ui, |ui| {
-            if let Some(r) = self.result_half(ui, env) {
+            if let Some(r) = self.result_pane(ui, env) {
                 request = Some(r);
             }
         });
@@ -98,11 +94,21 @@ impl Validate {
         self.run.clear();
     }
 
-    fn inputs_half(&mut self, ui: &mut egui::Ui, env: &Env) -> Option<Request> {
+    /// The Validate button and the option to check formats.
+    fn command_ui(&mut self, ui: &mut egui::Ui) -> Option<Request> {
         let busy = self.run.running();
         let mut request = None;
-
-        pinned("validate_options", OPTIONS_HEIGHT_GUESS).show(ui, |ui| {
+        ui.horizontal(|ui| {
+            let ready = !self.document.is_empty() && !self.schema.is_empty();
+            if run_button(
+                ui,
+                &self.run,
+                "Validate",
+                ready,
+                "Validate the document (Ctrl+Enter)",
+            ) {
+                request = self.start();
+            }
             ui.add_enabled_ui(!busy, |ui| {
                 if ui
                     .checkbox(&mut self.check_formats, "Check formats")
@@ -112,27 +118,16 @@ impl Validate {
                     self.changed();
                 }
             });
-            ui.add_space(12.0);
-            let ready = !self.document.is_empty() && !self.schema.is_empty();
-            if run_row(
-                ui,
-                &self.run,
-                "Validate",
-                ready,
-                "Validate the document (Ctrl+Enter)",
-            ) {
-                request = self.start();
-            }
-        });
-
-        fill().show(ui, |ui| {
-            ui.add_enabled_ui(!busy, |ui| {
-                if stacked(ui, env.open_doc, &mut self.document, &mut self.schema) {
-                    self.changed();
-                }
-            });
         });
         request
+    }
+
+    fn inputs_pane(&mut self, ui: &mut egui::Ui, env: &Env) {
+        ui.add_enabled_ui(!self.run.running(), |ui| {
+            if stacked(ui, env.open_doc, &mut self.document, &mut self.schema) {
+                self.changed();
+            }
+        });
     }
 
     fn start(&mut self) -> Option<Request> {
@@ -151,66 +146,9 @@ impl Validate {
         })
     }
 
-    fn result_half(&mut self, ui: &mut egui::Ui, env: &mut Env) -> Option<Request> {
-        env.shared.expire(ui.ctx());
-        let mut request = None;
-
-        title_row(ui, |ui| {
-            ui.label(RichText::new("Problems").strong());
-            if let Some(validated) = self.run.outcome() {
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    let (text, kind) = status(validated);
-                    let color = tint(ui.visuals(), kind);
-                    ui.label(RichText::new(text).strong().color(color))
-                        .on_hover_text(format!(
-                            "Checked against {} in {:.1?}.",
-                            validated.report.draft, validated.elapsed
-                        ));
-                });
-            }
-        });
-        ui.add_space(6.0);
-
-        pinned("validate_result_actions", RESULT_ACTIONS_HEIGHT_GUESS)
-            .show(ui, |ui| request = self.result_actions(ui, env));
-
-        let open_doc = env.open_doc;
-        let mut shown = None;
-        fill().show(ui, |ui| {
-            result_box(
-                ui,
-                "validate",
-                &self.run,
-                "What does not fit the schema appears here",
-                |ui, validated| {
-                    if validated.report.is_valid() {
-                        centered_pair(ui, "The document is valid", validated.report.draft);
-                        return;
-                    }
-                    let list = problems_list(ui, validated, self.selected);
-                    if list.selected.is_some() {
-                        self.selected = list.selected;
-                    }
-                    if let Some(index) = list.opened {
-                        if shows_in_main_window(validated, open_doc) {
-                            shown = Some(index);
-                        }
-                    }
-                },
-            );
-        });
-        if let Some(index) = shown {
-            if let Some(Ok(validated)) = &self.run.result {
-                request = Some(Request::Show(validated.report.problems[index].path.clone()));
-            }
-        }
-        request
-    }
-
-    /// Show in main window and Copy report, at the right — there from the
-    /// start, usable once there is something to act on — and the line about
-    /// what was last done.
-    fn result_actions(&self, ui: &mut egui::Ui, env: &mut Env) -> Option<Request> {
+    /// The problems, with Show in main window and Copy report in the header —
+    /// there from the start, usable once there is something to act on.
+    fn result_pane(&mut self, ui: &mut egui::Ui, env: &mut Env) -> Option<Request> {
         enum Act {
             Show,
             Copy,
@@ -221,36 +159,72 @@ impl Validate {
         let problems = validated.is_some_and(|v| !v.report.is_valid());
         let picked = self.selected.is_some();
         let mut act = None;
-        action_row(ui, |ui| {
-            let why_not = if validated.is_none() {
-                "Validate first"
-            } else if !problems {
-                "There is no problem to show"
-            } else if !in_main {
-                "Only for the document that is open in the main window"
-            } else {
-                "Pick a problem in the list"
-            };
-            if ui
-                .add_enabled(
-                    problems && in_main && picked,
-                    primary_button(ui, "Show in main window"),
-                )
-                .on_hover_text("Put the problem's JSON Pointer in the main window's query box")
-                .on_disabled_hover_text(why_not)
-                .clicked()
-            {
-                act = Some(Act::Show);
+        header(
+            ui,
+            "Problems",
+            |_| {},
+            |ui| {
+                let why_not = if validated.is_none() {
+                    "Validate first"
+                } else if !problems {
+                    "There is no problem to show"
+                } else if !in_main {
+                    "Only for the document that is open in the main window"
+                } else {
+                    "Pick a problem in the list"
+                };
+                // Right to left: Show in main window is the right-most.
+                if ui
+                    .add_enabled(
+                        problems && in_main && picked,
+                        egui::Button::new("Show in main window"),
+                    )
+                    .on_hover_text("Put the problem's JSON Pointer in the main window's query box")
+                    .on_disabled_hover_text(why_not)
+                    .clicked()
+                {
+                    act = Some(Act::Show);
+                }
+                if ui
+                    .add_enabled(problems, egui::Button::new("Copy report"))
+                    .on_hover_text("Copy the list of problems")
+                    .clicked()
+                {
+                    act = Some(Act::Copy);
+                }
+            },
+        );
+
+        let open_doc = env.open_doc;
+        let mut shown = None;
+        result_area(
+            ui,
+            "validate",
+            &self.run,
+            "What does not fit the schema appears here",
+            |ui, validated| {
+                if validated.report.is_valid() {
+                    let green = tint(ui.visuals(), Tint::Good);
+                    ui.colored_label(green, "The document is valid");
+                    ui.weak(validated.report.draft);
+                    return;
+                }
+                let list = problems_list(ui, validated, self.selected);
+                if list.selected.is_some() {
+                    self.selected = list.selected;
+                }
+                if let Some(index) = list.opened {
+                    if shows_in_main_window(validated, open_doc) {
+                        shown = Some(index);
+                    }
+                }
+            },
+        );
+        if let Some(index) = shown {
+            if let Some(Ok(validated)) = &self.run.result {
+                return Some(Request::Show(validated.report.problems[index].path.clone()));
             }
-            if ui
-                .add_enabled(problems, secondary_button("Copy report"))
-                .on_hover_text("Copy the list of problems")
-                .clicked()
-            {
-                act = Some(Act::Copy);
-            }
-            notice_line(ui, env.shared.notice_for(Tool::Validate));
-        });
+        }
 
         let validated = validated?;
         match act? {
@@ -265,6 +239,23 @@ impl Validate {
                 None
             }
         }
+    }
+
+    /// What the status bar says about the result: valid, or how many problems,
+    /// and against which draft, in how long. False when there is nothing to say.
+    pub(super) fn status_line(&self, ui: &mut egui::Ui) -> bool {
+        let Some(validated) = self.run.outcome() else {
+            return false;
+        };
+        let (text, kind) = status(validated);
+        let color = tint(ui.visuals(), kind);
+        ui.colored_label(color, text);
+        ui.separator();
+        ui.weak(format!(
+            "Checked against {} in {:.1?}",
+            validated.report.draft, validated.elapsed
+        ));
+        true
     }
 }
 
@@ -351,8 +342,8 @@ fn problems_list(ui: &mut egui::Ui, validated: &Validated, selected: Option<usiz
 
     let paths = PathColumn::of(ui, problems.iter().map(|p| path_or_document(&p.path)));
 
-    // Rows touch, so their stripes do. (Set before the scroll area, which takes
-    // its idea of how tall a row is from this.)
+    // Rows touch, so their highlights do. (Set before the scroll area, which
+    // takes its idea of how tall a row is from this.)
     ui.spacing_mut().item_spacing.y = 0.0;
     egui::ScrollArea::vertical()
         .id_salt("validate_problems")
@@ -361,8 +352,7 @@ fn problems_list(ui: &mut egui::Ui, validated: &Validated, selected: Option<usiz
             for index in range {
                 match problems.get(index) {
                     Some(problem) => {
-                        let response =
-                            problem_row(ui, index, problem, selected == Some(index), &paths);
+                        let response = problem_row(ui, problem, selected == Some(index), &paths);
                         // egui counts a click as a triple click when the one before
                         // the last was recent, so a quick click-then-double-click
                         // is not a "double" click: take both.
@@ -374,15 +364,10 @@ fn problems_list(ui: &mut egui::Ui, validated: &Validated, selected: Option<usiz
                         }
                     }
                     None => {
-                        ui.add_space(4.0);
-                        ui.label(
-                            RichText::new(format!(
-                                "Only the first {} problems are listed.",
-                                thousands(MAX_PROBLEMS)
-                            ))
-                            .small()
-                            .weak(),
-                        );
+                        ui.weak(format!(
+                            "Only the first {} problems are listed.",
+                            thousands(MAX_PROBLEMS)
+                        ));
                     }
                 }
             }
@@ -394,7 +379,6 @@ fn problems_list(ui: &mut egui::Ui, validated: &Validated, selected: Option<usiz
 /// place in the schema are in the tooltip.
 fn problem_row(
     ui: &mut egui::Ui,
-    index: usize,
     problem: &Problem,
     selected: bool,
     paths: &PathColumn,
@@ -403,27 +387,9 @@ fn problem_row(
         egui::vec2(ui.available_width(), ROW_HEIGHT),
         egui::Sense::click(),
     );
-    let visuals = ui.visuals().clone();
-    let fill = if selected {
-        Some(visuals.selection.bg_fill)
-    } else if response.hovered() {
-        Some(visuals.widgets.hovered.weak_bg_fill)
-    } else if index % 2 == 1 {
-        Some(visuals.faint_bg_color)
-    } else {
-        None
-    };
-    if let Some(fill) = fill {
-        ui.painter()
-            .rect_filled(rect, egui::CornerRadius::ZERO, fill);
-    }
-    let text = if selected {
-        visuals.selection.stroke.color
-    } else {
-        visuals.text_color()
-    };
+    row_background(ui, rect, selected, response.hovered());
 
-    let inner = rect.shrink2(egui::vec2(10.0, 0.0));
+    let inner = rect.shrink2(egui::vec2(4.0, 0.0));
     let path_width = paths.width(inner.width());
     let path_rect = Rect::from_min_size(inner.min, egui::vec2(path_width, ROW_HEIGHT));
     let message_rect =
@@ -438,16 +404,12 @@ fn problem_row(
     // The labels don't take clicks (selecting their text would), so that a click
     // anywhere on the row is a click on the row.
     cell(ui, path_rect).add(
-        egui::Label::new(
-            RichText::new(path_or_document(&problem.path))
-                .monospace()
-                .color(text),
-        )
-        .truncate()
-        .selectable(false),
+        egui::Label::new(RichText::new(path_or_document(&problem.path)).monospace())
+            .truncate()
+            .selectable(false),
     );
     cell(ui, message_rect).add(
-        egui::Label::new(RichText::new(&problem.message).color(text))
+        egui::Label::new(RichText::new(&problem.message))
             .truncate()
             .selectable(false),
     );

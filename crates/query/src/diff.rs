@@ -11,6 +11,10 @@
 //! digit are different). Arrays are ordered, but they are *aligned* by content
 //! before they are compared, so a value inserted at the start of a long array is
 //! one addition rather than a change to every element after it.
+//!
+//! [`compare`] does the same and also lays the two documents out side by side,
+//! line by line, with what differs marked — what a viewer like Beyond Compare
+//! shows (see [`view`]).
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -20,6 +24,10 @@ use serde_json::{Number, Value};
 
 use crate::patch::escape;
 use crate::reformat::{self, Indent};
+
+mod view;
+
+pub use view::{Block, Mark, Row, SideBySide, TooLong, MAX_ROWS};
 
 /// Changes kept in [`Diff::changes`] — the counts and the patch are complete
 /// whatever this is; it only bounds what a window has to list.
@@ -100,6 +108,38 @@ impl Diff {
 /// Compare `before` with `after`. `cancel` is looked at now and then, so a
 /// comparison of big arrays can be stopped from another thread.
 pub fn diff(before: &Value, after: &Value, cancel: &AtomicBool) -> Result<Diff, Cancelled> {
+    Ok(run(before, after, cancel)?.0)
+}
+
+/// What [`compare`] makes of two documents: the differences, and the documents
+/// laid out side by side with the differences marked (see [`view`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Comparison {
+    pub diff: Diff,
+    pub view: Result<SideBySide, TooLong>,
+}
+
+/// [`diff`], and the two documents laid out side by side.
+pub fn compare(
+    before: &Value,
+    after: &Value,
+    cancel: &AtomicBool,
+) -> Result<Comparison, Cancelled> {
+    let (diff, edit) = run(before, after, cancel)?;
+    let view = match view::build(before, after, edit.as_ref(), cancel) {
+        Ok(view) => Ok(view),
+        Err(view::Stop::TooLong) => Err(TooLong),
+        Err(view::Stop::Cancelled) => return Err(Cancelled),
+    };
+    Ok(Comparison { diff, view })
+}
+
+/// The differences, and the tree they were read from.
+fn run<'a>(
+    before: &'a Value,
+    after: &'a Value,
+    cancel: &AtomicBool,
+) -> Result<(Diff, Option<Edit<'a>>), Cancelled> {
     if cancel.load(Ordering::Relaxed) {
         return Err(Cancelled);
     }
@@ -109,11 +149,12 @@ pub fn diff(before: &Value, after: &Value, cancel: &AtomicBool) -> Result<Diff, 
         cells_left: TOTAL_CELLS,
     };
     let mut result = Diff::default();
-    if let Some(edit) = edit(before, after, &mut cx)? {
-        changes(&edit, &mut String::new(), &mut result);
-        operations(&edit, &mut String::new(), &mut result.operations);
+    let edit = edit(before, after, &mut cx)?;
+    if let Some(edit) = &edit {
+        changes(edit, &mut String::new(), &mut result);
+        operations(edit, &mut String::new(), &mut result.operations);
     }
-    Ok(result)
+    Ok((result, edit))
 }
 
 /// Whether two documents are the same JSON: objects whatever the order of their

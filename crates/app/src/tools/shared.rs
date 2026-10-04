@@ -116,12 +116,14 @@ impl<T> Run<T> {
     }
 
     /// The worker's answer. One to a job that has since been replaced is
-    /// dropped.
-    pub fn finish(&mut self, gen: u64, result: Result<T, String>) {
-        if gen == self.gen {
-            self.cancel = None;
-            self.result = Some(result);
+    /// dropped. True when it was taken.
+    pub fn finish(&mut self, gen: u64, result: Result<T, String>) -> bool {
+        if gen != self.gen {
+            return false;
         }
+        self.cancel = None;
+        self.result = Some(result);
+        true
     }
 
     /// What was computed no longer matches what is on the page.

@@ -10,13 +10,17 @@ use jsonquery_core::{
 };
 use serde_json::Value;
 
+use self::satellites::{Leaving, Satellite};
 use crate::dock::{Central, Dock, Pane};
+use crate::pane_header;
 use crate::query_highlight;
 use crate::query_suggest::{apply_suggestion, QuerySuggest};
 use crate::tools::{self, Tools};
 use crate::tree_view::{RowAction, TreeView};
 use crate::tutorial::{LoadRequest, Tutorial};
 use crate::worker::{self, Command, CopyTarget, Event, SearchRoot};
+
+mod satellites;
 
 /// Bounded live-preview cap (Architecture §7): the results tree never holds
 /// more than this many items in memory at once, no matter how large the
@@ -61,6 +65,19 @@ const WINDOW_DROP_GRACE_SECS: f64 = 0.5;
 /// "Load" and "Clear" buttons, the byte size, and the icon buttons pinned to
 /// the far right.
 const TOOLBAR_TRAILING_RESERVE: f32 = 380.0;
+/// The narrowest the toolbar's source field is made, however much the rest of
+/// the row wants.
+const SOURCE_FIELD_MIN_WIDTH: f32 = 120.0;
+/// Width the row of a popped-out Source pane's window keeps free to the right of
+/// its source field: the "…", "Load" and "Clear" buttons.
+const SOURCE_ROW_BUTTONS_WIDTH: f32 = 130.0;
+/// And, while something is loaded or loading, what the row says after them: a
+/// separator, the "(pasted JSON)" label and the byte size.
+const SOURCE_ROW_INFO_WIDTH: f32 = 170.0;
+/// The narrowest the field of that row is made. (It is the whole window's
+/// width, less what the row needs besides, so it is wide but for the narrowest
+/// windows.)
+const SOURCE_ROW_FIELD_MIN_WIDTH: f32 = 80.0;
 /// Extra width reserved while the "(N NDJSON records)" note is showing.
 const NDJSON_NOTE_WIDTH: f32 = 150.0;
 /// Extra width reserved for a merge's "(merged from N files)" label, which is
@@ -124,6 +141,9 @@ pub struct App {
     /// The (i) info window (also a second native window) — license, source,
     /// issues/contact, privacy and known limitations.
     info_window: InfoWindow,
+    /// How long each of those windows that was closed has waited for the main
+    /// window to drop it (`satellites.rs`).
+    leaving: Leaving,
     /// Which of the Query, Source and Results panes are in windows of their
     /// own (`dock.rs`).
     dock: Dock,
@@ -320,6 +340,22 @@ struct SearchMatch {
     preview: String,
 }
 
+/// What the worker does when it has something to say: ask for a frame of every
+/// window that may show it. A pane in a window of its own is redrawn on its own
+/// schedule (see `show_popped_panes`), and so is each of the other windows
+/// (`show_satellites`: the Tools window waits for what the worker does), while
+/// the main window may not be redrawn at all (it is not while it is hidden), so
+/// each of them has to be woken.
+fn wake_windows(ctx: &egui::Context) {
+    ctx.request_repaint();
+    for pane in Pane::ALL {
+        ctx.request_repaint_of(pane.viewport_id());
+    }
+    for window in Satellite::ALL {
+        ctx.request_repaint_of(window.viewport_id());
+    }
+}
+
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         Self::with_context(&cc.egui_ctx)
@@ -336,14 +372,7 @@ impl App {
         egui_ctx.set_theme(egui::ThemePreference::Dark);
 
         let ctx = egui_ctx.clone();
-        worker::spawn(cmd_rx, evt_tx, move || {
-            ctx.request_repaint();
-            // A pane in a window of its own is redrawn on its own schedule
-            // (see `show_popped_panes`), so it has to be woken too.
-            for pane in Pane::ALL {
-                ctx.request_repaint_of(pane.viewport_id());
-            }
-        });
+        worker::spawn(cmd_rx, evt_tx, move || wake_windows(&ctx));
 
         Self {
             cmd_tx,
@@ -372,6 +401,7 @@ impl App {
             tutorial: Tutorial::default(),
             tools: Tools::default(),
             info_window: InfoWindow::default(),
+            leaving: Leaving::default(),
             dock: Dock::default(),
             raise_window: None,
             run_after_load: false,
@@ -1401,102 +1431,30 @@ impl App {
     /// loaded (size, NDJSON note) and the icon buttons pinned to the right.
     fn toolbar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            ui.label("Source:");
-
             // The field gets the row minus a reserve for everything after it
             // (the three buttons, the byte size and an occasional NDJSON
             // note, and the icon buttons pinned to the far right) rather
             // than a fixed width — a long URL should get to use the room a
             // short one leaves empty.
-            let doc = self.doc.as_ref();
-            let ndjson_note = doc.is_some_and(|d| d.top_level_values > 1);
+            //
             // A merge names itself in the toolbar ("(merged from 3 files)"),
             // longer than "(pasted JSON)"; and either of those labels leaves
             // too little room for the "dock all" button while a pane is out.
-            let merged = doc.is_some_and(|d| matches!(d.source, DocumentSource::Merged(_)));
-            let labelled = merged
-                || doc.is_some_and(|d| {
-                    matches!(
-                        d.source,
-                        DocumentSource::Pasted | DocumentSource::Derived { .. }
-                    )
-                });
-            let mut reserve = TOOLBAR_TRAILING_RESERVE;
-            if ndjson_note {
-                reserve += NDJSON_NOTE_WIDTH;
-            }
-            if merged {
-                reserve += MERGED_LABEL_EXTRA_WIDTH;
-            }
-            if labelled && self.dock.any_popped() {
-                reserve += DOCK_ALL_BUTTON_WIDTH;
-            }
-            let field = ui.add(
-                egui::TextEdit::singleline(&mut self.source_input)
-                    .desired_width((ui.available_width() - reserve).max(120.0))
-                    .font(egui::TextStyle::Monospace)
-                    .hint_text("URL or local path…"),
-            );
-            // Enter takes the focus out of a single-line field, which is how
-            // it's told apart from other keys.
-            let mut load = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-
-            if ui
-                .button("…")
-                .on_hover_text("Browse for a local JSON file")
-                .clicked()
-            {
-                if let Some(path) = rfd::FileDialog::new()
-                    .add_filter("JSON", &["json", "ndjson", "jsonl", "log", "txt"])
-                    .pick_file()
-                {
-                    self.open_file(path);
-                }
-            }
-            load |= ui
-                .add_enabled(
-                    !self.source_input.trim().is_empty(),
-                    egui::Button::new("Load"),
-                )
-                .on_hover_text("Load the URL or file path in the field (Enter)")
-                .clicked();
-            if load {
-                self.load_source_input();
-            }
-
-            let has_source = self.doc.is_some() || self.loading || self.load_error.is_some();
-            if ui
-                .add_enabled(
-                    has_source || !self.source_input.is_empty(),
-                    egui::Button::new("Clear"),
-                )
-                .on_hover_text("Empty the field and unload the current document")
-                .clicked()
-            {
-                if has_source {
-                    self.clear_source();
-                }
-                self.source_input.clear();
-            }
-            ui.separator();
-
-            if let Some(doc) = &self.doc {
-                if matches!(
-                    doc.source,
+            let labelled = self.doc.as_ref().is_some_and(|d| {
+                matches!(
+                    d.source,
                     DocumentSource::Pasted
                         | DocumentSource::Merged(_)
                         | DocumentSource::Derived { .. }
-                ) {
-                    ui.label(doc.source.label());
-                }
-                ui.weak(human_bytes(doc.byte_len));
-                if doc.top_level_values > 1 {
-                    ui.weak(format!("({} NDJSON records)", doc.top_level_values));
-                }
-            } else if self.loading {
-                ui.spinner();
-                ui.label("Loading…");
+                )
+            });
+            let mut reserve = TOOLBAR_TRAILING_RESERVE + self.source_info_extra_width();
+            if labelled && self.dock.any_popped() {
+                reserve += DOCK_ALL_BUTTON_WIDTH;
             }
+            self.source_field(ui, reserve, SOURCE_FIELD_MIN_WIDTH);
+            ui.separator();
+            self.source_info(ui);
 
             // Claims whatever width is left after everything above, so the
             // theme toggle (and, just to its left, the autocomplete toggle
@@ -1518,6 +1476,135 @@ impl App {
                 },
             );
         });
+    }
+
+    /// "Source:", the field that takes a typed or pasted URL or local path, and
+    /// the buttons that go with it: "…" (browse for a file), "Load" and
+    /// "Clear". The toolbar begins with them, and so does the window of a
+    /// Source pane that has been popped out. The field is as wide as the row
+    /// allows once `reserve`, the width the row keeps free to the right of the
+    /// field for what follows the buttons, is left, but no narrower than
+    /// `min_width`.
+    fn source_field(&mut self, ui: &mut egui::Ui, reserve: f32, min_width: f32) {
+        ui.label("Source:");
+        let field = ui.add(
+            egui::TextEdit::singleline(&mut self.source_input)
+                .desired_width((ui.available_width() - reserve).max(min_width))
+                .font(egui::TextStyle::Monospace)
+                .hint_text("URL or local path…"),
+        );
+        if field.changed() {
+            // The field of the other window (the toolbar's, the Source
+            // window's) shows the same text, and is redrawn on its own
+            // schedule.
+            ui.ctx().request_repaint_of(egui::ViewportId::ROOT);
+            ui.ctx().request_repaint_of(Pane::Source.viewport_id());
+        }
+        // Enter takes the focus out of a single-line field, which is how
+        // it's told apart from other keys.
+        let mut load = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+
+        if ui
+            .button("…")
+            .on_hover_text("Browse for a local JSON file")
+            .clicked()
+        {
+            if let Some(path) = rfd::FileDialog::new()
+                .add_filter("JSON", &["json", "ndjson", "jsonl", "log", "txt"])
+                .pick_file()
+            {
+                self.open_file(path);
+            }
+        }
+        load |= ui
+            .add_enabled(
+                !self.source_input.trim().is_empty(),
+                egui::Button::new("Load"),
+            )
+            .on_hover_text("Load the URL or file path in the field (Enter)")
+            .clicked();
+        if load {
+            self.load_source_input();
+        }
+
+        let has_source = self.doc.is_some() || self.loading || self.load_error.is_some();
+        if ui
+            .add_enabled(
+                has_source || !self.source_input.is_empty(),
+                egui::Button::new("Clear"),
+            )
+            .on_hover_text("Empty the field and unload the current document")
+            .clicked()
+        {
+            if has_source {
+                self.clear_source();
+            }
+            self.source_input.clear();
+        }
+    }
+
+    /// What is loaded, as the line of the source field says it: where a
+    /// pasted, merged or derived document came from, its size and an NDJSON
+    /// note — or, while one loads, a spinner.
+    fn source_info(&self, ui: &mut egui::Ui) {
+        if let Some(doc) = &self.doc {
+            if matches!(
+                doc.source,
+                DocumentSource::Pasted | DocumentSource::Merged(_) | DocumentSource::Derived { .. }
+            ) {
+                ui.label(doc.source.label());
+            }
+            ui.weak(human_bytes(doc.byte_len));
+            if doc.top_level_values > 1 {
+                ui.weak(format!("({} NDJSON records)", doc.top_level_values));
+            }
+        } else if self.loading {
+            ui.spinner();
+            ui.label("Loading…");
+        }
+    }
+
+    /// The room `source_info` needs beyond the "(pasted JSON)" and the size
+    /// that a row's reserve has room for anyway: the NDJSON note, and a merge's
+    /// longer label.
+    fn source_info_extra_width(&self) -> f32 {
+        let doc = self.doc.as_ref();
+        let mut extra = 0.0;
+        if doc.is_some_and(|d| d.top_level_values > 1) {
+            extra += NDJSON_NOTE_WIDTH;
+        }
+        if doc.is_some_and(|d| matches!(d.source, DocumentSource::Merged(_))) {
+            extra += MERGED_LABEL_EXTRA_WIDTH;
+        }
+        extra
+    }
+
+    /// The source field's row in the window of a Source pane that has been
+    /// popped out — the toolbar's own is in the main window, which the pane has
+    /// left. The same field, buttons and line about what is loaded, and, under
+    /// it, the error when a load failed (the main window's status bar says so
+    /// too, but that window may be out of sight).
+    fn popped_source_row(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            // Room for what follows the field, which is only the buttons while
+            // nothing is loaded.
+            let says_something = self.doc.is_some() || self.loading;
+            let mut reserve = SOURCE_ROW_BUTTONS_WIDTH;
+            if says_something {
+                reserve += SOURCE_ROW_INFO_WIDTH + self.source_info_extra_width();
+            }
+            self.source_field(ui, reserve, SOURCE_ROW_FIELD_MIN_WIDTH);
+            if says_something {
+                ui.separator();
+                self.source_info(ui);
+            }
+        });
+        if let Some(err) = &self.load_error {
+            ui.colored_label(
+                egui::Color32::from_rgb(220, 80, 80),
+                format!("Load error: {err}"),
+            );
+        }
     }
 
     /// Popup prompting for a search query; shown when `show_search_dialog`
@@ -1718,7 +1805,6 @@ impl App {
             self.clear_hits();
             return;
         }
-        ui.separator();
 
         if list.matches.is_empty() {
             ui.weak("No matches found.");
@@ -2294,28 +2380,22 @@ impl App {
     fn results_panel(&mut self, ui: &mut egui::Ui) {
         let has_results = self.results.as_array().is_some_and(|a| !a.is_empty());
         ui.horizontal(|ui| {
-            ui.heading("Results");
-            ui.add_space(12.0);
+            pane_header::title(ui, "Results");
             ui.selectable_value(&mut self.results_view, ViewMode::Tree, "Tree");
             ui.selectable_value(&mut self.results_view, ViewMode::Text, "Text");
 
             // Pinned to the right edge of the header, mirroring the Source
             // panel's "Save…" (and its pop-out icon in the corner).
-            ui.allocate_ui_with_layout(
-                egui::vec2(ui.available_width(), ui.spacing().interact_size.y),
-                egui::Layout::right_to_left(egui::Align::Center),
-                |ui| {
-                    self.pop_button(ui, Pane::Results);
-                    if ui
-                        .add_enabled(has_results, egui::Button::new("Save…"))
-                        .clicked()
-                    {
-                        self.save_results();
-                    }
-                },
-            );
+            pane_header::pinned_right(ui, |ui| {
+                self.pop_button(ui, Pane::Results);
+                if ui
+                    .add_enabled(has_results, egui::Button::new("Save…"))
+                    .clicked()
+                {
+                    self.save_results();
+                }
+            });
         });
-        ui.separator();
         match self.results_view {
             ViewMode::Tree => {
                 if let Some(action) = self
@@ -2593,32 +2673,53 @@ impl InfoWindow {
         }
     }
 
-    /// Draw the window (if open) for this frame.
+    fn is_open(&self) -> bool {
+        self.open
+    }
+
+    /// The window was closed (by the user): stop showing it.
+    fn close(&mut self) {
+        self.open = false;
+    }
+
+    /// The window the info is shown in. The same every frame it is open: egui
+    /// patches the real window to match a builder that changed.
+    fn builder(&mut self) -> egui::ViewportBuilder {
+        let icon = self
+            .icon
+            .get_or_insert_with(|| Arc::new(crate::app_icon()))
+            .clone();
+        egui::ViewportBuilder::default()
+            .with_title("jsonquery — About")
+            .with_inner_size([380.0, 320.0])
+            .with_min_inner_size([320.0, 280.0])
+            .with_app_id(crate::APP_ID)
+            .with_icon(icon)
+    }
+
+    /// Draw the window (if open) for this frame as an immediate viewport,
+    /// inside the main window's frame — where there are no real windows to
+    /// redraw by themselves (see `App::show_satellites`).
     fn show(&mut self, ctx: &egui::Context) {
         if !self.open {
             return;
         }
 
-        let icon = self
-            .icon
-            .get_or_insert_with(|| Arc::new(crate::app_icon()))
-            .clone();
-        let builder = egui::ViewportBuilder::default()
-            .with_title("jsonquery — About")
-            .with_inner_size([380.0, 320.0])
-            .with_min_inner_size([320.0, 280.0])
-            .with_app_id(crate::APP_ID)
-            .with_icon(icon);
-
+        let builder = self.builder();
         let mut close = false;
         ctx.show_viewport_immediate(info_viewport_id(), builder, |ui, _class| {
             close = ui.ctx().input(|i| i.viewport().close_requested());
-            egui::CentralPanel::default().show(ui, info_window_contents);
+            info_window_frame(ui);
         });
         if close {
             self.open = false;
         }
     }
+}
+
+/// One frame of the info window's content.
+fn info_window_frame(ui: &mut egui::Ui) {
+    egui::CentralPanel::default().show(ui, info_window_contents);
 }
 
 fn info_window_contents(ui: &mut egui::Ui) {
@@ -2776,14 +2877,7 @@ impl App {
         self.show_popped_panes(&ctx, shared);
         // Only now, so that every pane was drawn in one place this frame.
         self.dock.apply_requests();
-        self.info_window.show(&ctx);
-
-        if let Some(request) = self.tutorial.show(&ctx) {
-            self.apply_tutorial_request(request);
-        }
-        if let Some(request) = self.tools.show(&ctx, self.doc.as_ref()) {
-            self.apply_tools_request(&ctx, request);
-        }
+        self.show_satellites(&ctx, shared);
     }
 
     /// Make each pane that is in a window of its own show there.
@@ -2914,6 +3008,9 @@ impl App {
                     .rect
             }
             Pane::Source => {
+                // The toolbar's source field is in the main window, which this
+                // pane has left: its window has a field of its own on top.
+                egui::Panel::top("source_window_row").show(ui, |ui| self.popped_source_row(ui));
                 egui::CentralPanel::default()
                     .show(ui, |ui| self.source_pane(ui, hovering_drop))
                     .response
@@ -3007,26 +3104,20 @@ impl App {
         pane_scope(ui, Pane::Source, |ui| match self.doc.clone() {
             Some(doc) => {
                 ui.horizontal(|ui| {
-                    ui.heading("Source");
-                    ui.add_space(12.0);
+                    pane_header::title(ui, "Source");
                     ui.selectable_value(&mut self.source_view, ViewMode::Tree, "Tree");
                     ui.selectable_value(&mut self.source_view, ViewMode::Text, "Text");
 
                     // Pinned to the right edge of the header, mirroring
                     // the toolbar's theme toggle — the pop-out icon in the
                     // corner itself, "Save…" just left of it.
-                    ui.allocate_ui_with_layout(
-                        egui::vec2(ui.available_width(), ui.spacing().interact_size.y),
-                        egui::Layout::right_to_left(egui::Align::Center),
-                        |ui| {
-                            self.pop_button(ui, Pane::Source);
-                            if ui.button("Save…").clicked() {
-                                self.save_source();
-                            }
-                        },
-                    );
+                    pane_header::pinned_right(ui, |ui| {
+                        self.pop_button(ui, Pane::Source);
+                        if ui.button("Save…").clicked() {
+                            self.save_source();
+                        }
+                    });
                 });
-                ui.separator();
                 match self.source_view {
                     ViewMode::Tree => {
                         if let Some(action) =
@@ -3045,14 +3136,9 @@ impl App {
             }
             None => {
                 ui.horizontal(|ui| {
-                    ui.heading("Source");
-                    ui.allocate_ui_with_layout(
-                        egui::vec2(ui.available_width(), ui.spacing().interact_size.y),
-                        egui::Layout::right_to_left(egui::Align::Center),
-                        |ui| self.pop_button(ui, Pane::Source),
-                    );
+                    pane_header::title(ui, "Source");
+                    pane_header::pinned_right(ui, |ui| self.pop_button(ui, Pane::Source));
                 });
-                ui.separator();
                 self.paste_area(ui, hovering_drop);
             }
         });

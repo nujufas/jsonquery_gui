@@ -4,27 +4,24 @@
 //! the document open in the main window. A patch that fails says which
 //! operation, and changes nothing.
 //!
-//! The left half is the document and the patch with the kind of patch and the
-//! Apply button pinned under them; the right half is the result, which can be
-//! opened in the main window, saved or copied.
+//! The command row has the Apply button and the kind of patch; the left pane is
+//! the document and the patch, one above the other; the right pane is the
+//! result, which can be opened in the main window, saved or copied from its
+//! header.
 
 use std::path::Path;
 
-use eframe::egui::{self, Align, Layout, RichText};
+use eframe::egui;
 
 use super::format::COPY_LIMIT;
 use super::jobs::{Job, Patched};
 use super::operand::{deliver, dropped_files, stacked, Operand};
 use super::shared::{Env, Run};
 use super::widgets::{
-    action_row, fill, halves, heading, notice_line, pinned, preview_box, primary_button,
-    result_box, run_row, secondary_button, title_row,
+    command_bar, halves, header, preview_box, result_area, run_button, RIGHT_MIN,
 };
 use super::{Request, Tool};
 use crate::worker::describe;
-
-const OPTIONS_HEIGHT_GUESS: f32 = 100.0;
-const RESULT_ACTIONS_HEIGHT_GUESS: f32 = 44.0;
 
 pub(super) struct Patch {
     document: Operand,
@@ -72,27 +69,25 @@ impl Patch {
             self.run.clear();
         }
 
-        heading(ui, "Patch JSON");
         let mut request = None;
-        let (left, right) = halves(ui, "patch_halves");
-        left.show(ui, |ui| request = self.inputs_half(ui, env));
+        command_bar(ui, "patch_command", |ui| request = self.command_ui(ui));
+        let (left, right) = halves(ui, "patch_panes", RIGHT_MIN);
+        left.show(ui, |ui| self.inputs_pane(ui, env));
         right.show(ui, |ui| {
-            if let Some(r) = self.result_half(ui, env) {
+            if let Some(r) = self.result_pane(ui, env) {
                 request = Some(r);
             }
         });
         request
     }
 
-    fn inputs_half(&mut self, ui: &mut egui::Ui, env: &Env) -> Option<Request> {
+    /// The Apply button and which kind of patch the second box holds.
+    fn command_ui(&mut self, ui: &mut egui::Ui) -> Option<Request> {
         let busy = self.run.running();
         let mut request = None;
-
-        pinned("patch_options", OPTIONS_HEIGHT_GUESS).show(ui, |ui| {
-            ui.add_enabled_ui(!busy, |ui| self.kind_ui(ui));
-            ui.add_space(12.0);
+        ui.horizontal(|ui| {
             let ready = !self.document.is_empty() && !self.patch.is_empty();
-            if run_row(
+            if run_button(
                 ui,
                 &self.run,
                 "Apply",
@@ -101,42 +96,41 @@ impl Patch {
             ) {
                 request = self.start();
             }
-        });
-
-        fill().show(ui, |ui| {
-            ui.add_enabled_ui(!busy, |ui| {
-                if stacked(ui, env.open_doc, &mut self.document, &mut self.patch) {
-                    self.run.clear();
-                }
-            });
+            ui.add_enabled_ui(!busy, |ui| self.kind_ui(ui));
         });
         request
+    }
+
+    fn inputs_pane(&mut self, ui: &mut egui::Ui, env: &Env) {
+        ui.add_enabled_ui(!self.run.running(), |ui| {
+            if stacked(ui, env.open_doc, &mut self.document, &mut self.patch) {
+                self.run.clear();
+            }
+        });
     }
 
     /// Which kind of patch the second box holds.
     fn kind_ui(&mut self, ui: &mut egui::Ui) {
         let before = self.merge_patch;
-        ui.horizontal(|ui| {
-            ui.label("Kind");
-            let shown = if self.merge_patch {
-                "Merge patch (RFC 7386)"
-            } else {
-                "Operations (RFC 6902)"
-            };
-            egui::ComboBox::from_id_salt("patch_kind")
-                .selected_text(shown)
-                .width(190.0)
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut self.merge_patch, false, "Operations (RFC 6902)")
-                        .on_hover_text(
-                            "A list of operations, like [{\"op\": \"replace\", \"path\": \"/a\", \"value\": 1}]",
-                        );
-                    ui.selectable_value(&mut self.merge_patch, true, "Merge patch (RFC 7386)")
-                        .on_hover_text(
-                            "A document laid over the other: its members replace or add, a null deletes",
-                        );
-                });
-        });
+        ui.label("Kind");
+        let shown = if self.merge_patch {
+            "Merge patch (RFC 7386)"
+        } else {
+            "Operations (RFC 6902)"
+        };
+        egui::ComboBox::from_id_salt("patch_kind")
+            .selected_text(shown)
+            .width(170.0)
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut self.merge_patch, false, "Operations (RFC 6902)")
+                    .on_hover_text(
+                        "A list of operations, like [{\"op\": \"replace\", \"path\": \"/a\", \"value\": 1}]",
+                    );
+                ui.selectable_value(&mut self.merge_patch, true, "Merge patch (RFC 7386)")
+                    .on_hover_text(
+                        "A document laid over the other: its members replace or add, a null deletes",
+                    );
+            });
         if self.merge_patch != before {
             self.run.clear();
         }
@@ -157,47 +151,9 @@ impl Patch {
         })
     }
 
-    fn result_half(&mut self, ui: &mut egui::Ui, env: &mut Env) -> Option<Request> {
-        env.shared.expire(ui.ctx());
-        let mut request = None;
-
-        title_row(ui, |ui| {
-            ui.label(RichText::new("Result").strong());
-            if let Some(patched) = self.run.outcome() {
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    ui.label(RichText::new(summary(patched)).small().weak())
-                        .on_hover_text(format!("Patched in {:.1?}.", patched.elapsed));
-                });
-            }
-        });
-        ui.add_space(6.0);
-
-        pinned("patch_result_actions", RESULT_ACTIONS_HEIGHT_GUESS)
-            .show(ui, |ui| request = self.result_actions(ui, env));
-
-        fill().show(ui, |ui| {
-            result_box(
-                ui,
-                "patch",
-                &self.run,
-                "The patched document appears here",
-                |ui, patched| {
-                    preview_box(
-                        ui,
-                        "patch",
-                        &patched.preview.text,
-                        patched.preview.truncated,
-                    );
-                },
-            );
-        });
-        request
-    }
-
-    /// Open in main window, Save… and Copy, at the right — there from the
-    /// start, usable once there is a result — and the line about what was last
-    /// done.
-    fn result_actions(&self, ui: &mut egui::Ui, env: &mut Env) -> Option<Request> {
+    /// The result, with Open in main window, Save… and Copy in the header —
+    /// there from the start, usable once there is a result.
+    fn result_pane(&mut self, ui: &mut egui::Ui, env: &mut Env) -> Option<Request> {
         enum Act {
             Open,
             Save,
@@ -205,11 +161,17 @@ impl Patch {
         }
 
         let patched = self.run.outcome();
+        let has_result = patched.is_some();
+        let too_big = patched.is_some_and(|p| p.text.len() > COPY_LIMIT);
         let mut act = None;
-        action_row(ui, |ui| {
-            ui.add_enabled_ui(patched.is_some(), |ui| {
+        header(
+            ui,
+            "Result",
+            |_| {},
+            |ui| {
+                // Right to left: Open in main window is the right-most.
                 if ui
-                    .add(primary_button(ui, "Open in main window"))
+                    .add_enabled(has_result, egui::Button::new("Open in main window"))
                     .on_hover_text(
                         "Show the patched document in the main window, to explore and query it",
                     )
@@ -218,24 +180,41 @@ impl Patch {
                     act = Some(Act::Open);
                 }
                 if ui
-                    .add(secondary_button("Save…"))
+                    .add_enabled(has_result, egui::Button::new("Save…"))
                     .on_hover_text("Write the patched document to a file")
                     .clicked()
                 {
                     act = Some(Act::Save);
                 }
-                let too_big = patched.is_some_and(|p| p.text.len() > COPY_LIMIT);
                 if ui
-                    .add_enabled(!too_big, secondary_button("Copy"))
+                    .add_enabled(has_result && !too_big, egui::Button::new("Copy"))
                     .on_hover_text("Copy the patched document")
-                    .on_disabled_hover_text("Too big to copy; save it instead")
+                    .on_disabled_hover_text(if too_big {
+                        "Too big to copy; save it instead"
+                    } else {
+                        "Nothing to copy yet"
+                    })
                     .clicked()
                 {
                     act = Some(Act::Copy);
                 }
-            });
-            notice_line(ui, env.shared.notice_for(Tool::Patch));
-        });
+            },
+        );
+
+        result_area(
+            ui,
+            "patch",
+            &self.run,
+            "The patched document appears here",
+            |ui, patched| {
+                preview_box(
+                    ui,
+                    "patch",
+                    &patched.preview.text,
+                    patched.preview.truncated,
+                );
+            },
+        );
 
         let patched = patched?;
         match act? {
@@ -257,6 +236,18 @@ impl Patch {
                 })
             }
         }
+    }
+
+    /// What the status bar says about the result: what came out and how, and how
+    /// long it took. False when there is nothing to say.
+    pub(super) fn status_line(&self, ui: &mut egui::Ui) -> bool {
+        let Some(patched) = self.run.outcome() else {
+            return false;
+        };
+        ui.label(summary(patched));
+        ui.separator();
+        ui.weak(format!("Patched in {:.1?}", patched.elapsed));
+        true
     }
 }
 

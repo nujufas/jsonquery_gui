@@ -969,9 +969,20 @@ impl Windows {
         info: egui::ViewportInfo,
         events: Vec<egui::Event>,
     ) {
+        self.pass_sized(viewport, info, events, SCREEN);
+    }
+
+    /// A pass of a window that is `size` big.
+    fn pass_sized(
+        &mut self,
+        viewport: egui::ViewportId,
+        info: egui::ViewportInfo,
+        events: Vec<egui::Event>,
+        size: egui::Vec2,
+    ) {
         let mut input = egui::RawInput {
             viewport_id: viewport,
-            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, SCREEN)),
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
             time: Some(self.time),
             events,
             ..Default::default()
@@ -1016,33 +1027,17 @@ impl Windows {
 
     /// A few passes of a window that is simply there.
     fn window_settle(&mut self, pane: Pane) {
-        for _ in 0..4 {
-            self.window_frame(pane, egui::ViewportInfo::default(), Vec::new());
-        }
+        self.settle_in(pane.viewport_id());
     }
 
     fn window_click(&mut self, pane: Pane, pos: egui::Pos2) {
-        let button = |pressed| egui::Event::PointerButton {
-            pos,
-            button: egui::PointerButton::Primary,
-            pressed,
-            modifiers: egui::Modifiers::NONE,
-        };
-        let info = egui::ViewportInfo::default;
-        self.window_frame(pane, info(), vec![egui::Event::PointerMoved(pos)]);
-        self.window_frame(pane, info(), vec![button(true)]);
-        self.window_frame(pane, info(), vec![button(false)]);
-        self.window_settle(pane);
+        self.click_in(pane.viewport_id(), pos);
     }
 
     /// The centre of `text` in the window's latest pass.
     fn window_text(&self, pane: Pane, text: &str) -> egui::Pos2 {
-        text_rects(&self.shapes[&pane.viewport_id()])
-            .into_iter()
-            .find(|(t, _)| t == text)
+        self.text_in(pane.viewport_id(), text)
             .unwrap_or_else(|| panic!("{text:?} is drawn in the {} window", pane.label()))
-            .1
-            .center()
     }
 
     fn pop_out(&mut self, pane: Pane) {
@@ -1052,11 +1047,78 @@ impl Windows {
     }
 
     fn commands_for(&self, pane: Pane) -> Vec<egui::ViewportCommand> {
+        self.commands_in(pane.viewport_id())
+    }
+
+    // The same for any window, a pane's or another's.
+
+    /// A few passes of the window `viewport` that is simply there.
+    fn settle_in(&mut self, viewport: egui::ViewportId) {
+        for _ in 0..4 {
+            self.pass(viewport, egui::ViewportInfo::default(), Vec::new());
+        }
+    }
+
+    fn click_in(&mut self, viewport: egui::ViewportId, pos: egui::Pos2) {
+        let button = |pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let info = egui::ViewportInfo::default;
+        self.pass(viewport, info(), vec![egui::Event::PointerMoved(pos)]);
+        self.pass(viewport, info(), vec![button(true)]);
+        self.pass(viewport, info(), vec![button(false)]);
+        self.settle_in(viewport);
+    }
+
+    /// The centre of `text` in the latest pass of the window `viewport`, if it
+    /// was drawn there.
+    fn text_in(&self, viewport: egui::ViewportId, text: &str) -> Option<egui::Pos2> {
+        text_rects(self.shapes.get(&viewport)?)
+            .into_iter()
+            .find(|(t, _)| t == text)
+            .map(|(_, rect)| rect.center())
+    }
+
+    /// The rectangle `text` fills in the latest pass of the window `viewport`,
+    /// if it was drawn there.
+    fn rect_in(&self, viewport: egui::ViewportId, text: &str) -> Option<egui::Rect> {
+        text_rects(self.shapes.get(&viewport)?)
+            .into_iter()
+            .find(|(t, _)| t == text)
+            .map(|(_, rect)| rect)
+    }
+
+    /// Whether any text drawn in the latest pass of the window `viewport`
+    /// satisfies `wanted`.
+    fn drew_in(&self, viewport: egui::ViewportId, wanted: impl Fn(&str) -> bool) -> bool {
+        self.shapes
+            .get(&viewport)
+            .is_some_and(|shapes| text_rects(shapes).iter().any(|(t, _)| wanted(t)))
+    }
+
+    fn commands_in(&self, viewport: egui::ViewportId) -> Vec<egui::ViewportCommand> {
         self.commands
             .iter()
-            .filter(|(id, _)| *id == pane.viewport_id())
+            .filter(|(id, _)| *id == viewport)
             .map(|(_, c)| c.clone())
             .collect()
+    }
+
+    /// Open one of the windows besides the panes' the way its button does, and
+    /// give the main window the frame in which it appears.
+    fn open_satellite(&mut self, which: Satellite) {
+        {
+            let mut app = self.app();
+            match which {
+                Satellite::Tools => app.tools.open_or_focus(&self.ctx),
+                Satellite::Tutorial => app.tutorial.open_or_focus(&self.ctx),
+                Satellite::About => app.info_window.open_or_focus(&self.ctx),
+            }
+        }
+        self.main_frame(Vec::new());
     }
 }
 
@@ -1224,6 +1286,732 @@ fn the_dock_button_in_a_maximized_window_docks_its_pane_too() {
         .contains(&egui::ViewportCommand::Maximized(false)));
 }
 
+// The windows besides the panes': the Tools window, the tutorial and About. Each
+// is redrawn on its own as a pane's window is, so that it keeps working when the
+// main window is not redrawn at all (a window maximized over it is why).
+// `satellite_frame` is what such a window runs.
+
+#[test]
+fn the_worker_wakes_every_window_not_just_the_main_one() {
+    // A window redrawn on its own would otherwise sit on the worker's answer
+    // (the Tools window's job) until something else happened to it.
+    let ctx = egui::Context::default();
+    wake_windows(&ctx);
+    let mut windows = vec![egui::ViewportId::ROOT];
+    windows.extend(Pane::ALL.iter().map(|p| p.viewport_id()));
+    windows.extend(Satellite::ALL.iter().map(|w| w.viewport_id()));
+    for window in windows {
+        assert!(
+            ctx.has_requested_repaint_for(&window),
+            "{window:?} is woken"
+        );
+    }
+}
+
+#[test]
+fn the_tools_tutorial_and_about_windows_are_redrawn_on_their_own_not_as_part_of_the_main_windows_frame(
+) {
+    let mut w = Windows::new();
+    assert!(w.open.is_empty(), "nothing is out");
+    for which in Satellite::ALL {
+        w.open_satellite(which);
+        let id = which.viewport_id();
+        assert!(
+            w.open.contains_key(&id),
+            "{which:?} has a deferred viewport, which eframe redraws by itself"
+        );
+        assert_eq!(
+            w.repaint[&id],
+            Duration::ZERO,
+            "{which:?}: the main window's frame says it may have something new to show"
+        );
+    }
+    assert_eq!(w.open.len(), 3, "and nothing else is a window");
+}
+
+#[test]
+fn the_tools_window_takes_clicks_while_the_main_window_is_not_redrawn_at_all() {
+    // The window covers the main window completely: a compositor may then send
+    // the main window no redraw callbacks (GNOME does), so only the window's
+    // own passes happen from here on.
+    let mut w = Windows::new();
+    let tools = Satellite::Tools.viewport_id();
+    w.open_satellite(Satellite::Tools);
+    w.settle_in(tools);
+    assert!(
+        w.text_in(tools, "Merge").is_some(),
+        "the first page is Merge's"
+    );
+
+    let tab = w.text_in(tools, "Diff JSON").expect("the tabs are drawn");
+    w.click_in(tools, tab);
+    assert!(
+        w.text_in(tools, "Compare").is_some(),
+        "a click on a tab reaches the app: {:?}",
+        w.shapes.get(&tools).map(|s| text_rects(s))
+    );
+    assert!(w.text_in(tools, "Merge").is_none(), "and the page changed");
+}
+
+#[test]
+fn a_tool_takes_typing_and_runs_and_its_answer_arrives_while_the_main_window_is_not_redrawn() {
+    let mut w = Windows::new();
+    let tools = Satellite::Tools.viewport_id();
+    {
+        let mut app = w.app();
+        app.tools.open_on(&w.ctx, Tool::Format);
+    }
+    w.main_frame(Vec::new());
+    w.settle_in(tools);
+
+    // Typing…
+    let hint = "Paste JSON here, or drop a file";
+    let at = w.text_in(tools, hint).expect("the box is drawn, empty");
+    w.click_in(tools, at);
+    w.pass(
+        tools,
+        egui::ViewportInfo::default(),
+        vec![egui::Event::Text(r#"{"b":1,"a":[1,2]}"#.to_owned())],
+    );
+    w.settle_in(tools);
+    assert!(
+        w.text_in(tools, hint).is_none(),
+        "what was typed is in the box"
+    );
+
+    // …running it: the worker answers in its own time, and the window's own
+    // passes are what take the answer in (no pass of the main window happens).
+    let run = w.text_in(tools, "Format").expect("the page's button");
+    w.click_in(tools, run);
+    let formatted = "{\n  \"b\": 1,\n  \"a\": [\n    1,\n    2\n  ]\n}";
+    for _ in 0..300 {
+        w.pass(tools, egui::ViewportInfo::default(), Vec::new());
+        if w.drew_in(tools, |t| t == formatted) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(w.drew_in(tools, |t| t == formatted), "the answer is shown");
+    assert!(
+        w.drew_in(tools, |t| t.starts_with("Formatted in")),
+        "and the status bar says so"
+    );
+}
+
+#[test]
+fn a_click_in_the_tools_window_asks_the_main_window_to_redraw() {
+    // What is done in the window can show in the main one (a document opened in
+    // it, a status message), which is told to look. (The window also asks for
+    // a frame of its own shortly after, so that a main window that can't be
+    // drawn doesn't leave the app polling for it; egui asks for one after any
+    // click anyway, so no test can tell — that part was checked by hand.)
+    let mut w = Windows::new();
+    let tools = Satellite::Tools.viewport_id();
+    w.open_satellite(Satellite::Tools);
+    w.settle_in(tools);
+    let root = egui::ViewportId::ROOT;
+    let pos = w.text_in(tools, "Diff JSON").expect("the tabs are drawn");
+    let button = |pressed| egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    let info = egui::ViewportInfo::default;
+    w.pass(tools, info(), vec![egui::Event::PointerMoved(pos)]);
+    w.pass(tools, info(), vec![button(true)]);
+    // (egui serves each request for a frame with two of them.)
+    for _ in 0..3 {
+        w.main_frame(Vec::new());
+    }
+    assert_ne!(
+        w.repaint[&root],
+        Duration::ZERO,
+        "nothing has been done yet, so the main window has nothing to look at"
+    );
+    w.pass(tools, info(), vec![button(false)]);
+    assert_eq!(w.repaint[&root], Duration::ZERO, "the click asks for it");
+}
+
+#[test]
+fn the_tutorial_hands_a_query_to_the_main_window_without_a_frame_of_it() {
+    let mut w = Windows::new();
+    let tutorial = Satellite::Tutorial.viewport_id();
+    w.open_satellite(Satellite::Tutorial);
+    w.settle_in(tutorial);
+    assert_eq!(w.app().query_text, "");
+
+    let load = w
+        .text_in(tutorial, "Load query")
+        .expect("an example has its buttons");
+    w.click_in(tutorial, load);
+    assert_ne!(
+        w.app().query_text,
+        "",
+        "the request is applied by the window's own frame"
+    );
+    assert!(
+        w.commands_in(egui::ViewportId::ROOT)
+            .contains(&egui::ViewportCommand::Focus),
+        "and the main window is brought forward to show it"
+    );
+}
+
+/// What a window's frame is given when the user has asked to close it.
+fn close_request(maximized: bool, fullscreen: bool) -> egui::ViewportInfo {
+    egui::ViewportInfo {
+        events: vec![egui::ViewportEvent::Close],
+        maximized: Some(maximized),
+        fullscreen: Some(fullscreen),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn closing_a_maximized_window_uncovers_the_main_window_and_the_main_window_then_drops_it() {
+    for which in Satellite::ALL {
+        let id = which.viewport_id();
+
+        let mut w = Windows::new();
+        w.open_satellite(which);
+        w.settle_in(id);
+        w.pass(id, close_request(true, false), Vec::new());
+        assert!(
+            !w.app().satellite_open(which),
+            "{which:?}: closing closes it"
+        );
+        assert!(
+            w.commands_in(id)
+                .contains(&egui::ViewportCommand::Maximized(false)),
+            "{which:?}: the window gives up covering the main window, whose frames then \
+             resume and drop it: {:?}",
+            w.commands_in(id)
+        );
+        assert!(
+            w.text_in(id, "Closing…").is_some(),
+            "{which:?}: until then it says so"
+        );
+        // The main window, whenever it next gets a frame, leaves the window out.
+        w.main_frame(Vec::new());
+        assert!(!w.open.contains_key(&id), "{which:?}: the window is gone");
+
+        let mut w = Windows::new();
+        w.open_satellite(which);
+        w.settle_in(id);
+        w.pass(id, close_request(false, true), Vec::new());
+        assert!(!w.app().satellite_open(which));
+        assert!(
+            w.commands_in(id)
+                .contains(&egui::ViewportCommand::Fullscreen(false)),
+            "{which:?}: a fullscreen window covers the main window too"
+        );
+
+        // A window that is not covering anything has nothing to give up.
+        let mut w = Windows::new();
+        w.open_satellite(which);
+        w.settle_in(id);
+        w.pass(id, close_request(false, false), Vec::new());
+        assert!(!w.app().satellite_open(which));
+        assert!(
+            w.commands_in(id).iter().all(|c| !matches!(
+                c,
+                egui::ViewportCommand::Maximized(_) | egui::ViewportCommand::Fullscreen(_)
+            )),
+            "{which:?}: {:?}",
+            w.commands_in(id)
+        );
+    }
+}
+
+#[test]
+fn a_closed_window_gets_out_of_the_way_if_the_main_window_never_drops_it() {
+    for which in Satellite::ALL {
+        let id = which.viewport_id();
+        let mut w = Windows::new();
+        w.open_satellite(which);
+        w.settle_in(id);
+        w.pass(id, close_request(false, false), Vec::new());
+        for _ in 0..10 {
+            w.pass(id, egui::ViewportInfo::default(), Vec::new());
+        }
+        assert!(
+            !w.commands_in(id)
+                .contains(&egui::ViewportCommand::Minimized(true)),
+            "{which:?}: not at once — the main window usually drops it in its next frame"
+        );
+        for _ in 0..40 {
+            w.pass(id, egui::ViewportInfo::default(), Vec::new());
+        }
+        assert!(
+            w.commands_in(id)
+                .contains(&egui::ViewportCommand::Minimized(true)),
+            "{which:?}: after a while it minimizes itself — it is closed already, only \
+             the window lingers"
+        );
+    }
+}
+
+#[test]
+fn a_closed_window_opens_again() {
+    for which in Satellite::ALL {
+        let id = which.viewport_id();
+
+        // After the main window dropped it: a new window.
+        let mut w = Windows::new();
+        w.open_satellite(which);
+        w.settle_in(id);
+        w.pass(id, close_request(false, false), Vec::new());
+        w.main_frame(Vec::new());
+        assert!(!w.open.contains_key(&id), "{which:?} was dropped");
+        w.open_satellite(which);
+        assert!(w.open.contains_key(&id), "{which:?} is a window again");
+        w.settle_in(id);
+        assert!(w.app().satellite_open(which));
+        assert!(
+            w.text_in(id, "Closing…").is_none(),
+            "{which:?} shows its own content"
+        );
+
+        // Before it did: the window that still is there is the one.
+        let mut w = Windows::new();
+        w.open_satellite(which);
+        w.settle_in(id);
+        w.pass(id, close_request(false, false), Vec::new());
+        w.open_satellite(which);
+        assert!(w.open.contains_key(&id), "{which:?} was never dropped");
+        w.settle_in(id);
+        assert!(w.app().satellite_open(which));
+        assert!(
+            w.text_in(id, "Closing…").is_none(),
+            "{which:?} shows its own content again"
+        );
+    }
+}
+
+// The headers of the panes — a small title, and no line under it — and the
+// source field the Source pane's window has.
+
+/// The horizontal lines at least `min_len` long in `shapes`, as `(y, left, right)`.
+fn horizontal_lines(shapes: &[egui::epaint::ClippedShape], min_len: f32) -> Vec<(f32, f32, f32)> {
+    fn walk(shape: &egui::Shape, min_len: f32, out: &mut Vec<(f32, f32, f32)>) {
+        match shape {
+            egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, min_len, out)),
+            egui::Shape::LineSegment { points, .. }
+                if (points[0].y - points[1].y).abs() < 0.01
+                    && (points[0].x - points[1].x).abs() >= min_len =>
+            {
+                let (a, b) = (points[0].x, points[1].x);
+                out.push((points[0].y, a.min(b), a.max(b)));
+            }
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    for clipped in shapes {
+        walk(&clipped.shape, min_len, &mut out);
+    }
+    out
+}
+
+/// The lines drawn just under a header's title (in the next 14 points): there
+/// should be none — what is under a header is its contents.
+fn lines_under(shapes: &[egui::epaint::ClippedShape], title: egui::Rect) -> Vec<(f32, f32, f32)> {
+    horizontal_lines(shapes, 100.0)
+        .into_iter()
+        .filter(|(y, ..)| *y > title.bottom() && *y < title.bottom() + 14.0)
+        .collect()
+}
+
+#[test]
+fn a_panes_title_is_smaller_than_a_heading_and_has_no_line_under_it() {
+    let mut h = Harness::new();
+    let heading = h.ctx.global_style().text_styles[&egui::TextStyle::Heading].size;
+    for loaded in [false, true] {
+        if loaded {
+            load(&mut h, r#"{"members":[{"name":"Ann"}]}"#);
+        }
+        for title in ["Source", "Results"] {
+            let rect = rect_of(&h, title);
+            assert!(
+                rect.height() < heading,
+                "loaded={loaded}: {title:?} is {} tall, no smaller than a heading ({heading})",
+                rect.height()
+            );
+            assert_eq!(
+                lines_under(&h.shapes, rect),
+                vec![],
+                "loaded={loaded}: {title:?} has a line under it"
+            );
+        }
+    }
+}
+
+#[test]
+fn the_empty_source_panes_hint_comes_straight_under_its_header() {
+    let h = Harness::new();
+    let title = rect_of(&h, "Source");
+    let hint = rect_of(
+        &h,
+        "Drag & drop a file anywhere, or enter a URL or path above.",
+    );
+    let gap = hint.top() - title.bottom();
+    assert!(
+        (0.0..8.0).contains(&gap),
+        "{gap} between the title {title:?} and the hint {hint:?}"
+    );
+}
+
+#[test]
+fn the_tools_boxes_have_the_same_small_titles_and_no_line_under_their_headers() {
+    for (tool, titles) in [
+        (Tool::Merge, ["Files", "Result"]),
+        (Tool::Format, ["Input", "Result"]),
+        (Tool::Diff, ["Left", "Right"]),
+        (Tool::Patch, ["Document", "Result"]),
+        (Tool::Validate, ["Document", "Problems"]),
+    ] {
+        let mut h = Harness::new();
+        open_tool(&mut h, tool);
+        let heading = h.ctx.global_style().text_styles[&egui::TextStyle::Heading].size;
+        let main = rect_of(&h, "Results");
+        for title in titles {
+            let rect = rect_of(&h, title);
+            assert!(
+                rect.height() < heading,
+                "{tool:?}: {title:?} is {} tall, no smaller than a heading ({heading})",
+                rect.height()
+            );
+            assert!(
+                (rect.height() - main.height()).abs() < 0.01,
+                "{tool:?}: {title:?} is as big as the main window's titles ({})",
+                main.height()
+            );
+            assert_eq!(
+                lines_under(&h.shapes, rect),
+                vec![],
+                "{tool:?}: {title:?} has a line under it"
+            );
+        }
+    }
+}
+
+/// The texts along the top of the Source window — its row with the source
+/// field — left to right, as `(text, left, right)`.
+fn source_row_of(w: &Windows) -> Vec<(String, f32, f32)> {
+    let mut row: Vec<_> = text_rects(&w.shapes[&Pane::Source.viewport_id()])
+        .into_iter()
+        .filter(|(t, r)| !t.is_empty() && r.center().y < 24.0)
+        .map(|(t, r)| (t, r.min.x, r.max.x))
+        .collect();
+    row.sort_by(|a, b| a.1.total_cmp(&b.1));
+    row
+}
+
+/// A document of the given kind, as the toolbar's line says something about
+/// each differently: where it came from, how big it is, how many records.
+fn a_document(source: DocumentSource, records: usize) -> Arc<Document> {
+    let mut doc = Document::from_value(
+        serde_json::json!([1, 2, 3]),
+        source,
+        123_456,
+        Duration::from_millis(5),
+    );
+    doc.top_level_values = records;
+    Arc::new(doc)
+}
+
+/// Passes of the window `viewport` — and none of the main window — until `done`:
+/// the worker thread answers in its own time.
+fn wait_in(
+    w: &mut Windows,
+    viewport: egui::ViewportId,
+    what: &str,
+    done: impl Fn(&Windows) -> bool,
+) {
+    for _ in 0..300 {
+        w.pass(viewport, egui::ViewportInfo::default(), Vec::new());
+        if done(w) {
+            w.settle_in(viewport);
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    panic!("waited for {what}");
+}
+
+#[test]
+fn the_window_of_a_popped_out_source_has_a_source_field_of_its_own() {
+    let mut w = Windows::new();
+    let (root, source) = (egui::ViewportId::ROOT, Pane::Source.viewport_id());
+    assert!(w.text_in(root, "Source:").is_some(), "the toolbar's");
+
+    w.pop_out(Pane::Source);
+    // A row along the window's top, as the toolbar's: the label, the field (its
+    // hint, while it is empty) and the three buttons…
+    for text in ["Source:", "URL or local path…", "…", "Load", "Clear"] {
+        let rect = w
+            .rect_in(source, text)
+            .unwrap_or_else(|| panic!("{text:?} is in the Source window"));
+        assert!(
+            rect.center().y < 24.0,
+            "{text:?} is in the row along the top: {rect:?}"
+        );
+    }
+    // …above the pane's own header.
+    let row = w.rect_in(source, "Source:").unwrap();
+    let title = w.rect_in(source, "Source").expect("the pane's title");
+    assert!(
+        title.top() > row.bottom(),
+        "the title {title:?} is under the row {row:?}"
+    );
+
+    // The main window keeps its field, and the other panes' windows have none.
+    w.main_frame(Vec::new());
+    assert!(
+        w.text_in(root, "Source:").is_some(),
+        "the toolbar still has its field"
+    );
+    for pane in [Pane::Query, Pane::Results] {
+        w.pop_out(pane);
+        assert!(
+            w.text_in(pane.viewport_id(), "Source:").is_none(),
+            "the {} window has no source field",
+            pane.label()
+        );
+    }
+}
+
+#[test]
+fn the_source_window_has_its_field_where_there_are_no_native_windows_too() {
+    let mut h = Harness::new();
+    let fields = |h: &Harness| h.texts().iter().filter(|(t, _)| t == "Source:").count();
+    assert_eq!(fields(&h), 1, "the toolbar's");
+    h.app.dock.pop_out(Pane::Source, None, None);
+    h.settle();
+    assert_eq!(
+        fields(&h),
+        2,
+        "the toolbar's and the floating window's: {:?}",
+        h.texts()
+    );
+    h.app.dock.dock(Pane::Source);
+    h.settle();
+    assert_eq!(fields(&h), 1, "docked, the window and its field are gone");
+}
+
+#[test]
+fn what_is_typed_in_the_source_windows_field_is_the_toolbars_text_too() {
+    let mut w = Windows::new();
+    let (root, source) = (egui::ViewportId::ROOT, Pane::Source.viewport_id());
+    w.pop_out(Pane::Source);
+    let hint = w
+        .text_in(source, "URL or local path…")
+        .expect("the field is drawn, empty");
+    w.click_in(source, hint);
+
+    // (egui serves each request for a frame with two, so the click's — it asked
+    // the main window to look — takes a few frames of it to be over.)
+    for _ in 0..3 {
+        w.main_frame(Vec::new());
+    }
+    assert_ne!(
+        w.repaint[&root],
+        Duration::ZERO,
+        "nothing has been typed yet, so the main window has nothing new to show"
+    );
+    w.pass(
+        source,
+        egui::ViewportInfo::default(),
+        vec![egui::Event::Text("/some/where/data.json".to_owned())],
+    );
+    assert_eq!(w.app().source_input, "/some/where/data.json");
+    assert_eq!(
+        w.repaint[&root],
+        Duration::ZERO,
+        "the window asks the main window to show it in its own field"
+    );
+    w.main_frame(Vec::new());
+    assert!(
+        w.drew_in(root, |t| t == "/some/where/data.json"),
+        "the toolbar's field shows it: {:?}",
+        w.shapes.get(&root).map(|s| text_rects(s))
+    );
+}
+
+#[test]
+fn a_file_is_opened_from_the_source_windows_field_and_cleared_from_it() {
+    // Only the window's own passes happen: nothing here involves the main
+    // window's frame, which a covered window would not get.
+    let mut w = Windows::new();
+    let source = Pane::Source.viewport_id();
+    let path = temp_json(
+        "source_window_field.json",
+        r#"{"opened":"from its window"}"#,
+    );
+    let typed = path.display().to_string();
+    w.pop_out(Pane::Source);
+
+    let hint = w.text_in(source, "URL or local path…").unwrap();
+    w.click_in(source, hint);
+    w.pass(
+        source,
+        egui::ViewportInfo::default(),
+        vec![egui::Event::Text(typed.clone())],
+    );
+    w.settle_in(source);
+    // Enter loads it…
+    for pressed in [true, false] {
+        w.pass(
+            source,
+            egui::ViewportInfo::default(),
+            vec![egui::Event::Key {
+                key: egui::Key::Enter,
+                physical_key: Some(egui::Key::Enter),
+                pressed,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+    }
+    wait_in(&mut w, source, "the document", |w| w.app().doc.is_some());
+    assert!(
+        w.drew_in(source, |t| t == "Save…"),
+        "the window's pane shows what was loaded: {:?}",
+        w.shapes.get(&source).map(|s| text_rects(s))
+    );
+    assert_eq!(w.app().source_input, typed, "the field names what is open");
+
+    // …and Clear unloads it, emptying the field.
+    let clear = w.text_in(source, "Clear").unwrap();
+    w.click_in(source, clear);
+    assert!(w.app().doc.is_none(), "Clear unloads the document");
+    assert_eq!(w.app().source_input, "");
+    assert!(
+        w.text_in(source, "URL or local path…").is_some(),
+        "the field is empty again"
+    );
+
+    // The Load button does the same as Enter.
+    w.click_in(source, w.text_in(source, "URL or local path…").unwrap());
+    w.pass(
+        source,
+        egui::ViewportInfo::default(),
+        vec![egui::Event::Text(typed)],
+    );
+    w.settle_in(source);
+    let load = w.text_in(source, "Load").unwrap();
+    w.click_in(source, load);
+    wait_in(&mut w, source, "the document, again", |w| {
+        w.app().doc.is_some()
+    });
+}
+
+#[test]
+fn a_load_that_fails_is_said_in_the_source_window_and_goes_with_clear() {
+    // The window has no status bar, and the main window may be out of sight.
+    let mut w = Windows::new();
+    let source = Pane::Source.viewport_id();
+    w.pop_out(Pane::Source);
+    let hint = w.text_in(source, "URL or local path…").unwrap();
+    w.click_in(source, hint);
+    w.pass(
+        source,
+        egui::ViewportInfo::default(),
+        vec![egui::Event::Text("/no/such/dir/missing.json".to_owned())],
+    );
+    w.settle_in(source);
+    let load = w.text_in(source, "Load").unwrap();
+    w.click_in(source, load);
+    wait_in(&mut w, source, "the error", |w| {
+        w.app().load_error.is_some()
+    });
+    assert!(
+        w.drew_in(source, |t| t.starts_with("Load error: ")),
+        "{:?}",
+        w.shapes.get(&source).map(|s| text_rects(s))
+    );
+
+    let clear = w.text_in(source, "Clear").unwrap();
+    w.click_in(source, clear);
+    assert!(w.app().load_error.is_none());
+    assert!(
+        !w.drew_in(source, |t| t.starts_with("Load error")),
+        "Clear takes the error away"
+    );
+}
+
+#[test]
+fn the_source_windows_row_has_room_for_everything_it_says() {
+    let source = Pane::Source.viewport_id();
+    let min_width = Dock::default()
+        .window_builder(Pane::Source)
+        .min_inner_size
+        .expect("the window has a least size")
+        .x;
+    // The window as it opens from a pane docked at its usual width, and as
+    // narrow as it can be made.
+    for width in [592.0, min_width] {
+        let mut w = Windows::new();
+        w.pop_out(Pane::Source);
+        let size = egui::vec2(width, 600.0);
+        let mut states: Vec<(&str, Option<Arc<Document>>)> = vec![("empty", None)];
+        for (state, doc) in [
+            ("pasted", a_document(DocumentSource::Pasted, 1)),
+            (
+                "a file",
+                a_document(DocumentSource::File("/a/data.json".into()), 1),
+            ),
+            ("NDJSON", a_document(DocumentSource::Pasted, 120)),
+            (
+                "merged",
+                a_document(
+                    DocumentSource::Merged(vec!["a".into(), "b".into(), "c".into()]),
+                    1,
+                ),
+            ),
+            (
+                "patched",
+                a_document(
+                    DocumentSource::Derived {
+                        label: "(patched)",
+                        file_name: "patched.json",
+                    },
+                    1,
+                ),
+            ),
+        ] {
+            states.push((state, Some(doc)));
+        }
+        for (state, doc) in states {
+            if let Some(doc) = doc {
+                w.app().document_loaded(doc);
+            }
+            for _ in 0..6 {
+                w.pass_sized(source, egui::ViewportInfo::default(), Vec::new(), size);
+            }
+            let row = source_row_of(&w);
+            let (_, _, clear_right) = row
+                .iter()
+                .find(|(t, ..)| t == "Clear")
+                .unwrap_or_else(|| panic!("{state}, {width} wide: Clear is in the row: {row:?}"))
+                .clone();
+            assert!(
+                clear_right <= width,
+                "{state}, {width} wide: Clear ends at {clear_right}: {row:?}"
+            );
+            // What it says about what is loaded fits as well, unless the window is
+            // as narrow as it goes (when it is cut off at the edge).
+            if width > min_width {
+                let right = row.iter().map(|(_, _, r)| *r).fold(0.0, f32::max);
+                assert!(
+                    right <= width,
+                    "{state}, {width} wide: ends at {right}: {row:?}"
+                );
+            }
+        }
+    }
+}
+
 // The Tools window (the 🛠 button) and its Merge JSON.
 
 /// A JSON file with `json` in it, in a folder of its own.
@@ -1259,7 +2047,7 @@ fn wait_for(h: &mut Harness, what: &str, done: impl Fn(&Harness) -> bool) {
         }
         std::thread::sleep(Duration::from_millis(10));
     }
-    panic!("waited for {what}");
+    panic!("waited for {what}; drawn: {:?}", h.texts());
 }
 
 #[test]
@@ -1280,7 +2068,7 @@ fn the_tools_button_sits_beside_the_tutorial_button_and_opens_the_window() {
     assert!(!h.app.tools.is_open());
     h.click(tools.x, tools.y);
     assert!(h.app.tools.is_open());
-    assert!(is_drawn(&h, "Merge JSON files"), "{:?}", h.texts());
+    assert!(is_drawn(&h, "Merge JSON"), "{:?}", h.texts());
 }
 
 #[test]
@@ -1475,28 +2263,31 @@ fn is_drawn_containing(h: &Harness, part: &str) -> bool {
 fn the_tools_window_lists_every_tool_and_each_opens_its_page() {
     let mut h = Harness::new();
     open_tool(&mut h, Tool::Merge);
-    for name in [
-        "Merge JSON",
-        "Format JSON",
-        "Diff JSON",
-        "Patch JSON",
-        "Validate schema",
-    ] {
-        assert!(is_drawn(&h, name), "{name}: {:?}", h.texts());
+    // Every tool is a tab; the page of the one picked has its own main button,
+    // and none of the others' is there.
+    let pages = [
+        ("Merge JSON", "Merge"),
+        ("Format JSON", "Format"),
+        ("Diff JSON", "Compare"),
+        ("Patch JSON", "Apply"),
+        ("Validate schema", "Validate"),
+    ];
+    for (tab, _) in pages {
+        assert!(is_drawn(&h, tab), "{tab}: {:?}", h.texts());
     }
-    for (entry, heading) in [
-        ("Format JSON", "Format JSON"),
-        ("Diff JSON", "Diff JSON"),
-        ("Patch JSON", "Patch JSON"),
-        ("Validate schema", "Validate against a schema"),
-        ("Merge JSON", "Merge JSON files"),
-    ] {
-        press(&mut h, entry);
+    for (tab, button) in pages {
+        press(&mut h, tab);
         assert!(
-            is_drawn(&h, heading),
-            "{entry} opens {heading:?}: {:?}",
+            is_drawn(&h, button),
+            "{tab} opens its page: {:?}",
             h.texts()
         );
+        for (_, other) in pages.iter().filter(|(t, _)| *t != tab) {
+            assert!(
+                !is_drawn(&h, other),
+                "{tab}: {other:?} belongs to another page"
+            );
+        }
     }
 }
 
@@ -1545,22 +2336,21 @@ fn diff_lists_what_changed_and_gives_the_patch() {
     open_tool(&mut h, Tool::Diff);
     h.app
         .tools
-        .fill(Tool::Diff, "Before", r#"{"a":1,"b":[1,2,3]}"#);
+        .fill(Tool::Diff, "Left", r#"{"a":1,"b":[1,2,3]}"#);
     h.app
         .tools
-        .fill(Tool::Diff, "After", r#"{"a":2,"b":[1,3],"c":true}"#);
+        .fill(Tool::Diff, "Right", r#"{"a":2,"b":[1,3],"c":true}"#);
     h.settle();
     press(&mut h, "Compare");
     wait_for(&mut h, "the changes", |h| is_drawn(h, "Changes (3)"));
-    for text in [
-        "/a",
-        "/b/1",
-        "/c",
-        "Changed",
-        "Removed",
-        "Added",
-        "1 added · 1 removed · 1 changed",
-    ] {
+    assert!(
+        is_drawn(&h, "1 added · 1 removed · 1 changed"),
+        "{:?}",
+        h.texts()
+    );
+
+    press(&mut h, "Changes (3)");
+    for text in ["/a", "/b/1", "/c", "Changed", "Removed", "Added"] {
         assert!(is_drawn(&h, text), "{text:?}: {:?}", h.texts());
     }
 
@@ -1572,19 +2362,189 @@ fn diff_lists_what_changed_and_gives_the_patch() {
     );
 }
 
+/// The Diff page with two documents compared, on its side-by-side view.
+fn compared_diff(left: &str, right: &str, count: &str) -> Harness {
+    let mut h = Harness::new();
+    open_tool(&mut h, Tool::Diff);
+    h.app.tools.fill(Tool::Diff, "Left", left);
+    h.app.tools.fill(Tool::Diff, "Right", right);
+    h.settle();
+    press(&mut h, "Compare");
+    wait_for(&mut h, "the changes", |h| is_drawn(h, count));
+    h
+}
+
+#[test]
+fn comparing_opens_the_two_documents_side_by_side_with_the_differences_marked() {
+    let h = compared_diff(
+        r#"{"a":1,"b":[1,2,3]}"#,
+        r#"{"a":2,"b":[1,3],"c":true}"#,
+        "Changes (3)",
+    );
+    // Each document under its own heading, Left on the left.
+    let (left, right) = (rect_of(&h, "Left"), rect_of(&h, "Right"));
+    assert!(left.min.x < right.min.x, "{left:?} {right:?}");
+    assert!((left.center().y - right.center().y).abs() < 2.0);
+
+    // A changed line is one line in both columns.
+    let (in_left, in_right) = (rect_of(&h, "  \"a\": 1,"), rect_of(&h, "  \"a\": 2,"));
+    assert!(in_left.max.x < in_right.min.x, "{in_left:?} {in_right:?}");
+    assert!((in_left.center().y - in_right.center().y).abs() < 1.0);
+    assert!(in_left.min.y > left.max.y, "under the headings");
+
+    // A line only one document has leaves the other column blank: the 2 that
+    // was taken out is only in the left one, the true that was put in only in
+    // the right one.
+    let count = |text: &str| h.texts().iter().filter(|(t, _)| t == text).count();
+    assert_eq!(count("    2,"), 1);
+    assert_eq!(count("  \"c\": true"), 1);
+    assert!(
+        (rect_of(&h, "    2,").min.x - in_left.min.x).abs() < 1.0,
+        "on the left"
+    );
+    assert!(
+        (rect_of(&h, "  \"c\": true").min.x - in_right.min.x).abs() < 1.0,
+        "on the right"
+    );
+}
+
+#[test]
+fn previous_and_next_difference_walk_the_differences_and_say_which() {
+    let mut h = compared_diff(
+        r#"{"a":1,"b":[1,2,3]}"#,
+        r#"{"a":2,"b":[1,3],"c":true}"#,
+        "Changes (3)",
+    );
+    // Beside the Compare button, not the main window's own arrows.
+    let row = center_of(&h, "Compare").y;
+    let button = |h: &Harness, glyph: &str| {
+        *h.pop_buttons(glyph)
+            .iter()
+            .find(|p| (p.y - row).abs() < 3.0)
+            .unwrap_or_else(|| panic!("{glyph} is in the command row: {:?}", h.texts()))
+    };
+    assert!(!is_drawn(&h, "Difference 1 of 3"), "none is picked yet");
+
+    let next = button(&h, "⏷");
+    h.click(next.x, next.y);
+    assert!(is_drawn(&h, "Difference 1 of 3"), "{:?}", h.texts());
+    let next = button(&h, "⏷");
+    h.click(next.x, next.y);
+    assert!(is_drawn(&h, "Difference 2 of 3"), "{:?}", h.texts());
+    let previous = button(&h, "⏶");
+    h.click(previous.x, previous.y);
+    assert!(is_drawn(&h, "Difference 1 of 3"), "{:?}", h.texts());
+}
+
+#[test]
+fn only_differences_folds_what_is_the_same_into_a_line_that_counts_it() {
+    let left: Vec<u32> = (0..30).collect();
+    let mut right = left.clone();
+    right[25] = 1000;
+    let mut h = compared_diff(
+        &serde_json::to_string(&left).unwrap(),
+        &serde_json::to_string(&right).unwrap(),
+        "Changes (1)",
+    );
+    assert!(!is_drawn_containing(&h, "lines are the same"));
+    assert!(is_drawn(&h, "  0,"), "every line is there");
+
+    press(&mut h, "Differences only");
+    // The brackets and the 25 numbers before the three kept above it, and the
+    // closing bracket and the number after the three kept below it.
+    assert!(is_drawn(&h, "… 23 lines are the same"), "{:?}", h.texts());
+    assert!(is_drawn(&h, "… 2 lines are the same"), "{:?}", h.texts());
+    assert!(!is_drawn(&h, "  0,"));
+    assert!(is_drawn(&h, "  1000,"), "the difference is shown");
+
+    press(&mut h, "Differences only");
+    assert!(!is_drawn_containing(&h, "lines are the same"));
+    assert!(is_drawn(&h, "  0,"));
+}
+
+#[test]
+fn clicking_a_difference_in_the_side_by_side_view_copies_its_path() {
+    let mut h = compared_diff(
+        r#"{"a/b": 1, "list": [1, 2]}"#,
+        r#"{"a/b": 2, "list": [1, 2, 3]}"#,
+        "Changes (2)",
+    );
+    press(&mut h, "  \"a/b\": 2,");
+    assert_eq!(h.copied.last().map(String::as_str), Some("/a~1b"));
+    assert!(
+        is_drawn_containing(&h, "Copied the path to /a~1b"),
+        "{:?}",
+        h.texts()
+    );
+
+    // A line that is the same is not a difference, and copies nothing.
+    let copies = h.copied.len();
+    press(&mut h, "  \"list\": [");
+    assert_eq!(h.copied.len(), copies);
+}
+
+#[test]
+fn the_patch_can_be_copied_from_every_view() {
+    let mut h = compared_diff("[1]", "[1, 2]", "Changes (1)");
+    for view in ["Side by side", "Changes (1)", "Patch"] {
+        press(&mut h, view);
+        h.copied.clear();
+        press(&mut h, "Copy patch");
+        let patch = h
+            .copied
+            .last()
+            .unwrap_or_else(|| panic!("{view}: the patch was copied"));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(patch).unwrap(),
+            serde_json::json!([{"op": "add", "path": "/1", "value": 2}]),
+            "{view}"
+        );
+    }
+}
+
+#[test]
+fn documents_too_long_to_lay_out_say_so_and_leave_the_list_and_the_patch() {
+    // Too big for a text box, so it goes in as a file, which the box does not
+    // show (a text box that size would take seconds a frame to lay out).
+    let long = format!(
+        "[{}]",
+        (0..=jsonquery_query::diff::MAX_ROWS)
+            .map(|n| n.to_string())
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    let file = temp_json("too-long.json", &long);
+    let mut h = Harness::new();
+    open_tool(&mut h, Tool::Diff);
+    h.app.tools.fill_file(Tool::Diff, "Left", &file);
+    h.app.tools.fill(Tool::Diff, "Right", "[1]");
+    h.settle();
+    press(&mut h, "Compare");
+    wait_for(&mut h, "the answer", |h| is_drawn(h, "Changes (200000)"));
+    assert!(
+        is_drawn_containing(&h, "Too long to show side by side"),
+        "{:?}",
+        h.texts()
+    );
+    press(&mut h, "Patch");
+    assert!(is_drawn_containing(&h, r#"{"op": "remove""#));
+}
+
 #[test]
 fn documents_that_are_the_same_are_said_to_be() {
     let mut h = Harness::new();
     open_tool(&mut h, Tool::Diff);
     // Another order of keys, and another way to write a number.
-    h.app.tools.fill(Tool::Diff, "Before", r#"{"a":1,"b":2}"#);
-    h.app.tools.fill(Tool::Diff, "After", r#"{"b":2,"a":1.0}"#);
+    h.app.tools.fill(Tool::Diff, "Left", r#"{"a":1,"b":2}"#);
+    h.app.tools.fill(Tool::Diff, "Right", r#"{"b":2,"a":1.0}"#);
     h.settle();
     press(&mut h, "Compare");
-    wait_for(&mut h, "the answer", |h| {
-        is_drawn(h, "The documents are the same")
-    });
+    wait_for(&mut h, "the answer", |h| is_drawn(h, "Changes (0)"));
+    // Said in the status bar, and in the list; the side-by-side view shows
+    // two columns with nothing marked.
     assert!(is_drawn(&h, "same"));
+    press(&mut h, "Changes (0)");
+    assert!(is_drawn(&h, "The documents are the same"));
 }
 
 #[test]
@@ -1684,9 +2644,8 @@ fn a_schema_that_cannot_be_used_is_explained() {
 }
 
 #[test]
-fn the_two_boxes_of_a_page_are_stacked_with_the_button_under_them() {
+fn the_two_boxes_of_a_page_are_stacked_under_the_command_row() {
     for (tool, first, second, button) in [
-        (Tool::Diff, "Before", "After", "Compare"),
         (Tool::Patch, "Document", "Patch", "Apply"),
         (Tool::Validate, "Document", "Schema", "Validate"),
     ] {
@@ -1694,8 +2653,8 @@ fn the_two_boxes_of_a_page_are_stacked_with_the_button_under_them() {
         open_tool(&mut h, tool);
         let (a, b, c) = (rect_of(&h, first), rect_of(&h, second), rect_of(&h, button));
         assert!(
-            a.min.y < b.min.y && b.min.y < c.min.y,
-            "{tool:?}: {a:?} {b:?} {c:?}"
+            c.min.y < a.min.y && a.min.y < b.min.y,
+            "{tool:?}: the button is in the row above both boxes: {c:?} {a:?} {b:?}"
         );
         assert!(
             (a.min.x - b.min.x).abs() < 1.0,
@@ -1710,44 +2669,140 @@ fn the_two_boxes_of_a_page_are_stacked_with_the_button_under_them() {
 }
 
 #[test]
-fn the_buttons_of_both_halves_are_on_one_line_at_the_bottom() {
-    for (tool, left, right) in [
-        (Tool::Merge, "Merge", "Open in main window"),
-        (Tool::Format, "Format", "Save…"),
-        (Tool::Diff, "Compare", "Save patch…"),
-        (Tool::Patch, "Apply", "Open in main window"),
-        (Tool::Validate, "Validate", "Show in main window"),
+fn the_headers_of_the_two_halves_are_on_one_line_under_the_command_row() {
+    for (tool, run, left_title, right_title, left, right) in [
+        (
+            Tool::Merge,
+            "Merge",
+            "Files",
+            "Result",
+            "Add files…",
+            "Open in main window",
+        ),
+        (
+            Tool::Format,
+            "Format",
+            "Input",
+            "Result",
+            "Open file…",
+            "Copy",
+        ),
+        (
+            Tool::Patch,
+            "Apply",
+            "Document",
+            "Result",
+            "Open file…",
+            "Open in main window",
+        ),
+        (
+            Tool::Validate,
+            "Validate",
+            "Document",
+            "Problems",
+            "Open file…",
+            "Show in main window",
+        ),
     ] {
         let mut h = Harness::new();
         open_tool(&mut h, tool);
-        // The main window has a "Save…" of its own, higher up: the page's is the
-        // lowest.
-        let lowest = |text: &str| *h.pop_buttons(text).last().expect("is drawn");
-        let (l, r) = (lowest(left), lowest(right));
+        // The first of each: the upper box's, where there are two.
+        let first = |text: &str| *h.pop_buttons(text).first().expect("is drawn");
+        let (button, l, r) = (first(run), first(left), first(right));
         assert!(
             (l.y - r.y).abs() < 3.0,
             "{tool:?}: {left:?} at {l:?} and {right:?} at {r:?} are one line"
         );
         assert!(l.x < r.x, "{tool:?}: the right half is on the right");
+        assert!(
+            button.y < l.y,
+            "{tool:?}: {run:?} at {button:?} is in the row above the headers"
+        );
+
+        let (lt, rt) = (rect_of(&h, left_title), rect_of(&h, right_title));
+        assert!(
+            (lt.center().y - rt.center().y).abs() < 2.0,
+            "{tool:?}: {left_title:?} and {right_title:?} are one line: {lt:?} {rt:?}"
+        );
+        assert!(
+            lt.min.x < rt.min.x,
+            "{tool:?}: and the right one is on the right"
+        );
     }
+}
+
+#[test]
+fn the_tools_window_uses_the_main_windows_text_sizes() {
+    // The headings and the buttons are the main window's own, not bigger ones.
+    let mut h = Harness::new();
+    open_tool(&mut h, Tool::Format);
+    let height_of = |h: &Harness, text: &str| -> Vec<f32> {
+        text_rects(&h.shapes)
+            .into_iter()
+            .filter(|(t, _)| t == text)
+            .map(|(_, r)| r.height())
+            .collect()
+    };
+    let (main, tools) = (height_of(&h, "Results"), height_of(&h, "Result"));
+    assert_eq!((main.len(), tools.len()), (1, 1), "{:?}", h.texts());
+    assert!(
+        (main[0] - tools[0]).abs() < 0.01,
+        "one heading size: {main:?} {tools:?}"
+    );
+    // "Clear" is in the main window's toolbar and in the box's header.
+    let clears = height_of(&h, "Clear");
+    assert!(clears.len() >= 2, "{:?}", h.texts());
+    assert!(
+        clears.windows(2).all(|w| (w[0] - w[1]).abs() < 0.01),
+        "one button text size: {clears:?}"
+    );
 }
 
 #[test]
 fn swapping_the_documents_swaps_what_the_diff_says() {
     let mut h = Harness::new();
     open_tool(&mut h, Tool::Diff);
-    h.app.tools.fill(Tool::Diff, "Before", "[1]");
-    h.app.tools.fill(Tool::Diff, "After", "[1, 2]");
+    h.app.tools.fill(Tool::Diff, "Left", "[1]");
+    h.app.tools.fill(Tool::Diff, "Right", "[1, 2]");
     h.settle();
     press(&mut h, "Compare");
     wait_for(&mut h, "the answer", |h| is_drawn(h, "1 added"));
 
-    // Swapping drops the old answer; comparing again says the opposite.
+    // Swapping drops the old answer and goes back to the documents; comparing
+    // again says the opposite.
     press(&mut h, "Swap");
-    assert!(is_drawn(&h, "What differs appears here"), "{:?}", h.texts());
+    assert!(!is_drawn(&h, "1 added"), "{:?}", h.texts());
+    assert!(is_drawn(&h, "Left") && is_drawn(&h, "Right"));
     press(&mut h, "Compare");
     wait_for(&mut h, "the opposite answer", |h| is_drawn(h, "1 removed"));
     assert!(!is_drawn(&h, "1 added"));
+}
+
+#[test]
+fn the_diff_page_puts_its_two_documents_next_to_each_other_under_the_command_row() {
+    let mut h = Harness::new();
+    open_tool(&mut h, Tool::Diff);
+    let (left, right) = (rect_of(&h, "Left"), rect_of(&h, "Right"));
+    let compare = rect_of(&h, "Compare");
+    assert!(compare.min.y < left.min.y, "{compare:?} {left:?}");
+    assert!((left.center().y - right.center().y).abs() < 2.0, "one line");
+    assert!(left.min.x < right.min.x, "Left is on the left");
+    // Both have room: about half the window each.
+    assert!(right.min.x - left.min.x > 300.0, "{left:?} {right:?}");
+
+    // The buttons of each box are on its own header; the patch buttons are in
+    // the command row, there from the start and not usable yet.
+    let opens = h.pop_buttons("Open file…");
+    assert_eq!(opens.len(), 2, "{:?}", h.texts());
+    assert!(opens[0].x < opens[1].x && (opens[0].y - opens[1].y).abs() < 3.0);
+    for button in ["Copy patch", "Save patch…"] {
+        let at = rect_of(&h, button);
+        assert!(
+            (at.center().y - compare.center().y).abs() < 3.0,
+            "{button} is in the command row: {at:?} {compare:?}"
+        );
+        assert!(at.min.x > right.min.x, "at the right of the row");
+    }
 }
 
 #[test]
@@ -1756,15 +2811,16 @@ fn clicking_a_change_copies_its_path_and_the_patch_can_be_copied() {
     open_tool(&mut h, Tool::Diff);
     h.app
         .tools
-        .fill(Tool::Diff, "Before", r#"{"a/b": 1, "list": [1, 2]}"#);
+        .fill(Tool::Diff, "Left", r#"{"a/b": 1, "list": [1, 2]}"#);
     h.app
         .tools
-        .fill(Tool::Diff, "After", r#"{"a/b": 2, "list": [1, 2, 3]}"#);
+        .fill(Tool::Diff, "Right", r#"{"a/b": 2, "list": [1, 2, 3]}"#);
     h.settle();
     press(&mut h, "Compare");
     wait_for(&mut h, "the changes", |h| is_drawn(h, "Changes (2)"));
 
     // A path is copied the way a JSON Pointer writes it.
+    press(&mut h, "Changes (2)");
     press(&mut h, "/a~1b");
     assert_eq!(h.copied.last().map(String::as_str), Some("/a~1b"));
     assert!(
@@ -1897,6 +2953,10 @@ fn a_cancelled_job_is_not_shown_as_an_error_on_any_page() {
     ] {
         let mut h = Harness::new();
         open_tool(&mut h, tool);
+        if tool == Tool::Diff {
+            // Its answers are on the views, not on the page with the documents.
+            press(&mut h, "Side by side");
+        }
         assert!(is_drawn(&h, hint), "{tool:?}: {:?}", h.texts());
         h.app.tools.job_done(tool, 0, Err("cancelled".to_owned()));
         h.settle();

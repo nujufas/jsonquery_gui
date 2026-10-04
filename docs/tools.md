@@ -1,21 +1,28 @@
 # Tools
 
 The dim 🛠 icon in the toolbar, next to the 📖 tutorial icon, opens the **Tools
-window** — a second window with a list of small utilities on the left and the
-selected one on the right:
+window** — a second window with a tab for each of a few small utilities, and the
+page of the selected one under them:
 
 | Tool | What it does |
 |---|---|
 | [Merge JSON](#merge-json) | Combines several files into one document, with a jq filter. |
 | [Format JSON](#format-json) | Pretty-prints (2 or 4 spaces, tab), minifies, sorts the keys. |
-| [Diff JSON](#diff-json) | Says what was added, removed and changed between two documents, and gives the JSON Patch for it. |
+| [Diff JSON](#diff-json) | Shows two documents side by side with what differs marked, lists the changes, and gives the JSON Patch for it. |
 | [Patch JSON](#patch-json) | Applies a JSON Patch (RFC 6902) or a JSON Merge Patch (RFC 7386) to a document. |
 | [Validate schema](#validate-schema) | Checks a document against a JSON Schema and lists what does not fit. |
 
-Every page has the same shape: a heading over two halves, with what goes in on
-the left and what came out on the right. Each half has a title row, a box that
-takes all the height there is, and its buttons pinned at the bottom. The window
-keeps its text short: what a choice does, and the limits, are in tooltips.
+Every page has the same shape, and it is the main window's: the tabs on top (as
+its toolbar is), a command row under them with the page's main button and its
+options (as the Query row has Run), then two panes side by side — what goes in
+on the left, what came out on the right — each with a small title and its buttons
+in a header (as Source and Results have), and a status bar at the bottom
+that says what came out ("100 B (was 48 B)", "2 added · 1 removed", "Valid") and
+what was last done ("Saved to …"). The line between the panes can be dragged.
+(Diff is the one page laid out otherwise: see [Diff JSON](#diff-json).)
+Buttons, text and spacing are the main window's own, so the two look like one
+program, and the window keeps its text short: what a choice does, and the
+limits, are in tooltips.
 
 ## Putting JSON in
 
@@ -54,12 +61,12 @@ Combine several JSON files into one document, using jq.
    **Sort A–Z** orders by name with numbers in order (`part2` before `part10`),
    and **Clear** empties the list (those two appear once there are files).
 2. Choose **Merge as** — hover a choice to see what it does — or write your own
-   filter in the box under it.
-3. Press **Merge** (or `Ctrl+Enter`). The box on the right shows a preview of
-   what came out, and its title says what it is ("array · 6 items").
+   filter in the box under the command row.
+3. Press **Merge** (or `Ctrl+Enter`). The pane on the right shows a preview of
+   what came out, and the status bar says what it is ("array · 6 items").
 4. **Open in main window** makes it the loaded document — to explore, query
    and search it like any other — and **Save…** writes it to a file. Both are
-   under the preview, and usable once there is a result.
+   in the result's header, and usable once there is a result.
 
 ### How the filter sees the files
 
@@ -98,8 +105,9 @@ Print a document the way you want it.
   ASCII.
 
 **Format** (or `Ctrl+Enter`) prints it; the preview shows the start of long
-texts, and **Copy** and **Save…** take all of it (Copy stops at 16 MB; Save does
-not). The title of the result says how big it is against what went in. Changing
+texts, and **Copy** and **Save…** (in the result's header) take all of it (Copy
+stops at 16 MB; Save does not). The status bar says how big the result is against
+what went in. Changing
 an option or the input drops the old result. A save is named after the file the
 text came from (`orders.formatted.json`, or `orders.min.json` when minified), so
 it does not land on top of it unless you choose that.
@@ -110,14 +118,47 @@ and key order is kept unless **Sort keys** is on.
 
 ## Diff JSON
 
-Compare **Before** with **After**.
+Compare a **Left** document with a **Right** one, the way a file-comparison
+tool such as Beyond Compare does. (They are not called Before and After: two
+files that are compared need not be versions of one.) Differences are read from
+Left to Right: what only Left has is **Removed**, what only Right has is
+**Added**, and the JSON Patch turns Left into Right. The page has four views, as
+tabs in the command row:
 
-The result is a list of **Changes**: what was **Added**, **Removed** or
-**Changed**, each with the JSON Pointer to it, and the value (or both values) at
-the right. Click a row to copy its path; hover for the whole of a long value. The
-**Patch** tab shows the same difference as the RFC 6902 JSON Patch that turns
-Before into After, one operation to a line (with a space after each colon and
-comma, so a long one wraps), and **Save patch…** and **Copy patch** take it. **Swap** exchanges the two boxes.
+- **Documents** — the two documents next to each other, to type, paste, drop or
+  open (the same box as the other pages). **Compare** (Ctrl+Enter) runs the
+  comparison and opens the next view by itself; **Swap** exchanges the two and
+  goes back here.
+- **Side by side** — the two documents, left and right, line by line, and
+  read-only. What both have is on one line on both sides; what only one has
+  is **red** on the left (removed) or **green** on the right (added), with a blank
+  on the other side; what changed is **amber** on both, with the characters that
+  differ picked out. The two sides scroll together (one scroll bar, and a bar
+  under them, or Shift+wheel, for long lines), and the strip at the right edge is
+  an overview of the whole document with a tick for every difference — click or
+  drag it to go there. **⏶** and **⏷** (Alt+Up and Alt+Down) go to the previous and
+  next difference, and the status bar says which ("Difference 2 of 5").
+  **Differences only** folds what is the same into a line ("… 23 lines are the
+  same"), keeping three lines around each difference. Click a difference to copy
+  its path.
+- **Changes** — a list of what was **Added**, **Removed** or **Changed**, each
+  with the JSON Pointer to it, and the value (or both values) at the right.
+  Click a row to copy its path; hover for the whole of a long value.
+- **Patch** — the same difference as the RFC 6902 JSON Patch that turns Left
+  into Right, one operation to a line (with a space after each colon and
+  comma, so a long one wraps).
+
+**Copy patch** and **Save patch…** are at the right of the command row, in every
+view, and take the whole patch.
+
+The lines are the pretty-printed documents (two spaces to a level, numbers as
+they were written), and what is marked is exactly what is in the patch. Both
+sides show an object's members in the order of the *left* document, because
+the order is not a difference: a document whose keys are in another order lines
+up with the other instead of showing every line as moved. Lines longer than 400
+characters are cut with `…` (the patch has the whole value). A pair of documents
+that is over 200,000 lines is too long to lay out: Side by side says so, and
+Changes and Patch have the differences all the same.
 
 What counts as a difference is what JSON itself says:
 
@@ -162,8 +203,8 @@ Check the **Document** against the **Schema** (a JSON Schema: drafts 4, 6, 7,
 The result is the list of problems. Each row has the JSON Pointer of the value
 that is wrong (`(document)` when it is the whole document) and what is wrong
 with it; hover for the keyword that said so (`required`, `minimum`…) and where it
-is in the schema. The title says **Valid**, or how many problems there are —
-a thousand at most are listed. **Copy report** copies the list.
+is in the schema. The status bar says **Valid**, or how many problems there are
+— a thousand at most are listed. **Copy report** copies the list.
 
 - **Check formats** holds strings to their `format` (`email`, `date-time`,
   `uuid`…). The specification leaves that to the validator in recent drafts;
@@ -207,6 +248,13 @@ crate.
   look and `jobs.rs` for the work the worker thread does. The jobs run on the
   worker thread (`Command::Tool`, answered by `Event::ToolDone`), like every
   other file operation, each with a generation number and a cancel flag.
+- The window is a *deferred* viewport, redrawn by eframe on its own and not as a
+  part of the main window's frame (`App::satellite_frame`, see
+  [Architecture](architecture.md)). It matters when the window is maximized over
+  the main window: GNOME sends a completely covered window no redraw callbacks,
+  and a window drawn inside that window's frame would stop responding with it.
+  Its frame takes in the worker's answers itself, so a job finishes while the
+  main window is covered.
 - A merged or patched document is `Document::from_value` with
   `DocumentSource::Merged` or `DocumentSource::Derived`: it has no file to
   reload from, so the Source field is left empty and the toolbar names it

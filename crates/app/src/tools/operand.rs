@@ -13,9 +13,7 @@ use eframe::egui::{self, Align, Layout, RichText};
 use jsonquery_core::{Document, DocumentSource};
 
 use super::jobs::{Input, MAX_TOOL_BYTES};
-use super::widgets::{
-    centered_pair, file_name, flat_button, inset_box, title_row, Border, BOX_GAP,
-};
+use super::widgets::{file_name, header, note_box, text_box, ERROR, STACK_GAP};
 use crate::app::human_bytes;
 
 /// The most text the box takes. egui lays out a whole text box at once, so a
@@ -34,7 +32,7 @@ enum Content {
 }
 
 pub(super) struct Operand {
-    /// The title over the box: "Before", "Schema"…
+    /// The title over the box: "Left", "Schema"…
     title: &'static str,
     /// Tells this box from the others on the page, for widget ids.
     id: &'static str,
@@ -85,6 +83,12 @@ impl Operand {
     /// a default file name.
     pub fn source_file(&self) -> Option<&str> {
         self.file.as_deref()
+    }
+
+    /// What the box holds, in a few words ("orders.json", "(pasted JSON)"), when
+    /// it holds a file or the open document and not text that was typed.
+    pub fn label(&self) -> Option<&str> {
+        self.name.as_deref()
     }
 
     pub fn set_text(&mut self, text: impl Into<String>) {
@@ -182,64 +186,66 @@ impl Operand {
         std::mem::swap(&mut self.problem, &mut other.problem);
     }
 
-    /// Draw the title row and the box, which fill the height there is. True
-    /// when what the box holds changed. `drop_target` says a dragged file would
-    /// land here, which the box shows.
+    /// Draw the header and the box, which fill the height there is. True when
+    /// what the box holds changed. `drop_target` says a dragged file would land
+    /// here, which the box shows.
     pub fn ui(
         &mut self,
         ui: &mut egui::Ui,
         open_doc: Option<&Arc<Document>>,
         drop_target: bool,
     ) -> bool {
-        let mut changed = self.header(ui, open_doc);
-        ui.add_space(6.0);
+        let mut changed = self.title_row(ui, open_doc);
 
         let dragging = ui.ctx().input(|i| !i.raw.hovered_files.is_empty());
-        let border = if dragging && drop_target {
-            Border::Accent
-        } else {
-            Border::Solid
-        };
-        let mut edited = false;
-        inset_box(ui, border, 8.0, |ui| match &self.content {
-            Content::Text => edited = text_edit(ui, &mut self.text, self.id, self.hint),
-            Content::Big { path, bytes } => centered_pair(
+        let accent = dragging && drop_target;
+        match &self.content {
+            Content::Text => {
+                if text_box(ui, self.id, &mut self.text, self.hint, None, accent) {
+                    self.name = None;
+                    self.file = None;
+                    self.problem = None;
+                    changed = true;
+                }
+            }
+            Content::Big { path, bytes } => note_box(
                 ui,
+                accent,
                 &file_name(path),
                 &format!("{} · read when you run it", human_bytes(*bytes)),
             ),
-            Content::Open(doc) => centered_pair(
+            Content::Open(doc) => note_box(
                 ui,
+                accent,
                 "The open document",
                 &format!("{} · {}", short_source(doc), human_bytes(doc.byte_len)),
             ),
-        });
-        if edited {
-            self.name = None;
-            self.file = None;
-            self.problem = None;
-            changed = true;
         }
         changed
     }
 
-    /// The title, what the box holds, and the buttons to fill or empty it.
-    fn header(&mut self, ui: &mut egui::Ui, open_doc: Option<&Arc<Document>>) -> bool {
+    /// The header: the title, what the box holds (or why a file could not be
+    /// used), and the buttons to fill or empty it.
+    fn title_row(&mut self, ui: &mut egui::Ui, open_doc: Option<&Arc<Document>>) -> bool {
         let mut changed = false;
-        title_row(ui, |ui| {
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+        header(
+            ui,
+            self.title,
+            |_| {},
+            |ui| {
                 // Right to left: Clear is the right-most.
-                if !self.is_empty() && flat_button(ui, "Clear").clicked() {
+                if ui
+                    .add_enabled(!self.is_empty(), egui::Button::new("Clear"))
+                    .on_hover_text("Empty this box")
+                    .clicked()
+                {
                     self.clear();
                     changed = true;
                 }
                 let open = ui
-                    .add_enabled_ui(open_doc.is_some(), |ui| {
-                        ui.button("Open document")
-                            .on_hover_text("Use the document open in the main window")
-                            .on_disabled_hover_text("No document is open in the main window")
-                    })
-                    .inner;
+                    .add_enabled(open_doc.is_some(), egui::Button::new("Open document"))
+                    .on_hover_text("Use the document open in the main window")
+                    .on_disabled_hover_text("No document is open in the main window");
                 if open.clicked() {
                     if let Some(doc) = open_doc {
                         self.use_document(doc.clone());
@@ -260,48 +266,18 @@ impl Operand {
                     }
                 }
                 ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                    ui.label(RichText::new(self.title).strong());
                     if let Some(problem) = &self.problem {
-                        let color = ui.visuals().error_fg_color;
-                        ui.add(
-                            egui::Label::new(RichText::new(problem).small().color(color))
-                                .truncate(),
-                        )
-                        .on_hover_text(problem);
+                        ui.add(egui::Label::new(RichText::new(problem).color(ERROR)).truncate())
+                            .on_hover_text(problem);
                     } else if let Some(name) = &self.name {
-                        ui.add(egui::Label::new(RichText::new(name).small().weak()).truncate())
+                        ui.add(egui::Label::new(RichText::new(name).weak()).truncate())
                             .on_hover_text(name);
                     }
                 });
-            });
-        });
+            },
+        );
         changed
     }
-}
-
-/// A multi-line monospace text box that fills the room it is given and scrolls
-/// when its text is longer. True when the text changed.
-fn text_edit(ui: &mut egui::Ui, text: &mut String, id: &str, hint: &str) -> bool {
-    // The height of a line as the text box counts it.
-    let row =
-        ui.text_style_height(&egui::TextStyle::Monospace) + ui.spacing().extra_text_line_spacing;
-    let rows = (ui.available_height() / row).floor().max(1.0) as usize;
-    egui::ScrollArea::vertical()
-        .id_salt(format!("{id}_scroll"))
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
-            ui.add(
-                egui::TextEdit::multiline(text)
-                    .id_salt(format!("{id}_edit"))
-                    .font(egui::TextStyle::Monospace)
-                    .frame(egui::Frame::NONE)
-                    .desired_width(f32::INFINITY)
-                    .desired_rows(rows)
-                    .hint_text(hint),
-            )
-            .changed()
-        })
-        .inner
 }
 
 /// A document's source in a few words: a file by its name, others as they
@@ -323,14 +299,14 @@ pub(super) fn stacked(
 ) -> bool {
     let target = drop_target(&[&*first, &*second]);
     // Besides the gap, egui puts its item spacing after the first box.
-    let spaces = f32::from(BOX_GAP) + ui.spacing().item_spacing.y;
+    let spaces = STACK_GAP + ui.spacing().item_spacing.y;
     let height = ((ui.available_height() - spaces) / 2.0).floor().max(0.0);
     let size = egui::vec2(ui.available_width(), height);
     let mut changed = false;
     ui.allocate_ui(size, |ui| {
         changed |= first.ui(ui, open_doc, target == 0);
     });
-    ui.add_space(f32::from(BOX_GAP));
+    ui.add_space(STACK_GAP);
     ui.allocate_ui(size, |ui| {
         changed |= second.ui(ui, open_doc, target == 1);
     });
@@ -522,13 +498,13 @@ mod tests {
 
     #[test]
     fn swapping_keeps_the_titles() {
-        let mut a = Operand::new("Before", "a", "");
-        let mut b = Operand::new("After", "b", "");
+        let mut a = Operand::new("Left", "a", "");
+        let mut b = Operand::new("Right", "b", "");
         a.set_text("1");
         b.set_text("2");
         a.swap_with(&mut b);
         assert_eq!((a.text(), b.text()), ("2", "1"));
-        assert_eq!((a.title, b.title), ("Before", "After"));
+        assert_eq!((a.title, b.title), ("Left", "Right"));
     }
 
     #[test]

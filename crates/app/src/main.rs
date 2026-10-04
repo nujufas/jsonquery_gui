@@ -5,6 +5,7 @@
 
 mod app;
 mod dock;
+mod pane_header;
 mod query_highlight;
 mod query_suggest;
 mod tools;

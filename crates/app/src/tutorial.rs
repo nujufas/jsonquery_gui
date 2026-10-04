@@ -5,10 +5,13 @@
 //! presentation plus the hand-off that lets a reader push an example's data
 //! and/or query into the main window to practise with.
 //!
-//! It is an *immediate* viewport, so it runs inside the main window's frame
-//! with plain `&mut self` access — no shared-state plumbing — and egui falls
-//! back to an embedded floating window by itself if the backend can't open
-//! native ones.
+//! On a desktop it is a *deferred* viewport — eframe redraws the window by
+//! itself and calls back into the app through its lock (`App::satellite_frame`)
+//! — so it keeps working when the main window is not being redrawn, which is
+//! the case once something covers the main window completely (GNOME sends no
+//! redraw callbacks then). Where there are no real windows (an embedded
+//! viewport; the headless tests) it is an immediate viewport, drawn inside the
+//! main window's frame, and egui shows it as a floating window.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -77,7 +80,7 @@ impl Default for Tutorial {
     }
 }
 
-fn viewport_id() -> egui::ViewportId {
+pub(crate) fn viewport_id() -> egui::ViewportId {
     egui::ViewportId::from_hash_of("jsonquery_tutorial_window")
 }
 
@@ -95,25 +98,48 @@ impl Tutorial {
         }
     }
 
-    /// Draw the window (if open) for this frame. Returns what the reader
-    /// asked to load into the main window, if anything — already focused,
-    /// so the result of pressing ▶ is visible straight away.
+    pub fn is_open(&self) -> bool {
+        self.open
+    }
+
+    /// The window was closed (by the user): stop showing it.
+    pub fn close(&mut self) {
+        self.open = false;
+    }
+
+    /// The window the tutorial is shown in. The same every frame it is open:
+    /// egui patches the real window to match a builder that changed.
+    pub fn builder(&mut self) -> egui::ViewportBuilder {
+        let icon = self
+            .icon
+            .get_or_insert_with(|| Arc::new(crate::app_icon()))
+            .clone();
+        egui::ViewportBuilder::default()
+            .with_title("jsonquery — Tutorial")
+            .with_inner_size([1040.0, 720.0])
+            .with_min_inner_size([720.0, 460.0])
+            .with_app_id(crate::APP_ID)
+            .with_icon(icon)
+    }
+
+    /// One frame of the window when it is a window of its own, redrawn by
+    /// eframe by itself. Returns what the reader asked to load into the main
+    /// window, if anything.
+    pub fn window_frame(&mut self, ui: &mut egui::Ui) -> Option<LoadRequest> {
+        self.contents(ui)
+    }
+
+    /// Draw the window (if open) for this frame as an immediate viewport,
+    /// inside the main window's frame — where there are no real windows to
+    /// redraw by themselves. Returns what the reader asked to load into the
+    /// main window, if anything — already focused, so the result of pressing ▶
+    /// is visible straight away.
     pub fn show(&mut self, ctx: &egui::Context) -> Option<LoadRequest> {
         if !self.open {
             return None;
         }
 
-        let icon = self
-            .icon
-            .get_or_insert_with(|| Arc::new(crate::app_icon()))
-            .clone();
-        let builder = egui::ViewportBuilder::default()
-            .with_title("jsonquery — Tutorial")
-            .with_inner_size([1040.0, 720.0])
-            .with_min_inner_size([720.0, 460.0])
-            .with_app_id(crate::APP_ID)
-            .with_icon(icon);
-
+        let builder = self.builder();
         let mut request = None;
         let mut close = false;
         ctx.show_viewport_immediate(viewport_id(), builder, |ui, _class| {

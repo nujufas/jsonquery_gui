@@ -39,8 +39,9 @@ file (or paste JSON directly) and query it with **jq**, **JSON Pointer**,
   **Merge JSON** combines several files into one document with a jq filter,
   the way `jq -s` does (drop the files on it, or on the main window);
   **Format JSON** pretty-prints with 2 or 4 spaces or a tab, minifies, sorts
-  the keys; **Diff JSON** lists what was added, removed and changed between two
-  documents and gives the RFC 6902 JSON Patch for it; **Patch JSON** applies a
+  the keys; **Diff JSON** shows two documents side by side, with what was added,
+  removed and changed marked as a file-comparison tool does, lists the changes
+  and gives the RFC 6902 JSON Patch for it (copy or save); **Patch JSON** applies a
   JSON Patch or a JSON Merge Patch; **Validate schema** checks a document
   against a JSON Schema (drafts 4 to 2020-12) and shows a problem in the
   document that is open. JSON goes in by pasting, dropping a file, or from the
@@ -89,8 +90,9 @@ file (or paste JSON directly) and query it with **jq**, **JSON Pointer**,
   full-height source. The main window gives the room to whatever is left. The
   **⬋** icon in that window, or just closing it, docks the pane back, and a
   **🗖** button in the toolbar (there while anything is out) brings every
-  window back at once.
-  Shortcuts and search work in each window.
+  window back at once. The Source pane's window has a **Source** field of its
+  own on top (with **…**, **Load** and **Clear**), so a document can be opened
+  from there. Shortcuts and search work in each window.
 - **Light and dark themes**, switchable from the toolbar.
 - **Keyboard shortcuts** — `Ctrl+Enter` run/apply, `Ctrl+F` search,
   `Ctrl+S` save (both scoped to whichever panel you last clicked), `F1`

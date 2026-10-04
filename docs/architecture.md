@@ -44,7 +44,9 @@ the memory-mapped path above.
 
 The window's other tools work the same way: **Format**, **Diff**, **Patch** and
 **Validate schema** are functions over `serde_json::Value` in `crates/query`
-(`reformat`, `diff`, `patch` — RFC 6902 and RFC 7386 — and `schema`, a thin
+(`reformat`, `diff` — which also lays the two documents out side by side from
+the same edit tree the patch comes from (`diff/view.rs`), so what is marked is
+what is in the patch — `patch` — RFC 6902 and RFC 7386 — and `schema`, a thin
 layer over the `jsonschema` crate built without its network and file features,
 so a `$ref` can't make the app fetch anything). The app runs them on the worker
 thread as one kind of job (`Command::Tool`, answered by `Event::ToolDone`), with
@@ -104,21 +106,33 @@ so a box that grew with a long query would set the panel's height too (and
 undo every drag back to it); the box is therefore a vertical scroll area that
 fills whatever room the panel has, with its border drawn fixed around it.
 
-Each of the three panes (`Query`, `Source`, `Results`) can also be popped out
-into a window of its own (`crates/app/src/dock.rs` holds the state and the
-layout decisions; `app.rs` draws). A popped-out pane is an egui *deferred
+The Source and Results panes (and the boxes of the Tools window) each begin with
+the same header (`crates/app/src/pane_header.rs`): a small title, what goes after
+it, and the buttons pinned at the right, with nothing drawn under it — the panel's
+edge above is the only line. Each of the three panes (`Query`, `Source`,
+`Results`) can also be popped out into a window of its own
+(`crates/app/src/dock.rs` holds the state and the layout decisions; `app.rs`
+draws). The toolbar's source field (with …, Load and Clear) stays in the main
+window, so the window of a popped-out Source pane has a row of its own on top with
+the same field and buttons (`App::source_field`, one text in `source_input`). A popped-out pane is an egui *deferred
 viewport*: eframe redraws its window by itself and calls back into the app, which
 `Shared` keeps behind a lock (`Arc<Mutex<App>>`) so that the window's frame and
 the main window's frame both have plain `&mut App` access. It has to be deferred
-rather than immediate (drawn inside the main window's frame, as the tutorial and
-About windows are): a Wayland compositor sends no redraw callbacks to a window
-that is completely covered (GNOME does), so a pane maximized over the main window
-would otherwise stop responding together with the window under it. Hence a
-window's frame does what the main window's frame would have done for it — drains
-the worker's events, applies the dock changes it asked for — and a docked pane's
-window, which only the main window's next frame can end, minimizes itself if that
-frame does not come. Where there are no real windows (embedded viewports, and the
-headless layout tests) the pane is drawn as an immediate viewport instead. Two
+rather than immediate (drawn inside the main window's frame): a Wayland compositor
+sends no redraw callbacks to a window that is completely covered (GNOME does), so
+a pane maximized over the main window would otherwise stop responding together
+with the window under it. Hence a window's frame does what the main window's frame
+would have done for it — drains the worker's events, applies the dock changes it
+asked for — and a docked pane's window, which only the main window's next frame
+can end, minimizes itself if that frame does not come. Where there are no real
+windows (embedded viewports, and the headless layout tests) the pane is drawn as
+an immediate viewport instead. The other windows — the Tools window, the tutorial
+and About (`crates/app/src/app/satellites.rs`) — are deferred viewports for the
+same reason and run the same kind of frame (`App::satellite_frame`: the worker's
+events, the requests the window makes of the app, and — a closed window being
+ended only by the main window's next frame — un-maximizing a window that is closed
+from over the main window and minimizing one that is not dropped); the worker's
+wake-up asks each of them for a frame too. Two
 rules keep the drawing sound: a pane's widget ids come from the pane
 (`UiBuilder::id`), not from the panel or window around it, so scroll positions
 and text cursors survive a move; and because those ids are global, a pane must be
