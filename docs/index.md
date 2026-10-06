@@ -23,7 +23,11 @@ scroll."* That's the gap this project fills.
 
 - **Open large files without flinching.** Drag-and-drop or file-picker,
   targeting files from a few KB up to multiple GB, without freezing the UI
-  while it loads.
+  while it loads. A file of 256 MiB or more is not parsed into memory (which
+  would take twelve to seventeen times its size) but kept on disk and indexed
+  in about a second per 500 MB; the tree shows long lists in runs, and jq
+  queries read the file as they go (see
+  [Scaling beyond in-memory](architecture.md#scaling-beyond-in-memory)).
 - **Query like jq.** A query field at the top of the window, running a
   jq-compatible query language against the loaded document (or JSON
   Pointer, JSONPath, or JMESPath — see [Query Engines](query-engines.md)).
@@ -67,8 +71,8 @@ architecture doc is a zoom-in on one of these boxes.
 ```
 background worker thread:
   Opened/dropped/pasted file, or a URL
-    -> Ingest (mmap, or bytes directly)
-    -> Parse (serde_json)
+    -> Ingest (read; memory-mapped from 256 MiB; or bytes directly)
+    -> Parse (serde_json) — or, from 256 MiB, Index (the file stays on disk)
     -> Query engine (jaq · JSON Pointer · JSONPath · JMESPath)
 
         | commands down, results streamed up — via channel

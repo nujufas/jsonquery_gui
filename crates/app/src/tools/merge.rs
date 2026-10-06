@@ -366,7 +366,7 @@ impl Merge {
 
 /// What the result is, in a few words: "array · 6 items".
 fn result_summary(outcome: &MergeOutcome) -> String {
-    let mut summary = describe(&outcome.doc.root);
+    let mut summary = describe(outcome.doc.root());
     if outcome.outputs > 1 {
         summary.push_str(&format!(" · {} outputs", outcome.outputs));
     }

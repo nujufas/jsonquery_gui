@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context};
-use jsonquery_core::{Document, DocumentSource};
+use jsonquery_core::{Content, Document, DocumentSource};
 use jsonquery_query::diff::{self, Change, Side, SideBySide, TooLong};
 use jsonquery_query::reformat::{self, Indent};
 use jsonquery_query::{patch, schema};
@@ -42,6 +42,22 @@ pub enum Input {
 }
 
 impl Input {
+    /// The document, if this is one that is kept as its file (see
+    /// `jsonquery_core::LAZY_THRESHOLD`): the open one, or a file that is that big.
+    fn kept_on_disk(&self) -> anyhow::Result<Option<Arc<Document>>> {
+        match self {
+            Input::Text(_) => Ok(None),
+            Input::Document(doc) => Ok(doc.is_lazy().then(|| doc.clone())),
+            Input::File(path) => {
+                if self.size()? < jsonquery_core::LAZY_THRESHOLD {
+                    return Ok(None);
+                }
+                let doc = jsonquery_core::load(path).with_context(|| path.display().to_string())?;
+                Ok(doc.is_lazy().then(|| Arc::new(doc)))
+            }
+        }
+    }
+
     fn size(&self) -> anyhow::Result<u64> {
         Ok(match self {
             Input::Text(text) => text.len() as u64,
@@ -55,35 +71,54 @@ impl Input {
     fn load(&self) -> anyhow::Result<Loaded> {
         match self {
             Input::Text(text) => {
-                let Document {
-                    root, parse_time, ..
-                } = jsonquery_core::load_text(text)?;
+                let doc = jsonquery_core::load_text(text)?;
+                let (root, read) = in_memory(doc)?;
                 Ok(Loaded {
                     held: Held::Owned(root),
                     bytes: text.len() as u64,
-                    read: parse_time,
+                    read,
                 })
             }
             Input::File(path) => {
-                let Document {
-                    root,
-                    parse_time,
-                    byte_len,
-                    ..
-                } = jsonquery_core::load(path).with_context(|| path.display().to_string())?;
+                let doc = jsonquery_core::load(path).with_context(|| path.display().to_string())?;
+                let bytes = doc.byte_len;
+                let (root, read) = in_memory(doc).with_context(|| path.display().to_string())?;
                 Ok(Loaded {
                     held: Held::Owned(root),
-                    bytes: byte_len,
-                    read: parse_time,
+                    bytes,
+                    read,
                 })
             }
-            Input::Document(doc) => Ok(Loaded {
-                held: Held::Shared(doc.clone()),
-                bytes: doc.byte_len,
-                read: Duration::ZERO,
-            }),
+            Input::Document(doc) => {
+                if doc.is_lazy() {
+                    return Err(too_big_to_work_on(doc.byte_len));
+                }
+                Ok(Loaded {
+                    held: Held::Shared(doc.clone()),
+                    bytes: doc.byte_len,
+                    read: Duration::ZERO,
+                })
+            }
         }
     }
+}
+
+/// The value of a document that was loaded for a job, which has to be the
+/// whole of it in memory: one too big for that (it is kept as its file, read as
+/// it is looked at) is not something these can work on.
+fn in_memory(doc: Document) -> anyhow::Result<(Value, Duration)> {
+    let byte_len = doc.byte_len;
+    match doc.content {
+        Content::Tree(root) => Ok((root, doc.parse_time)),
+        Content::Lazy(_) => Err(too_big_to_work_on(byte_len)),
+    }
+}
+
+fn too_big_to_work_on(bytes: u64) -> anyhow::Error {
+    anyhow::anyhow!(
+        "that is {}, too big for this: it works on the whole document in memory",
+        human_bytes(bytes)
+    )
 }
 
 /// A document in memory: parsed for this job, or shared with the main window
@@ -93,18 +128,22 @@ enum Held {
     Shared(Arc<Document>),
 }
 
+/// What a shared document is held as if it should turn out to have no tree,
+/// which `Input::load` does not let it.
+static NOTHING: Value = Value::Null;
+
 impl Held {
     fn value(&self) -> &Value {
         match self {
             Held::Owned(value) => value,
-            Held::Shared(doc) => &doc.root,
+            Held::Shared(doc) => doc.tree().unwrap_or(&NOTHING),
         }
     }
 
     fn into_owned(self) -> Value {
         match self {
             Held::Owned(value) => value,
-            Held::Shared(doc) => doc.root.clone(),
+            Held::Shared(doc) => doc.tree().cloned().unwrap_or(Value::Null),
         }
     }
 }
@@ -190,12 +229,22 @@ impl Preview {
 }
 
 pub struct Formatted {
-    /// All of the formatted text, for Copy and Save.
+    /// All of the formatted text, for Copy and Save. (Empty for a document that
+    /// is kept on disk, which is written out from there: see `streamed`.)
     pub text: Arc<str>,
     pub preview: Preview,
     /// The size of what went in.
     pub bytes_in: u64,
     pub elapsed: Duration,
+    /// For a document too big to be text in memory: what Save writes it from.
+    pub streamed: Option<Streamed>,
+}
+
+/// A document that is formatted as it is saved, a piece at a time from its file.
+#[derive(Clone)]
+pub struct Streamed {
+    pub doc: Arc<Document>,
+    pub options: reformat::Options,
 }
 
 pub struct Compared {
@@ -259,6 +308,11 @@ fn run_job(job: Job, cancel: &AtomicBool) -> anyhow::Result<Outcome> {
     let start = Instant::now();
     match job {
         Job::Format { input, options } => {
+            // A document too big to be text in memory is written from its file when it
+            // is saved; what is made now is the beginning of it.
+            if let Some(doc) = input.kept_on_disk().context("Input")? {
+                return format_from_disk(doc, options, start, cancel);
+            }
             check_size(&[&input])?;
             let loaded = input.load().context("Input")?;
             stop_if_cancelled(cancel)?;
@@ -268,6 +322,7 @@ fn run_job(job: Job, cancel: &AtomicBool) -> anyhow::Result<Outcome> {
                 text: text.into(),
                 bytes_in: loaded.bytes,
                 elapsed: start.elapsed(),
+                streamed: None,
             }))
         }
         Job::Diff { left, right, take } => {
@@ -407,6 +462,60 @@ fn stop_if_cancelled(cancel: &AtomicBool) -> anyhow::Result<()> {
 }
 
 /// Refuse a job whose documents are too big to hold in memory together.
+/// How a document kept on disk is laid out when it is written: the options of
+/// Format that can be, a piece at a time.
+pub fn style_of(options: &reformat::Options) -> jsonquery_core::lazy::Style {
+    use jsonquery_core::lazy::{Indent as Written, Style};
+    Style {
+        indent: match options.indent {
+            Indent::Spaces(n) => Written::Spaces(n),
+            Indent::Tab => Written::Tab,
+            Indent::Minified => Written::Minified,
+        },
+        ascii_only: options.ascii_only,
+    }
+}
+
+/// Format for a document that is kept as its file: a preview of the beginning,
+/// and what Save writes it from.
+fn format_from_disk(
+    doc: Arc<Document>,
+    options: reformat::Options,
+    start: Instant,
+    cancel: &AtomicBool,
+) -> anyhow::Result<Outcome> {
+    if options.sort_keys {
+        bail!(
+            "that is {}, too big to have its keys sorted: that needs the whole document in \
+             memory. It can be indented or minified, as it is written",
+            human_bytes(doc.byte_len)
+        );
+    }
+    stop_if_cancelled(cancel)?;
+    let Content::Lazy(tree) = &doc.content else {
+        bail!("that document is in memory");
+    };
+    let mut head = Vec::new();
+    let written = tree.root().write_styled(
+        &mut head,
+        style_of(&options),
+        jsonquery_core::lazy::PrettyLimits {
+            bytes: PREVIEW_BYTES * 2,
+            ..Default::default()
+        },
+    )?;
+    let text = String::from_utf8_lossy(&head).into_owned();
+    let mut preview = Preview::of(&text);
+    preview.truncated |= !written.complete;
+    Ok(Outcome::Format(Formatted {
+        text: Arc::from(""),
+        preview,
+        bytes_in: doc.byte_len,
+        elapsed: start.elapsed(),
+        streamed: Some(Streamed { doc, options }),
+    }))
+}
+
 fn check_size(inputs: &[&Input]) -> anyhow::Result<()> {
     let mut total = 0u64;
     for input in inputs {
@@ -487,6 +596,69 @@ mod tests {
             Ok(_) => panic!("not a format outcome"),
             Err(e) => panic!("{e}"),
         }
+    }
+
+    /// A document that is indexed rather than parsed, as one of 256 MiB or more is.
+    fn lazy_document(name: &str) -> Arc<Document> {
+        let path = temp_dir(name).join("big.json");
+        std::fs::write(&path, "[1, 2, 3]").unwrap();
+        let file = std::fs::File::open(&path).unwrap();
+        let doc = jsonquery_core::load_open_file(&file, DocumentSource::File(path), 1).unwrap();
+        assert!(doc.is_lazy());
+        Arc::new(doc)
+    }
+
+    #[test]
+    fn a_document_kept_on_disk_is_too_big_for_a_tool_and_says_so() {
+        // Every tool works on the whole document in memory.
+        let err = Input::Document(lazy_document("lazy-input"))
+            .load()
+            .err()
+            .expect("refused");
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("too big for this") && message.contains("in memory"),
+            "{message}"
+        );
+
+        // (Format is the one that is not refused: see below.)
+        let err = go(Job::Diff {
+            left: Input::Document(lazy_document("lazy-diff")),
+            right: text("[1]"),
+            take: None,
+        })
+        .err()
+        .expect("refused");
+        assert!(err.contains("too big for this"), "{err}");
+    }
+
+    #[test]
+    fn a_document_kept_on_disk_is_formatted_from_there_as_it_is_saved() {
+        let f = formatted(Job::Format {
+            input: Input::Document(lazy_document("lazy-format")),
+            options: reformat::Options {
+                indent: Indent::Spaces(4),
+                sort_keys: false,
+                ascii_only: false,
+            },
+        });
+        assert_eq!(&*f.preview.text, "[\n    1,\n    2,\n    3\n]");
+        assert!(!f.preview.truncated);
+        let streamed = f.streamed.expect("written from the file");
+        assert!(streamed.doc.is_lazy());
+        assert_eq!(f.bytes_in, 9);
+
+        // The keys of what is not in memory cannot be put in order.
+        let err = go(Job::Format {
+            input: Input::Document(lazy_document("lazy-sorted")),
+            options: reformat::Options {
+                sort_keys: true,
+                ..reformat::Options::default()
+            },
+        })
+        .err()
+        .expect("refused");
+        assert!(err.contains("keys sorted"), "{err}");
     }
 
     fn temp_dir(name: &str) -> PathBuf {
@@ -768,7 +940,7 @@ mod tests {
         }) else {
             panic!("should patch")
         };
-        assert_eq!(p.doc.root, json!({"a": 1, "b": [2]}));
+        assert_eq!(p.doc.tree(), Some(&json!({"a": 1, "b": [2]})));
         assert_eq!(p.operations, Some(1));
         assert_eq!(p.doc.source.label(), "(patched)");
         assert_eq!(&*p.text, "{\n  \"a\": 1,\n  \"b\": [\n    2\n  ]\n}");
@@ -783,7 +955,7 @@ mod tests {
         }) else {
             panic!("should patch")
         };
-        assert_eq!(p.doc.root, json!({"b": 2, "c": 3}));
+        assert_eq!(p.doc.tree(), Some(&json!({"b": 2, "c": 3})));
         assert_eq!(p.operations, None);
     }
 

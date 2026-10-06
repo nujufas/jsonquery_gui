@@ -188,8 +188,22 @@ point inside the schema.
   a popped-out pane can't open over the spot it left or reopen where you
   moved it. (Windows, macOS and X11 can; only X11 has been tried — the
   XWayland entry above gets you there on a Wayland desktop.)
-- Multi-gigabyte files are not yet backed by a memory-mapped, lazily-resolved
-  index, so very large documents load fully into memory. See
+- **A file of 256 MiB or more is not parsed but kept on disk and read as you look
+  at it** (memory-mapped, and indexed once when it opens), so that a gigabyte of
+  JSON takes megabytes, not the twelve to seventeen times its size that a parsed
+  tree does. Long lists are shown in runs of a thousand; jq queries read the file
+  as they go, so `.[] | select(…) | .name`, `map(…)`, `length`, `.[1234567]`,
+  `first(…)`, `..`, `sort_by(…)`, `group_by(…)` and `min_by(…)` work on any size
+  (a sort takes some memory for the keys, about the size of the file at the most),
+  but a program that needs the whole of a list as a value (`add` on the document,
+  `to_entries`, `flatten`) says so instead of running. JSONPath and JMESPath
+  work the same way (`$[?(@.qty > 48)].id`, ``[?qty > `48`].id``), apart from
+  functions that need a whole big list (`sort_by`, `max`). Format in the Tools
+  window writes such a file indented or minified without holding it; the rest of
+  the Tools window, and Copy of more than 64 MiB, don't work on one, and the file
+  should stay as it is while it is open (if another program
+  cuts it short, the app says so and refuses to answer from what is gone, rather
+  than closing). See
   [Scaling beyond in-memory](docs/architecture.md#scaling-beyond-in-memory).
 
 ## Getting started
@@ -348,7 +362,7 @@ cargo clippy --workspace --all-targets
 The workspace is split into three crates so the non-GUI logic can be tested
 without pulling in a GUI toolkit:
 
-- **`crates/core`** — file ingest (mmap + parse) and the virtualized-tree data layer.
+- **`crates/core`** — file ingest (parse, or mmap + index for a file of 256 MiB or more) and the virtualized-tree data layer.
 - **`crates/query`** — the four query engines, dispatched through a shared
   `QueryEngine` trait, plus the merge, format, diff, patch and schema logic
   behind the Tools window.
@@ -363,7 +377,7 @@ application on a virtual X display of its own (Xvfb with the fluxbox window
 manager, so it never touches your desktop), clicks and types into it the way a
 person would, and reads the screen back with Tesseract OCR, pixel checks and
 the clipboard — egui draws everything itself and has no accessibility tree to
-query. As of October 2026 it has 578 test cases in 22 suites, one directory
+query. As of October 2026 it has 588 test cases in 22 suites, one directory
 per area of the app (launch and window, opening sources, the toolbar and
 status bar, query engines, query highlighting, the query box, autocomplete,
 tree and text views, context menus, search, saving, keyboard shortcuts,

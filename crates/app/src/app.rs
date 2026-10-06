@@ -6,7 +6,8 @@ use std::time::Duration;
 use crossbeam_channel::{Receiver, Sender};
 use eframe::egui;
 use jsonquery_core::{
-    path_string, resolve, Document, DocumentSource, NodePath, PathSegment, SourceMatches,
+    path_string, resolve, Document, DocumentSource, NodePath, PathSegment, Root, SourceMatches,
+    ValueKind, ValueView,
 };
 use jsonquery_query::OutputFormat;
 use serde_json::Value;
@@ -509,6 +510,9 @@ impl App {
             }
             source => source.label(),
         };
+        // A document that is read from its file as it is looked at can have
+        // lists of millions, which the tree shows in runs.
+        self.source_tree.group_long_lists(doc.is_lazy());
         self.doc = Some(doc);
         self.source_tree.reset();
         self.invalidate_source_text();
@@ -904,7 +908,7 @@ impl App {
         self.search_gen += 1;
         self.searching = false;
         self.search_error = None;
-        let root = self.doc.as_ref().map(|d| &d.root);
+        let root = self.doc.as_ref().map(|d| d.root());
         let matches = build_search_matches(PanelKind::Source, root, paths);
         // Only an exact match was revealed (see `Event::Found`), and it was
         // the first entry.
@@ -927,8 +931,8 @@ impl App {
             return;
         };
         let root = match cursor.query.target {
-            PanelKind::Source => self.doc.as_ref().map(|d| &d.root),
-            PanelKind::Results => Some(&self.results),
+            PanelKind::Source => self.doc.as_ref().map(|d| d.root()),
+            PanelKind::Results => Some(Root::Tree(&self.results)),
         };
         let matches = build_search_matches(cursor.query.target, root, cursor.hits.clone());
         self.hit_list = Some(HitList {
@@ -1413,6 +1417,9 @@ impl App {
             }
             tools::Request::SaveText { text, path } => {
                 let _ = self.cmd_tx.send(Command::SaveText { text, path });
+            }
+            tools::Request::SaveFormatted { streamed, path } => {
+                let _ = self.cmd_tx.send(Command::SaveFormatted { streamed, path });
             }
             tools::Request::Show(pointer) => self.show_pointer(ctx, pointer),
         }
@@ -2145,7 +2152,7 @@ impl App {
                 cursor_char,
                 output.response.changed(),
                 self.query_engine,
-                self.doc.as_ref().map(|d| &d.root),
+                self.doc.as_ref().map(|d| d.suggestion_root()),
             );
         } else {
             lost_focus_this_frame = true;
@@ -2308,8 +2315,31 @@ impl App {
     fn status_bar_text(&mut self, ui: &mut egui::Ui) {
         ui.horizontal_wrapped(|ui| {
             if let Some(doc) = &self.doc {
-                ui.label(format!("Parsed in {:.1?}", doc.parse_time));
+                ui.label(format!(
+                    "{} in {:.1?}",
+                    if doc.is_lazy() { "Indexed" } else { "Parsed" },
+                    doc.parse_time
+                ))
+                .on_hover_text(if doc.is_lazy() {
+                    "This file is too big to hold in memory as a tree, so it stays on disk and is \
+                     read as you look at it: the time is how long it took to check it and note \
+                     where things are."
+                } else {
+                    "How long it took to read the file and parse it."
+                });
                 ui.separator();
+                if doc.lazy().is_some_and(|tree| tree.damaged()) {
+                    ui.colored_label(
+                        egui::Color32::from_rgb(220, 80, 80),
+                        "⚠ The file was changed on disk while it was open: open it again",
+                    )
+                    .on_hover_text(
+                        "Another program cut the file short. What is shown past that point \
+                         is not in the file, and what is saved or copied from it would be \
+                         wrong, so those are refused.",
+                    );
+                    ui.separator();
+                }
             }
             if let Some(err) = &self.load_error {
                 ui.colored_label(
@@ -2531,7 +2561,11 @@ impl App {
     fn source_text_view(&mut self, ui: &mut egui::Ui, doc: &Arc<Document>) {
         if matches!(&doc.source, DocumentSource::Pasted) {
             if self.source_text_dirty {
-                self.source_text_cache = serde_json::to_string_pretty(&doc.root)
+                // A pasted document is always a parsed one.
+                self.source_text_cache = doc
+                    .tree()
+                    .map(serde_json::to_string_pretty)
+                    .unwrap_or_else(|| Ok(String::new()))
                     .unwrap_or_else(|e| format!("<failed to render source as text: {e}>"));
                 self.source_text_dirty = false;
             }
@@ -2813,8 +2847,9 @@ fn info_window_contents(ui: &mut egui::Ui) {
     ui.label("Known limitations:");
     ui.label(
         "Drag-and-drop doesn't work on native Wayland (use the Source field, or run \
-         under XWayland); very large files load fully into memory rather than being \
-         memory-mapped.",
+         under XWayland); a file of 256 MiB or more is read from disk as you look at it, \
+         and a query that needs all of a long list as a value, and the Tools window \
+         (but for Format), don't work on it.",
     );
     ui.hyperlink_to(
         "More in the README",
@@ -3181,7 +3216,7 @@ impl App {
                 match self.source_view {
                     ViewMode::Tree => {
                         if let Some(action) =
-                            self.source_tree.ui(ui, "source_tree", &doc.root, false)
+                            self.source_tree.ui(ui, "source_tree", doc.root(), false)
                         {
                             match action {
                                 RowAction::Save(node_path) => self.save_source_node(node_path),
@@ -3321,7 +3356,7 @@ fn default_filename_for_node(node_path: &NodePath, fallback: &str, extension: &s
 /// accepted once its `gen` matches.
 fn build_search_matches(
     target: PanelKind,
-    root: Option<&Value>,
+    root: Option<Root<'_>>,
     paths: Vec<NodePath>,
 ) -> Vec<SearchMatch> {
     paths
@@ -3329,7 +3364,7 @@ fn build_search_matches(
         .map(|path| {
             let preview = root
                 .and_then(|r| resolve(r, &path))
-                .map(preview_text)
+                .map(|node| preview_text(&node))
                 .unwrap_or_else(|| "<value>".to_string());
             SearchMatch {
                 target,
@@ -3343,14 +3378,11 @@ fn build_search_matches(
 /// Short one-line rendering of a value for the search-results list — mirrors
 /// the tree view's own row text (Architecture: `tree_view::draw_row_visual`)
 /// without needing a `Ui` to draw it.
-fn preview_text(value: &Value) -> String {
-    match value {
-        Value::Null => "null".to_string(),
-        Value::Bool(b) => b.to_string(),
-        Value::Number(n) => n.to_string(),
-        Value::String(s) => format!("{s:?}"),
-        Value::Array(a) => format!("[…] ({} items)", a.len()),
-        Value::Object(o) => format!("{{…}} ({} keys)", o.len()),
+fn preview_text<V: ValueView>(value: &V) -> String {
+    match value.kind() {
+        ValueKind::Array => format!("[…] ({} items)", value.child_count()),
+        ValueKind::Object => format!("{{…}} ({} keys)", value.child_count()),
+        _ => value.scalar_preview().unwrap_or_default(),
     }
 }
 

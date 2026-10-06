@@ -27,6 +27,7 @@ pub mod jq;
 mod jq_ext;
 pub mod json_pointer;
 pub mod jsonpath;
+pub mod lazy;
 pub mod merge;
 pub mod output;
 pub mod patch;
@@ -196,52 +197,92 @@ pub fn run_query_with_vars(
     cancelled: &AtomicBool,
     mut on_event: impl FnMut(QueryEvent),
 ) -> Result<usize, QueryError> {
-    let program = File {
-        code: query_src,
-        path: (),
-    };
-
-    let defs = jaq_core::defs()
-        .chain(jaq_std::defs())
-        .chain(jaq_json::defs())
-        .chain(jq_ext::defs());
-    let funs = jaq_core::funs()
-        .chain(jaq_std::funs())
-        .chain(jaq_json::funs())
-        .chain(jq_ext::funs());
-
-    let loader = Loader::new(defs);
-    let arena = Arena::default();
-
-    let modules = loader
-        .load(&arena, program)
-        .map_err(|e| QueryError::Parse(format!("{e:?}")))?;
-
-    let filter = Compiler::default()
-        .with_funs(funs)
-        .with_global_vars(vars.iter().map(|(name, _)| *name))
-        .compile(modules)
-        .map_err(|e| QueryError::Compile(format!("{e:?}")))?;
-
-    let val_input = to_val(input);
-    let ctx = Ctx::<data::JustLut<Val>>::new(
-        &filter.lut,
-        Vars::new(vars.iter().map(|(_, value)| to_val(value))),
-    );
-    let out = filter.id.run((ctx, val_input)).map(unwrap_valr);
+    let names: Vec<&str> = vars.iter().map(|(name, _)| *name).collect();
+    let program = Program::compile(query_src, &names)?;
+    let values = vars.iter().map(|(_, value)| to_val(value)).collect();
 
     let mut count = 0usize;
-    for item in out {
+    for item in program.run(to_val(input), values) {
         if cancelled.load(Ordering::Relaxed) {
             break;
         }
         count += 1;
         match item {
-            Ok(v) => on_event(QueryEvent::Item(from_val(&v))),
-            Err(e) => on_event(QueryEvent::ItemError(error_text(e))),
+            Ok(v) => on_event(QueryEvent::Item(v)),
+            Err(e) => on_event(QueryEvent::ItemError(e)),
         }
     }
     Ok(count)
+}
+
+/// A jq program, compiled, which can be run on any number of inputs: what the
+/// query box makes of its text once, and what a query over a very large file
+/// runs for each of the values it reads from it.
+pub(crate) struct Program {
+    filter: jaq_core::Filter<data::JustLut<Val>>,
+}
+
+impl Program {
+    /// Compile `query_src`, which may read the global variables `globals` (each
+    /// a name that starts with `$`).
+    pub(crate) fn compile(query_src: &str, globals: &[&str]) -> Result<Self, QueryError> {
+        let program = File {
+            code: query_src,
+            path: (),
+        };
+
+        let defs = jaq_core::defs()
+            .chain(jaq_std::defs())
+            .chain(jaq_json::defs())
+            .chain(jq_ext::defs());
+        let funs = jaq_core::funs()
+            .chain(jaq_std::funs())
+            .chain(jaq_json::funs())
+            .chain(jq_ext::funs());
+
+        let loader = Loader::new(defs);
+        let arena = Arena::default();
+
+        let modules = loader
+            .load(&arena, program)
+            .map_err(|e| QueryError::Parse(format!("{e:?}")))?;
+
+        let filter = Compiler::default()
+            .with_funs(funs)
+            .with_global_vars(globals.iter().copied())
+            .compile(modules)
+            .map_err(|e| QueryError::Compile(format!("{e:?}")))?;
+        Ok(Self { filter })
+    }
+
+    /// What it makes of `input`, one output (or the error that ends it) at a time,
+    /// as they are pulled — so a query that takes the first few stops there.
+    /// `globals` are the values of the variables it was compiled with.
+    pub(crate) fn run<'a>(
+        &'a self,
+        input: Val,
+        globals: Vec<Val>,
+    ) -> impl Iterator<Item = Result<Value, String>> + 'a {
+        self.run_vals(input, globals).map(|item| match item {
+            Ok(v) => Ok(from_val(&v)),
+            Err(e) => Err(e),
+        })
+    }
+
+    /// [`run`](Self::run), with the outputs as jaq makes them: what is to be
+    /// compared with another is not made a text and read again first.
+    pub(crate) fn run_vals<'a>(
+        &'a self,
+        input: Val,
+        globals: Vec<Val>,
+    ) -> impl Iterator<Item = Result<Val, String>> + 'a {
+        let ctx = Ctx::<data::JustLut<Val>>::new(&self.filter.lut, Vars::new(globals));
+        self.filter
+            .id
+            .run((ctx, input))
+            .map(unwrap_valr)
+            .map(|item| item.map_err(error_text))
+    }
 }
 
 /// An error as the text a reader should see. jaq prints an error that carries

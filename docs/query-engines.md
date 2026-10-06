@@ -36,6 +36,31 @@ dialect produced it.
 > `Serialize`. Worth checking for again if a future engine also bridges
 > through a generic `Serialize` impl rather than matching `Value` natively.
 
+## Very large files
+
+A file of 256 MiB or more is not a value in memory but a lazy, memory-mapped
+document (see [Scaling beyond in-memory](architecture.md#scaling-beyond-in-memory)),
+and the dialects do not all work on one:
+
+- **jq** reads the file as it goes: a path, a slice, `length`, `keys`, `type`,
+  `first`, `last`, `map(…)`, `[…]`, `select(…)`, `first(…)`, `limit(n; …)`, `..`,
+  `{a: length}` and `.[-1] - .[0]` (expressions of such parts) and `,` are walked
+  against the file, and what they hand on, one element at a time, goes to jaq with
+  the rest of the program; the elements of a long list are shared out to threads.
+  `sort_by`, `group_by`, `unique_by`, `min_by`, `max_by`, `sort`, `unique`, `min`,
+  `max` and `reverse` are made from the key of each element and its place in the
+  file, and give a list that is still in the file: `sort_by(.n) | .[0:10]` reads ten
+  elements. A program that needs the whole of a list in memory as a value (`add` on
+  the document, `to_entries`, `flatten`) is an error that says so.
+- **JSON Pointer** walks to its place.
+- **JSONPath** and **JMESPath** are read by their own engines as for any document,
+  and walked against the file for as long as a node is too big to be a value:
+  names, indexes, wildcards, slices, descendants (`$..name`), filters (each child
+  is tested by itself) and projections. What is small enough goes to the engine
+  with the rest of the query. A function that needs a whole big list for its
+  argument (`sort_by`, `max`, `sum`) and a JSONPath filter that reads the root
+  (`$.a[?(@.n == $.m)]`) are errors that say so.
+
 ## Comparison matrix
 
 Checked against crates.io/GitHub on 2026-09-05 — versions and maintenance

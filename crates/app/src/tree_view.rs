@@ -10,10 +10,9 @@
 
 use eframe::egui;
 use jsonquery_core::{
-    flatten_visible, new_expanded_at_root, path_string, ExpandState, NodePath, PathSegment,
-    RowInfo, ValueKind,
+    flatten_grouped, flatten_visible, groups_containing, new_expanded_at_root, path_string,
+    ExpandState, GroupSpan, GroupState, NodePath, PathSegment, RowInfo, ValueKind, ValueView,
 };
-use serde_json::Value;
 
 /// What a row's right-click menu asked the owning `App` to do — resolving
 /// the path against the right root, and actually performing the action, both
@@ -32,13 +31,29 @@ pub enum RowAction {
     OpenSearch,
 }
 
+/// What a click on a row's arrow opens or closes: a node, or a run of the
+/// children of one.
+enum Toggle {
+    Node(NodePath),
+    Group(NodePath, GroupSpan),
+}
+
 pub struct TreeView {
     expand: ExpandState,
+    /// Which runs of children are open (see `group_long_lists`).
+    groups: GroupState,
+    /// Whether a container with more than `GROUP_LIMIT` children shows them in
+    /// runs of a thousand or more, as the tree of a very large document must:
+    /// a row for each of a few million children could not even be made.
+    group_long_lists: bool,
     rows: Vec<RowInfo>,
     dirty: bool,
     /// Set by `reveal()`; consumed the next time `ui()` runs, scrolling that
     /// row into view.
     pending_scroll: Option<NodePath>,
+    /// Set by `reveal()` when the lists are in runs: the node whose runs have
+    /// to be opened, which takes the document to find out — `ui()` has it.
+    pending_reveal: Option<NodePath>,
     /// The row `reveal()` last pointed at, drawn with a highlighted
     /// background so it's easy to spot after scrolling to it.
     highlight: Option<NodePath>,
@@ -48,9 +63,12 @@ impl Default for TreeView {
     fn default() -> Self {
         Self {
             expand: new_expanded_at_root(),
+            groups: GroupState::new(),
+            group_long_lists: false,
             rows: Vec::new(),
             dirty: true,
             pending_scroll: None,
+            pending_reveal: None,
             highlight: None,
         }
     }
@@ -62,9 +80,22 @@ impl TreeView {
     /// state back to "just the root open".
     pub fn reset(&mut self) {
         self.expand = new_expanded_at_root();
+        self.groups.clear();
         self.dirty = true;
         self.pending_scroll = None;
+        self.pending_reveal = None;
         self.highlight = None;
+    }
+
+    /// Show the children of a container that has a great many in runs (see
+    /// `group_long_lists`), or all of them. For a document that is read from
+    /// its file as it is looked at, which has lists no one could scroll.
+    pub fn group_long_lists(&mut self, on: bool) {
+        if self.group_long_lists != on {
+            self.group_long_lists = on;
+            self.groups.clear();
+            self.dirty = true;
+        }
     }
 
     /// Call when the backing value changed in place (more result items
@@ -83,12 +114,23 @@ impl TreeView {
         }
         self.dirty = true;
         self.pending_scroll = Some(path.clone());
+        if self.group_long_lists {
+            self.pending_reveal = Some(path.clone());
+        }
         self.highlight = Some(path);
     }
 
-    fn refresh(&mut self, root: &Value) {
+    fn refresh<V: ValueView + Copy>(&mut self, root: V) {
+        if let Some(path) = self.pending_reveal.take() {
+            self.groups.extend(groups_containing(root, &path));
+            self.dirty = true;
+        }
         if self.dirty {
-            self.rows = flatten_visible(root, &self.expand);
+            self.rows = if self.group_long_lists {
+                flatten_grouped(root, &self.expand, &self.groups)
+            } else {
+                flatten_visible(root, &self.expand)
+            };
             self.dirty = false;
         }
     }
@@ -98,11 +140,11 @@ impl TreeView {
     /// tree). `find_in_source` adds a "Find in Source" item to every row's
     /// context menu — pass `true` for the results tree, `false` for the
     /// source tree itself. Returns the row action (if any) chosen this frame.
-    pub fn ui(
+    pub fn ui<V: ValueView + Copy>(
         &mut self,
         ui: &mut egui::Ui,
         salt: &str,
-        root: &Value,
+        root: V,
         find_in_source: bool,
     ) -> Option<RowAction> {
         self.refresh(root);
@@ -119,7 +161,11 @@ impl TreeView {
             .id_salt(salt)
             .auto_shrink([false, false]);
         if let Some(target) = self.pending_scroll.take() {
-            if let Some(idx) = self.rows.iter().position(|r| r.path == target) {
+            if let Some(idx) = self
+                .rows
+                .iter()
+                .position(|r| r.group.is_none() && r.path == target)
+            {
                 let row_stride = row_height + ui.spacing().item_spacing.y;
                 let target_y = idx as f32 * row_stride;
                 let viewport_h = ui.available_height();
@@ -140,7 +186,7 @@ impl TreeView {
                     ui.cursor().min,
                     egui::vec2(ui.available_width(), row_height),
                 );
-                let highlighted = self.highlight.as_ref() == Some(&row.path);
+                let highlighted = row.group.is_none() && self.highlight.as_ref() == Some(&row.path);
                 draw_row_visual(ui, row, row_rect, highlighted);
                 visible.push((i, row_rect));
             }
@@ -157,7 +203,7 @@ impl TreeView {
         // widget "on top" suppresses a click-only widget underneath it).
         // Registering our own click sense here, afterward, puts our rows on
         // top instead, so they win.
-        let mut toggled: Option<NodePath> = None;
+        let mut toggled: Option<Toggle> = None;
         let mut action: Option<RowAction> = None;
         for (i, row_rect) in visible {
             let Some(row) = self.rows.get(i) else {
@@ -168,11 +214,20 @@ impl TreeView {
             }
         }
 
-        if let Some(path) = toggled {
-            if !self.expand.remove(&path) {
-                self.expand.insert(path);
+        match toggled {
+            Some(Toggle::Node(path)) => {
+                if !self.expand.remove(&path) {
+                    self.expand.insert(path);
+                }
+                self.dirty = true;
             }
-            self.dirty = true;
+            Some(Toggle::Group(path, span)) => {
+                if !self.groups.remove(&(path.clone(), span)) {
+                    self.groups.insert((path, span));
+                }
+                self.dirty = true;
+            }
+            None => {}
         }
 
         action
@@ -205,6 +260,26 @@ fn draw_row_visual(ui: &mut egui::Ui, row: &RowInfo, row_rect: egui::Rect, highl
             ui.label(egui::RichText::new(arrow).monospace());
         } else {
             ui.add_space(ARROW_COLUMN_WIDTH);
+        }
+
+        if let Some(span) = row.group {
+            // A run of the children of a very long list: where it starts and ends.
+            let what = if row.kind == ValueKind::Object {
+                "keys"
+            } else {
+                "items"
+            };
+            ui.label(
+                egui::RichText::new(format!(
+                    "[{} \u{2026} {}]  ({} {what})",
+                    span.start,
+                    span.end - 1,
+                    row.child_count
+                ))
+                .monospace()
+                .color(ui.visuals().weak_text_color()),
+            );
+            return;
         }
 
         if let Some(key) = &row.key {
@@ -256,46 +331,57 @@ fn sense_row(
     row: &RowInfo,
     row_rect: egui::Rect,
     find_in_source: bool,
-    toggled: &mut Option<NodePath>,
+    toggled: &mut Option<Toggle>,
 ) -> Option<RowAction> {
     let arrow_left = row_rect.left() + row.depth as f32 * 16.0;
     let arrow_right = arrow_left + ARROW_COLUMN_WIDTH;
 
-    let row_id = ui.id().with("row").with(&row.path);
+    let toggle = || match row.group {
+        Some(span) => Toggle::Group(row.path.clone(), span),
+        None => Toggle::Node(row.path.clone()),
+    };
+    let row_id = ui
+        .id()
+        .with("row")
+        .with(&row.path)
+        .with(row.group.map(|span| (span.start, span.end)));
     let row_resp = ui.interact(row_rect, row_id, egui::Sense::click());
 
     let mut action = None;
 
     if row.kind.is_container() && row_resp.double_clicked() {
-        *toggled = Some(row.path.clone());
+        *toggled = Some(toggle());
     } else if row_resp.clicked() {
         let on_arrow = row.kind.is_container()
             && row_resp
                 .interact_pointer_pos()
                 .is_some_and(|p| (arrow_left..arrow_right).contains(&p.x));
         if on_arrow {
-            *toggled = Some(row.path.clone());
+            *toggled = Some(toggle());
         }
     }
 
     row_resp.context_menu(|ui| {
-        if ui.button("Save…").clicked() {
-            action = Some(RowAction::Save(row.path.clone()));
-            ui.close();
+        // A run of children is not a value that could be saved or copied.
+        if row.group.is_none() {
+            if ui.button("Save…").clicked() {
+                action = Some(RowAction::Save(row.path.clone()));
+                ui.close();
+            }
+            if ui.button("Copy to Clipboard").clicked() {
+                action = Some(RowAction::Copy(row.path.clone()));
+                ui.close();
+            }
+            if ui.button("Copy JSON Path").clicked() {
+                ui.ctx().copy_text(path_string(&row.path));
+                ui.close();
+            }
+            if find_in_source && ui.button("Find in Source").clicked() {
+                action = Some(RowAction::FindInSource(row.path.clone()));
+                ui.close();
+            }
+            ui.separator();
         }
-        if ui.button("Copy to Clipboard").clicked() {
-            action = Some(RowAction::Copy(row.path.clone()));
-            ui.close();
-        }
-        if ui.button("Copy JSON Path").clicked() {
-            ui.ctx().copy_text(path_string(&row.path));
-            ui.close();
-        }
-        if find_in_source && ui.button("Find in Source").clicked() {
-            action = Some(RowAction::FindInSource(row.path.clone()));
-            ui.close();
-        }
-        ui.separator();
         if ui.button("Search…").clicked() {
             action = Some(RowAction::OpenSearch);
             ui.close();

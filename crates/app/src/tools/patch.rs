@@ -253,7 +253,7 @@ impl Patch {
 
 /// What the result is, in a few words: "object · 3 keys · 2 operations".
 fn summary(patched: &Patched) -> String {
-    let mut summary = describe(&patched.doc.root);
+    let mut summary = describe(patched.doc.root());
     match patched.operations {
         Some(1) => summary.push_str(" · 1 operation"),
         Some(n) => summary.push_str(&format!(" · {n} operations")),

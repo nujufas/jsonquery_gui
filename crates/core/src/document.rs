@@ -1,17 +1,47 @@
+use std::fs::{File, Metadata};
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use memmap2::Mmap;
 use serde_json::Value;
+
+use crate::lazy::{LazyTree, Node};
+use crate::tree::{PathSegment, ValueKind};
+use crate::view::ValueView;
+
+/// A file of at least this many bytes is not parsed into a tree: it is kept
+/// where it is, memory-mapped, and read as it is looked at (see
+/// [`crate::lazy`]); any other is read and parsed.
+///
+/// The tree a parse makes takes about twelve times the file for records of a few
+/// short fields (17 times, measured, for 100 MB of them), so a file of a few
+/// hundred megabytes is already more than a machine has to spare, where the
+/// index of a lazy document takes a thousandth. Below it, a parsed document is
+/// the better one: everything about it is quick, and none of what a lazy one
+/// has to give up (see `docs/architecture.md`) is given up. A mapping has costs
+/// a read has not: it needs a regular file on a filesystem that can be mapped, a
+/// file truncated by another process while it is mapped makes the document
+/// [damaged](LazyTree::damaged) (the reads past the cut are caught, and not the
+/// end of the process), and on Windows it keeps the file from being replaced.
+pub const LAZY_THRESHOLD: u64 = 256 * 1024 * 1024;
+
+/// The most that is read from what is not a regular file (a pipe, say): it has
+/// no length to go by and may have no end. The same "few GB" ceiling as a URL
+/// download has.
+#[cfg(not(test))]
+const MAX_STREAM_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+#[cfg(test)]
+const MAX_STREAM_BYTES: u64 = 1024 * 1024;
 
 /// Where a [`Document`]'s bytes came from.
 pub enum DocumentSource {
     File(PathBuf),
     /// JSON typed or pasted directly into the app, rather than opened from disk.
     Pasted,
-    /// Downloaded from a URL into a temporary file, which backs the mmap the
-    /// same way an opened file would.
+    /// Downloaded from a URL: held in memory when it is small, in a temporary
+    /// file nobody can see when it is not.
     Url(String),
     /// Built by the Tools window's merge from these files, in this order. It
     /// lives in memory only, until it is saved.
@@ -40,19 +70,27 @@ impl DocumentSource {
     }
 }
 
-/// A loaded JSON document: the parsed value plus load/parse timing and
-/// provenance, used to populate the status bar.
+/// What a [`Document`] holds.
+pub enum Content {
+    /// The parsed value, all of it in memory.
+    Tree(Value),
+    /// The bytes, indexed: nothing of the value is in memory until it is asked
+    /// for. Boxed: the index is nearly four times the size of a value, and
+    /// where it is bigger still (as on macOS) clippy says so.
+    Lazy(Box<LazyTree>),
+}
+
+/// A loaded JSON document: its content plus load/parse timing and provenance,
+/// used to populate the status bar.
 pub struct Document {
     pub source: DocumentSource,
     pub byte_len: u64,
+    /// How long it took to bring the bytes in and parse (or index) them.
     pub parse_time: Duration,
-    pub root: Value,
+    pub content: Content,
     /// Number of top-level values found in the source (>1 means the file was
     /// NDJSON / concatenated JSON and got wrapped into a single array root).
     pub top_level_values: usize,
-    /// Kept alive so future phases can resolve lazily straight from the
-    /// mapped bytes instead of re-reading the file; unused for now beyond that.
-    _mmap: Option<Mmap>,
 }
 
 impl Document {
@@ -69,50 +107,272 @@ impl Document {
             source,
             byte_len,
             parse_time,
-            root,
+            content: Content::Tree(root),
             top_level_values: 1,
-            _mmap: None,
+        }
+    }
+
+    /// The root of the document, whichever it is made of.
+    pub fn root(&self) -> Root<'_> {
+        match &self.content {
+            Content::Tree(value) => Root::Tree(value),
+            Content::Lazy(tree) => Root::Lazy(tree.root()),
+        }
+    }
+
+    /// The parsed value, if the document is one (a lazy one has none: it would
+    /// be too big).
+    pub fn tree(&self) -> Option<&Value> {
+        match &self.content {
+            Content::Tree(value) => Some(value),
+            Content::Lazy(_) => None,
+        }
+    }
+
+    /// A value to complete a query against: the document, or, when it is too
+    /// big to be one, [`LazyTree::sample`] of it.
+    pub fn suggestion_root(&self) -> &Value {
+        match &self.content {
+            Content::Tree(value) => value,
+            Content::Lazy(tree) => tree.sample(),
+        }
+    }
+
+    pub fn lazy(&self) -> Option<&LazyTree> {
+        match &self.content {
+            Content::Tree(_) => None,
+            Content::Lazy(tree) => Some(tree),
+        }
+    }
+
+    /// Whether it is kept as the file it came from, indexed, rather than
+    /// parsed (see [`LAZY_THRESHOLD`]).
+    pub fn is_lazy(&self) -> bool {
+        matches!(self.content, Content::Lazy(_))
+    }
+
+    fn lazy_from(source: DocumentSource, tree: LazyTree, parse_time: Duration) -> Self {
+        Self {
+            source,
+            byte_len: tree.len() as u64,
+            parse_time,
+            top_level_values: tree.top_level_values(),
+            content: Content::Lazy(Box::new(tree)),
         }
     }
 }
 
-/// Load and fully parse a JSON file in one step (Phase 1: in-memory path).
-///
-/// The file is memory-mapped rather than read into a `Vec<u8>` so opening is
-/// instant regardless of file size; Phase 1 then parses the mapped bytes
-/// directly into an owned `serde_json::Value` tree.
-pub fn load(path: impl AsRef<Path>) -> Result<Document> {
-    let path = path.as_ref();
-    let file = std::fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
-    let byte_len = file
-        .metadata()
-        .with_context(|| format!("reading metadata for {}", path.display()))?
-        .len();
+/// The root of a [`Document`]: a parsed value or a node of an indexed file.
+/// Either is a [`ValueView`], so the tree widget, the search and the rest take
+/// this and need not know which.
+#[derive(Clone, Copy)]
+pub enum Root<'a> {
+    Tree(&'a Value),
+    Lazy(Node<'a>),
+}
 
-    // memmap2 requires a non-empty, non-zero-length mapping.
-    let mmap = if byte_len == 0 {
-        None
-    } else {
-        Some(
-            unsafe { Mmap::map(&file) }
-                .with_context(|| format!("memory-mapping {}", path.display()))?,
-        )
-    };
+impl<'a> ValueView for Root<'a> {
+    fn kind(&self) -> ValueKind {
+        match self {
+            Root::Tree(value) => ValueView::kind(value),
+            Root::Lazy(node) => ValueView::kind(node),
+        }
+    }
+
+    fn child_count(&self) -> usize {
+        match self {
+            Root::Tree(value) => ValueView::child_count(value),
+            Root::Lazy(node) => ValueView::child_count(node),
+        }
+    }
+
+    fn child_by_key(&self, key: &str) -> Option<Self> {
+        match self {
+            Root::Tree(value) => value.child_by_key(key).map(Root::Tree),
+            Root::Lazy(node) => ValueView::child_by_key(node, key).map(Root::Lazy),
+        }
+    }
+
+    fn child_at(&self, index: usize) -> Option<Self> {
+        match self {
+            Root::Tree(value) => value.child_at(index).map(Root::Tree),
+            Root::Lazy(node) => ValueView::child_at(node, index).map(Root::Lazy),
+        }
+    }
+
+    fn iter_children(&self) -> Box<dyn Iterator<Item = (Option<PathSegment>, Self)> + '_> {
+        match self {
+            Root::Tree(value) => Box::new(
+                value
+                    .iter_children()
+                    .map(|(segment, child)| (segment, Root::Tree(child))),
+            ),
+            Root::Lazy(node) => Box::new(
+                ValueView::iter_children(node).map(|(segment, child)| (segment, Root::Lazy(child))),
+            ),
+        }
+    }
+
+    fn scalar_value(&self) -> Option<Value> {
+        match self {
+            Root::Tree(value) => value.scalar_value(),
+            Root::Lazy(node) => ValueView::scalar_value(node),
+        }
+    }
+
+    fn scalar_preview(&self) -> Option<String> {
+        match self {
+            Root::Tree(value) => value.scalar_preview(),
+            Root::Lazy(node) => ValueView::scalar_preview(node),
+        }
+    }
+}
+
+/// Load a JSON file in one step: read and parsed into a tree, or, from
+/// [`LAZY_THRESHOLD`] bytes, memory-mapped and indexed (see [`crate::lazy`]).
+/// Either way the file is checked as JSON, all of it, before this returns.
+pub fn load(path: impl AsRef<Path>) -> Result<Document> {
+    load_via(path.as_ref(), LAZY_THRESHOLD, map_file)
+}
+
+/// [`load`] with the size from which a file is kept lazy and the way of mapping
+/// one as parameters, so that both ways in can be tried on a small file, and a
+/// mapping that fails can be made to.
+fn load_via(
+    path: &Path,
+    lazy_threshold: u64,
+    map: impl FnOnce(&File) -> io::Result<Mmap>,
+) -> Result<Document> {
+    let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
+    load_file(
+        &file,
+        DocumentSource::File(path.to_path_buf()),
+        &path.display().to_string(),
+        lazy_threshold,
+        map,
+    )
+}
+
+/// [`load`] for a file that is already open — a download's temporary file,
+/// which has no name — as the document from `source`, kept lazy if it is
+/// `lazy_threshold` bytes or more ([`LAZY_THRESHOLD`], where it is not a test).
+pub fn load_open_file(
+    file: &File,
+    source: DocumentSource,
+    lazy_threshold: u64,
+) -> Result<Document> {
+    let name = source.label();
+    load_file(file, source, &name, lazy_threshold, map_file)
+}
+
+fn load_file(
+    file: &File,
+    source: DocumentSource,
+    name: &str,
+    lazy_threshold: u64,
+    map: impl FnOnce(&File) -> io::Result<Mmap>,
+) -> Result<Document> {
+    let meta = file
+        .metadata()
+        .with_context(|| format!("reading metadata for {name}"))?;
+
+    // A device is no file of JSON, and reading one is no way to find that out:
+    // /dev/zero would be read until memory ran out, a terminal until somebody
+    // typed an end of file.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileTypeExt;
+        let kind = meta.file_type();
+        if kind.is_char_device() || kind.is_block_device() {
+            return Err(anyhow!("{name} is a device, not a file"));
+        }
+    }
 
     let start = Instant::now();
-    let (root, top_level_values) = match &mmap {
-        Some(m) => parse_bytes(&m[..])?,
-        None => (Value::Array(Vec::new()), 0),
+
+    // A regular file this big is not parsed: it stays where it is, mapped. (A
+    // pipe or a file of /proc says it is 0 bytes long however much it will
+    // hand over, and a mapping of 0 bytes maps nothing, so neither is mapped.)
+    if meta.is_file() && meta.len() > 0 && meta.len() >= lazy_threshold {
+        // Some files cannot be mapped (one of /sys, on some FUSE filesystems).
+        // It is read like any other, not refused.
+        if let Ok(mapping) = map(file) {
+            let tree = LazyTree::from_mmap(mapping).context("parsing JSON")?;
+            return Ok(Document::lazy_from(source, tree, start.elapsed()));
+        }
+    }
+
+    let bytes = read_bytes(file, &meta, name)?;
+    if bytes.len() as u64 >= lazy_threshold {
+        // Too big to parse into a tree, and not to be mapped: the bytes are
+        // kept, which takes one file's worth of memory and no more.
+        let tree = LazyTree::from_vec(bytes).context("parsing JSON")?;
+        return Ok(Document::lazy_from(source, tree, start.elapsed()));
+    }
+    let (root, top_level_values) = parse_bytes(&bytes)?;
+    Ok(Document {
+        source,
+        byte_len: bytes.len() as u64,
+        parse_time: start.elapsed(),
+        content: Content::Tree(root),
+        top_level_values,
+    })
+}
+
+/// Bring a file's bytes in, to the end.
+fn read_bytes(file: &File, meta: &Metadata, name: &str) -> Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    // One byte more than the file says it has, so that a file of just that
+    // length is read without its buffer growing to find the end of it. A file
+    // too big for memory is an error to report, not a reason to abort.
+    let reserve = usize::try_from(meta.len()).map_or(0, |len| len.saturating_add(1));
+    bytes
+        .try_reserve_exact(reserve)
+        .map_err(|_| anyhow!("not enough memory to read {name} ({} bytes)", meta.len()))?;
+    // A regular file ends where it says it does; anything else is read only up
+    // to the ceiling, and one byte past it shows that there was more.
+    let limit = if meta.is_file() {
+        u64::MAX
+    } else {
+        MAX_STREAM_BYTES
     };
+    file.take(limit.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("reading {name}"))?;
+    if bytes.len() as u64 > limit {
+        return Err(anyhow!(
+            "{name} hands over more than {limit} bytes, the most that is read from a pipe"
+        ));
+    }
+    Ok(bytes)
+}
+
+fn map_file(file: &File) -> io::Result<Mmap> {
+    // SAFETY: the mapping is only read. What can still go wrong is another
+    // process truncating the file while it is mapped, which for a lazy document
+    // is as long as it is open: the pages past its new end are gone, and reading
+    // one is a SIGBUS. `LazyTree::from_mmap` watches the mapping for that (see
+    // `lazy::guard`), so that the read is zeros and the document says it is
+    // damaged, rather than the process ending. That is the price of not holding
+    // the file in memory, and why only a file too big to parse is mapped
+    // (`LAZY_THRESHOLD`).
+    unsafe { Mmap::map(file) }
+}
+
+/// Parse bytes that are already in memory (a small download) into a
+/// [`Document`] from `source`. Uses the same one-or-more-top-level-values
+/// parsing as the file path, so NDJSON behaves the same way.
+pub fn load_bytes(bytes: &[u8], source: DocumentSource) -> Result<Document> {
+    let start = Instant::now();
+    let (root, top_level_values) = parse_bytes(bytes)?;
     let parse_time = start.elapsed();
 
     Ok(Document {
-        source: DocumentSource::File(path.to_path_buf()),
-        byte_len,
+        source,
+        byte_len: bytes.len() as u64,
         parse_time,
-        root,
+        content: Content::Tree(root),
         top_level_values,
-        _mmap: mmap,
     })
 }
 
@@ -120,18 +380,7 @@ pub fn load(path: impl AsRef<Path>) -> Result<Document> {
 /// file) into a [`Document`]. Uses the same one-or-more-top-level-values
 /// parsing as the file path, so pasted NDJSON behaves the same way.
 pub fn load_text(text: &str) -> Result<Document> {
-    let start = Instant::now();
-    let (root, top_level_values) = parse_bytes(text.as_bytes())?;
-    let parse_time = start.elapsed();
-
-    Ok(Document {
-        source: DocumentSource::Pasted,
-        byte_len: text.len() as u64,
-        parse_time,
-        root,
-        top_level_values,
-        _mmap: None,
-    })
+    load_bytes(text.as_bytes(), DocumentSource::Pasted)
 }
 
 /// Parse JSON from raw bytes, treating the input as one *or more* top-level
@@ -165,6 +414,14 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// The value a document stands for, whichever way it is kept.
+    fn value_of(doc: &Document) -> Value {
+        match &doc.content {
+            Content::Tree(value) => value.clone(),
+            Content::Lazy(tree) => tree.root().to_value(usize::MAX).unwrap(),
+        }
+    }
+
     #[test]
     fn a_built_document_says_where_it_came_from() {
         let files = vec![PathBuf::from("a.json"), PathBuf::from("b.json")];
@@ -177,7 +434,8 @@ mod tests {
         assert_eq!(doc.source.label(), "(merged from 2 files)");
         assert_eq!(doc.byte_len, 12);
         assert_eq!(doc.top_level_values, 1);
-        assert_eq!(doc.root, json!([1, 2]));
+        assert_eq!(doc.tree(), Some(&json!([1, 2])));
+        assert!(!doc.is_lazy() && doc.lazy().is_none());
     }
 
     #[test]
@@ -193,5 +451,315 @@ mod tests {
     fn one_merged_file_is_not_plural() {
         let source = DocumentSource::Merged(vec![PathBuf::from("a.json")]);
         assert_eq!(source.label(), "(merged from 1 file)");
+    }
+
+    /// A directory of its own under the temp dir, removed again when dropped.
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(name: &str) -> Self {
+            let dir =
+                std::env::temp_dir().join(format!("jsonquery-core-{name}-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+
+        fn write(&self, name: &str, contents: impl AsRef<[u8]>) -> PathBuf {
+            let path = self.0.join(name);
+            std::fs::write(&path, contents).unwrap();
+            path
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn the_size_from_which_a_file_is_kept_lazy_is_256_mib() {
+        assert_eq!(LAZY_THRESHOLD, 256 * 1024 * 1024);
+    }
+
+    #[test]
+    fn a_small_file_is_parsed() {
+        let dir = Scratch::new("small");
+        let path = dir.write("small.json", r#"{"a": [1, 2]}"#);
+        let doc = load(&path).unwrap();
+        assert!(!doc.is_lazy());
+        assert_eq!(doc.tree(), Some(&json!({"a": [1, 2]})));
+        assert_eq!(doc.byte_len, 13);
+        assert_eq!(doc.top_level_values, 1);
+        assert_eq!(doc.source.label(), path.display().to_string());
+    }
+
+    #[test]
+    fn the_threshold_is_where_parsing_turns_into_indexing() {
+        let dir = Scratch::new("boundary");
+        let path = dir.write("a.json", "[1, 2, 3]");
+        let lazy = load_via(&path, 9, map_file).unwrap();
+        assert!(lazy.is_lazy());
+        assert!(lazy.lazy().unwrap().is_mapped());
+        assert!(!load_via(&path, 10, map_file).unwrap().is_lazy());
+    }
+
+    #[test]
+    fn a_lazy_document_has_what_a_parsed_one_has() {
+        let dir = Scratch::new("same");
+        for (name, text) in [
+            (
+                "object.json",
+                r#"{"b": 1, "a": [true, null, "ü"], "n": 12345678901234567890}"#,
+            ),
+            ("ndjson.json", "{\"a\":1}\n{\"a\":2}\n[3]\n"),
+            ("padded.json", "\n\n  [1, 2]  \n\n"),
+            ("scalar.json", "\"just text\""),
+        ] {
+            let path = dir.write(name, text);
+            let len = text.len() as u64;
+            let lazy = load_via(&path, len, map_file).unwrap();
+            let parsed = load_via(&path, len + 1, map_file).unwrap();
+            assert!(lazy.is_lazy() && !parsed.is_lazy(), "{name}");
+            assert_eq!(value_of(&lazy), value_of(&parsed), "{name}");
+            assert_eq!(lazy.byte_len, len, "{name}");
+            assert_eq!(parsed.byte_len, len, "{name}");
+            assert_eq!(lazy.top_level_values, parsed.top_level_values, "{name}");
+            assert_eq!(
+                lazy.root().kind(),
+                parsed.root().kind(),
+                "{name}: what the root is"
+            );
+            assert_eq!(
+                lazy.root().child_count(),
+                parsed.root().child_count(),
+                "{name}: how many children it has"
+            );
+        }
+    }
+
+    #[test]
+    fn an_empty_file_is_an_empty_array_whatever_the_threshold() {
+        let dir = Scratch::new("empty");
+        let path = dir.write("empty.json", "");
+        for threshold in [1, LAZY_THRESHOLD] {
+            let doc = load_via(&path, threshold, map_file).unwrap();
+            assert_eq!(doc.tree(), Some(&json!([])));
+            assert_eq!((doc.byte_len, doc.top_level_values), (0, 0));
+        }
+        // Where everything is lazy, the nothing there is is still an array.
+        let doc = load_via(&path, 0, map_file).unwrap();
+        assert_eq!(value_of(&doc), json!([]));
+        assert_eq!((doc.byte_len, doc.top_level_values), (0, 0));
+    }
+
+    #[test]
+    fn a_file_that_cannot_be_mapped_is_read_and_indexed_instead() {
+        let dir = Scratch::new("unmappable");
+        let path = dir.write("a.json", "[1, 2]");
+        let doc = load_via(&path, 1, |_| Err(io::ErrorKind::Unsupported.into())).unwrap();
+        // Kept lazy, as a file this big is, but held in memory: a file's worth,
+        // not the twelve of a parsed tree.
+        assert!(doc.is_lazy() && !doc.lazy().unwrap().is_mapped());
+        assert_eq!(value_of(&doc), json!([1, 2]));
+        assert_eq!(doc.byte_len, 6);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_named_pipe_is_read_to_its_end() {
+        // A path typed into the source field that is a pipe (a named one here,
+        // or `/dev/stdin` when the app is started at the end of one): a file that
+        // says it is 0 bytes long. It used to load as an empty array.
+        let dir = Scratch::new("pipe");
+        let path = dir.0.join("pipe.json");
+        // std cannot make one, and this crate has no libc.
+        let made = std::process::Command::new("mkfifo").arg(&path).status();
+        assert!(made.expect("mkfifo runs").success());
+        let sender = path.clone();
+        let writer =
+            std::thread::spawn(move || std::fs::write(sender, br#"{"from": "a pipe"}"#).unwrap());
+
+        let doc = load_via(&path, u64::MAX, map_file).unwrap();
+        writer.join().unwrap();
+        assert_eq!(doc.tree(), Some(&json!({"from": "a pipe"})));
+        assert_eq!(doc.byte_len, 18);
+    }
+
+    /// What `load_via` makes of `bytes` written into a named pipe.
+    #[cfg(unix)]
+    fn load_through_a_pipe(name: &str, bytes: Vec<u8>, lazy_threshold: u64) -> Result<Document> {
+        let dir = Scratch::new(name);
+        let path = dir.0.join("pipe.json");
+        // std cannot make one, and this crate has no libc.
+        let made = std::process::Command::new("mkfifo").arg(&path).status();
+        assert!(made.expect("mkfifo runs").success());
+        let sender = path.clone();
+        let writer = std::thread::spawn(move || {
+            use std::io::Write;
+            let mut pipe = std::fs::OpenOptions::new()
+                .write(true)
+                .open(sender)
+                .unwrap();
+            // A reader that has had enough closes the pipe: not this thread's error.
+            let _ = pipe.write_all(&bytes);
+        });
+        let result = load_via(&path, lazy_threshold, map_file);
+        writer.join().unwrap();
+        result
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_pipe_that_hands_over_a_lot_is_kept_lazy_in_memory_not_mapped() {
+        // Its size is only known once it has been read, and it cannot be mapped:
+        // the bytes are held, and indexed, rather than parsed into a tree.
+        let doc = load_through_a_pipe("lazy-pipe", br#"{"from": "a pipe"}"#.to_vec(), 10).unwrap();
+        assert!(doc.is_lazy() && !doc.lazy().unwrap().is_mapped());
+        assert_eq!(value_of(&doc), json!({"from": "a pipe"}));
+        assert_eq!(doc.byte_len, 18);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_pipe_may_give_the_ceiling_and_not_one_byte_more() {
+        let blanks = |len: u64| {
+            let mut bytes = b"[1]".to_vec();
+            bytes.resize(len as usize, b' ');
+            bytes
+        };
+        let doc = load_through_a_pipe("at-ceiling", blanks(MAX_STREAM_BYTES), u64::MAX).unwrap();
+        assert_eq!(doc.tree(), Some(&json!([1])));
+        assert_eq!(doc.byte_len, MAX_STREAM_BYTES);
+
+        // Finite, so that a ceiling that stopped working would fail this and not
+        // fill the memory of whoever runs it.
+        let err = load_through_a_pipe("past-ceiling", blanks(MAX_STREAM_BYTES + 1), u64::MAX)
+            .err()
+            .expect("one byte more than is read");
+        let err = format!("{err:#}");
+        assert!(err.contains("more than 1048576 bytes"), "{err}");
+    }
+
+    #[test]
+    fn a_regular_file_is_not_held_to_the_ceiling_of_a_pipe() {
+        let dir = Scratch::new("regular-over-ceiling");
+        let mut text = b"[1]".to_vec();
+        text.resize(MAX_STREAM_BYTES as usize + 100, b' ');
+        let path = dir.write("long.json", &text);
+        // Read, as a file below the lazy size is; it ends where it says it does.
+        let doc = load_via(&path, u64::MAX, map_file).unwrap();
+        assert_eq!(doc.tree(), Some(&json!([1])));
+        assert_eq!(doc.byte_len, MAX_STREAM_BYTES + 100);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_device_is_refused_rather_than_read() {
+        // /dev/null is empty, so reading it would do no harm; /dev/zero, a
+        // terminal, would. All of them are devices.
+        let err = format!("{:#}", load("/dev/null").err().expect("a device"));
+        assert!(err.contains("/dev/null is a device"), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_directory_is_an_error_that_says_what_it_is() {
+        let dir = Scratch::new("directory");
+        let err = format!("{:#}", load(&dir.0).err().expect("not JSON"));
+        assert!(err.contains("Is a directory"), "{err}");
+    }
+
+    #[test]
+    fn a_missing_file_is_named_in_the_error() {
+        let path = Scratch::new("missing").0.join("nope.json");
+        let err = format!("{:#}", load(&path).err().expect("no such file"));
+        assert!(
+            err.contains("opening") && err.contains(&path.display().to_string()),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn text_that_is_not_json_is_the_same_error_either_way_in() {
+        let dir = Scratch::new("invalid");
+        for (name, text) in [
+            ("a.json", "[1,"),
+            ("b.json", "{\"a\": tru}"),
+            ("c.json", "[1, 2]\n[3, 4"),
+            ("d.json", "\"é\n\""),
+        ] {
+            let path = dir.write(name, text);
+            let parsed = format!("{:#}", load_via(&path, u64::MAX, map_file).err().unwrap());
+            let lazy = format!("{:#}", load_via(&path, 1, map_file).err().unwrap());
+            assert!(parsed.contains("parsing JSON"), "{parsed}");
+            assert_eq!(lazy, parsed, "{name}");
+        }
+    }
+
+    #[test]
+    fn a_download_in_a_file_with_no_name_is_loaded_from_the_handle() {
+        let dir = Scratch::new("handle");
+        let path = dir.write("body.json", r#"{"k": [1, 2, 3]}"#);
+        let file = File::open(&path).unwrap();
+        let source = || DocumentSource::Url("http://example.test/body.json".to_owned());
+        let lazy = load_file(&file, source(), "the download", 4, map_file).unwrap();
+        assert!(lazy.is_lazy());
+        assert_eq!(value_of(&lazy), json!({"k": [1, 2, 3]}));
+        assert_eq!(lazy.source.label(), "http://example.test/body.json");
+        let small = load_file(&file, source(), "the download", u64::MAX, map_file).unwrap();
+        assert_eq!(small.tree(), Some(&json!({"k": [1, 2, 3]})));
+    }
+
+    #[test]
+    fn several_top_level_values_become_one_array() {
+        let doc = load_text("{\"a\":1}\n[2]\n3").unwrap();
+        assert_eq!(doc.tree(), Some(&json!([{"a": 1}, [2], 3])));
+        assert_eq!(doc.top_level_values, 3);
+        assert!(matches!(doc.source, DocumentSource::Pasted));
+
+        let one = load_text(" [1] ").unwrap();
+        assert_eq!((one.tree(), one.top_level_values), (Some(&json!([1])), 1));
+
+        let none = load_text("  \n").unwrap();
+        assert_eq!((none.tree(), none.top_level_values), (Some(&json!([])), 0));
+    }
+
+    #[test]
+    fn bytes_already_in_memory_become_a_document_from_the_source_given() {
+        let doc = load_bytes(
+            br#"{"k": 1}"#,
+            DocumentSource::Url("http://example.test/k.json".to_owned()),
+        )
+        .unwrap();
+        assert_eq!(doc.tree(), Some(&json!({"k": 1})));
+        assert_eq!(doc.byte_len, 8);
+        assert!(!doc.is_lazy());
+        assert_eq!(doc.source.label(), "http://example.test/k.json");
+    }
+
+    #[test]
+    fn the_root_of_either_kind_of_document_is_the_same_to_a_viewer() {
+        use crate::tree::{flatten_visible, new_expanded_at_root};
+
+        let dir = Scratch::new("viewer");
+        let text = r#"{"users": [{"name": "Ada", "tags": ["x"]}, {"name": "Alan"}], "n": 3}"#;
+        let path = dir.write("v.json", text);
+        let lazy = load_via(&path, 1, map_file).unwrap();
+        let parsed = load_via(&path, u64::MAX, map_file).unwrap();
+        let mut expand = new_expanded_at_root();
+        expand.insert(vec![PathSegment::Key("users".into())]);
+        expand.insert(vec![
+            PathSegment::Key("users".into()),
+            PathSegment::Index(0),
+        ]);
+        let rows = |doc: &Document| {
+            flatten_visible(doc.root(), &expand)
+                .into_iter()
+                .map(|r| (r.path, r.depth, r.kind, r.child_count, r.scalar_preview))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(rows(&lazy), rows(&parsed));
+        assert!(!rows(&lazy).is_empty());
     }
 }

@@ -116,6 +116,14 @@ Numbers are written as they were read — `1.0`, `0.50` and a 30-digit integer
 come out as they went in (an exponent is normalized: `1E5` comes out `1e+5`) —
 and key order is kept unless **Sort keys** is on.
 
+A document that is too big to be text in memory — a file of 256 MiB or more, or
+the open document when it is one (see
+[Scaling beyond in-memory](architecture.md#scaling-beyond-in-memory)) — is
+formatted as it is saved: the preview shows the start of it, **Save…** writes the
+whole of it from its file a piece at a time (which takes no memory, whatever its
+size), and **Copy** is off. Indent and ASCII only work as for any document; **Sort
+keys** needs the whole document in memory and is refused.
+
 ## Diff JSON
 
 Compare a **Left** document with a **Right** one, the way a file-comparison
@@ -257,9 +265,10 @@ crate.
 
 ## Limits
 
-- Every tool works **in memory**: what it is given may add up to **128 MB**.
-  (Use `jq`, or a tool made for it, for bigger things; DuckDB reads many JSON
-  files with SQL.)
+- Every tool but Format works **in memory**: what it is given may add up to
+  **128 MB**. (Use `jq`, or a tool made for it, for bigger things; DuckDB reads
+  many JSON files with SQL.) Format writes a document that is kept as its file
+  from there, whatever its size, without sorting its keys.
 - A filter that produces more than a million outputs is stopped.
 - **Cancel** stops a job that is still running; a jq filter that spins without
   producing anything can't be interrupted until it yields, as in the query box.
@@ -290,8 +299,8 @@ crate.
   `DocumentSource::Merged` or `DocumentSource::Derived`: it has no file to
   reload from, so the Source field is left empty and the toolbar names it
   ("(merged from 3 files)", "(patched)").
-- These are plain in-memory values, so they do not use the memory-mapped path a
-  single opened file does. When a lazy, memory-mapped backend arrives (see the
-  Scaling section in [Architecture](architecture.md)), the root of a merged
-  document should be a list of per-file segments rather than one byte range,
-  but the tools are for small files and need nothing from it.
+- These are plain in-memory values, read the way a single opened file is, and
+  nothing of a file is kept once it is parsed. A file of 256 MiB or more is not a
+  value but a lazy document (see the Scaling section in
+  [Architecture](architecture.md)); the tools are for files that are not very
+  large, and refuse one, as they refuse anything over 128 MB.

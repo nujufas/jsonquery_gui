@@ -15,6 +15,11 @@ use serde_json::Value;
 
 use crate::tree::{PathSegment, ValueKind};
 
+/// How much of a string a row shows, in bytes: a row is a line, and drawing a
+/// string of a few megabytes as one asks the graphics card for more than it will
+/// give (the window closes) for nothing anyone could read.
+pub const PREVIEW_BYTES: usize = 1024;
+
 /// A JSON container/scalar node, resolvable one child at a time. `&Value`
 /// implements this directly; a future lazily-resolved, checkpoint-indexed
 /// value (backed by a memory-mapped file rather than a fully parsed
@@ -44,6 +49,22 @@ pub trait ValueView {
     fn iter_children(&self) -> Box<dyn Iterator<Item = (Option<PathSegment>, Self)> + '_>
     where
         Self: Sized;
+
+    /// Every direct child from the `start`th on, as [`iter_children`] gives
+    /// them. A node that can find its `start`th child without going past the
+    /// ones before it should say so: this is how a tree shows a window onto a
+    /// list of millions.
+    ///
+    /// [`iter_children`]: ValueView::iter_children
+    fn iter_children_from(
+        &self,
+        start: usize,
+    ) -> Box<dyn Iterator<Item = (Option<PathSegment>, Self)> + '_>
+    where
+        Self: Sized,
+    {
+        Box::new(self.iter_children().skip(start))
+    }
 
     /// This node's value, if it's a scalar (anything but an array/object).
     /// Cheap even for a lazily-backed document — a scalar is always a leaf,
@@ -98,6 +119,28 @@ impl ValueView for &Value {
         }
     }
 
+    fn iter_children_from(
+        &self,
+        start: usize,
+    ) -> Box<dyn Iterator<Item = (Option<PathSegment>, Self)> + '_> {
+        // `enumerate().skip()` over a slice goes straight to the `start`th.
+        match *self {
+            Value::Array(items) => Box::new(
+                items
+                    .iter()
+                    .enumerate()
+                    .skip(start)
+                    .map(|(i, child)| (Some(PathSegment::Index(i)), child)),
+            ),
+            Value::Object(map) => Box::new(
+                map.iter()
+                    .skip(start)
+                    .map(|(k, child)| (Some(PathSegment::Key(k.clone())), child)),
+            ),
+            _ => Box::new(std::iter::empty()),
+        }
+    }
+
     fn scalar_value(&self) -> Option<Value> {
         match self {
             Value::Array(_) | Value::Object(_) => None,
@@ -110,8 +153,51 @@ impl ValueView for &Value {
             Value::Null => Some("null".to_string()),
             Value::Bool(b) => Some(b.to_string()),
             Value::Number(n) => Some(n.to_string()),
+            Value::String(s) if s.len() > PREVIEW_BYTES => {
+                // Cut where a character is not.
+                let mut end = PREVIEW_BYTES;
+                while !s.is_char_boundary(end) {
+                    end -= 1;
+                }
+                Some(format!("{:?}…", &s[..end]))
+            }
             Value::String(s) => Some(format!("{s:?}")),
             Value::Array(_) | Value::Object(_) => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn a_short_string_is_shown_whole() {
+        let v = json!("hello \"world\"\n");
+        assert_eq!(
+            (&v).scalar_preview().as_deref(),
+            Some("\"hello \\\"world\\\"\\n\"")
+        );
+        let edge = json!("x".repeat(PREVIEW_BYTES));
+        assert!((&edge).scalar_preview().unwrap().ends_with("x\""));
+    }
+
+    #[test]
+    fn a_long_string_is_shown_by_its_beginning() {
+        let v = json!(format!("item-{}", "x".repeat(5_000_000)));
+        let preview = (&v).scalar_preview().unwrap();
+        assert!(preview.starts_with("\"item-xxx") && preview.ends_with("x\"…"));
+        assert!(preview.len() <= PREVIEW_BYTES + 8, "{}", preview.len());
+    }
+
+    #[test]
+    fn a_long_string_is_not_cut_in_the_middle_of_a_character() {
+        // Two-byte characters, so that the limit falls inside one when it is odd.
+        let v = json!("é".repeat(2_000));
+        let preview = (&v).scalar_preview().unwrap();
+        assert!(preview.ends_with("é\"…"), "{preview}");
+        let v = json!(format!("a{}", "é".repeat(2_000)));
+        assert!((&v).scalar_preview().unwrap().ends_with("é\"…"));
     }
 }

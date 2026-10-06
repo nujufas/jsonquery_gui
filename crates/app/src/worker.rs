@@ -11,9 +11,11 @@ use std::time::{Duration, Instant};
 use anyhow::Context;
 use crossbeam_channel::{Receiver, Sender};
 use jsonquery_core::engine::QueryEvent;
-use jsonquery_core::{Document, DocumentSource, NodePath, SourceMatches};
+use jsonquery_core::lazy::{Node, PrettyLimits};
+use jsonquery_core::{
+    Content, Document, DocumentSource, NodePath, Root, SourceMatches, ValueKind, ValueView,
+};
 use jsonquery_query::{merge, output, OutputFormat};
-use serde_json::Value;
 
 use crate::app::human_bytes;
 use crate::tools::jobs::{self, Job, Outcome};
@@ -32,6 +34,15 @@ pub const MAX_MERGE_BYTES: u64 = 128 * 1024 * 1024;
 
 /// Nodes of a merge result shown as the Tools window's preview.
 const MERGE_PREVIEW_NODES: usize = 600;
+
+/// The most that "Copy to Clipboard" takes from a very large document, in bytes
+/// of the file: more is for "Save…", which does not hold it in memory.
+const MAX_COPY_BYTES: usize = 64 * 1024 * 1024;
+
+/// What the text view shows of a very large document: as much text as this, and
+/// of a string as much as that, whatever the number of nodes it is asked for.
+const TEXT_VIEW_BYTES: usize = 4 * 1024 * 1024;
+const TEXT_VIEW_STRING_BYTES: usize = 4096;
 
 /// Which tree a `Command::Search` runs over — the loaded source document (via
 /// its `Arc<Document>`, so a huge document isn't cloned just to search it) or
@@ -168,6 +179,12 @@ pub enum Command {
         text: Arc<str>,
         path: PathBuf,
     },
+    /// Write a document that is kept as its file to `path`, laid out as the Tools
+    /// window's Format was asked to, a piece at a time.
+    SaveFormatted {
+        streamed: crate::tools::jobs::Streamed,
+        path: PathBuf,
+    },
     Query {
         doc: Arc<Document>,
         text: String,
@@ -277,7 +294,9 @@ pub fn spawn(cmd_rx: Receiver<Command>, evt_tx: Sender<Event>, wake: impl Fn() +
                 }
                 Command::OpenUrl(url) => {
                     send(&evt_tx, Event::Loading, &wake);
-                    let result = download_to_temp_file(&url).map(Arc::new);
+                    let result =
+                        download(&url, &std::env::temp_dir(), jsonquery_core::LAZY_THRESHOLD)
+                            .map(Arc::new);
                     send_load_result(&evt_tx, result, &wake);
                 }
                 Command::SaveFile {
@@ -286,13 +305,13 @@ pub fn spawn(cmd_rx: Receiver<Command>, evt_tx: Sender<Event>, wake: impl Fn() +
                     path,
                 } => {
                     let result = match &node_path {
-                        Some(np) => match jsonquery_core::resolve(&doc.root, np) {
-                            Some(v) => save_json(v, &path),
+                        Some(np) => match jsonquery_core::resolve(doc.root(), np) {
+                            Some(root) => save_root(root, &path),
                             None => Err(anyhow::anyhow!(
                                 "that value is no longer part of the document"
                             )),
                         },
-                        None => save_json(&doc.root, &path),
+                        None => save_root(doc.root(), &path),
                     };
                     match result {
                         Ok(()) => send(&evt_tx, Event::Saved(path), &wake),
@@ -317,15 +336,13 @@ pub fn spawn(cmd_rx: Receiver<Command>, evt_tx: Sender<Event>, wake: impl Fn() +
                 Command::CopyNode { target, format } => {
                     let result = match &target {
                         CopyTarget::Source { doc, node_path } => match node_path {
-                            Some(np) => match jsonquery_core::resolve(&doc.root, np) {
-                                Some(v) => serde_json::to_string_pretty(v)
-                                    .context("serializing that value"),
+                            Some(np) => match jsonquery_core::resolve(doc.root(), np) {
+                                Some(root) => root_text(root).context("serializing that value"),
                                 None => Err(anyhow::anyhow!(
                                     "that value is no longer part of the document"
                                 )),
                             },
-                            None => serde_json::to_string_pretty(&doc.root)
-                                .context("serializing the document"),
+                            None => root_text(doc.root()).context("serializing the document"),
                         },
                         CopyTarget::Value(v) if format.is_tabular() => Ok(output::rows_text(v)),
                         CopyTarget::Value(v) => {
@@ -344,7 +361,7 @@ pub fn spawn(cmd_rx: Receiver<Command>, evt_tx: Sender<Event>, wake: impl Fn() +
                     rel,
                     gen,
                 } => {
-                    let matches = jsonquery_core::locate(&doc.root, &target, nth, &rel);
+                    let matches = jsonquery_core::locate(doc.root(), &target, nth, &rel);
                     send(&evt_tx, Event::Found { gen, matches }, &wake);
                 }
                 Command::Search {
@@ -353,11 +370,20 @@ pub fn spawn(cmd_rx: Receiver<Command>, evt_tx: Sender<Event>, wake: impl Fn() +
                     regex,
                     gen,
                 } => {
-                    let value = match &root {
-                        SearchRoot::Source(doc) => &doc.root,
-                        SearchRoot::Results(v) => v.as_ref(),
+                    let found = match &root {
+                        SearchRoot::Source(doc) => match doc.root() {
+                            Root::Tree(value) => jsonquery_core::search(value, &text, regex),
+                            // Looked at where it is in the file, not made into
+                            // strings: some ten times quicker over a gigabyte.
+                            Root::Lazy(node) => jsonquery_core::lazy::search(node, &text, regex)
+                                .and_then(|matches| {
+                                    ensure_unchanged(doc.root())?;
+                                    Ok(matches)
+                                }),
+                        },
+                        SearchRoot::Results(v) => jsonquery_core::search(v.as_ref(), &text, regex),
                     };
-                    match jsonquery_core::search(value, &text, regex) {
+                    match found {
                         Ok(matches) => send(&evt_tx, Event::SearchDone { gen, matches }, &wake),
                         Err(e) => send(
                             &evt_tx,
@@ -376,14 +402,14 @@ pub fn spawn(cmd_rx: Receiver<Command>, evt_tx: Sender<Event>, wake: impl Fn() +
                     format,
                 } => {
                     let kind = target.kind();
-                    let value = match &target {
-                        TextTarget::Source(doc) => &doc.root,
-                        TextTarget::Results(v) => v,
-                    };
-                    let (text, truncated) = if format.is_tabular() {
-                        output::rows_bounded(value, node_budget)
-                    } else {
-                        jsonquery_core::pretty_print_bounded(value, node_budget)
+                    let (text, truncated) = match &target {
+                        TextTarget::Source(doc) => bounded_text(doc.root(), node_budget),
+                        TextTarget::Results(v) if format.is_tabular() => {
+                            output::rows_bounded(v, node_budget)
+                        }
+                        TextTarget::Results(v) => {
+                            jsonquery_core::pretty_print_bounded(v, node_budget)
+                        }
                     };
                     send(
                         &evt_tx,
@@ -415,6 +441,12 @@ pub fn spawn(cmd_rx: Receiver<Command>, evt_tx: Sender<Event>, wake: impl Fn() +
                     let result = jobs::run(job, &cancel);
                     send(&evt_tx, Event::ToolDone { tool, gen, result }, &wake);
                 }
+                Command::SaveFormatted { streamed, path } => {
+                    match save_formatted(&streamed, &path) {
+                        Ok(()) => send(&evt_tx, Event::Saved(path), &wake),
+                        Err(e) => send(&evt_tx, Event::SaveError(format!("{e:#}")), &wake),
+                    }
+                }
                 Command::SaveText { text, path } => {
                     let result = std::fs::write(&path, text.as_bytes())
                         .with_context(|| format!("writing {}", path.display()));
@@ -430,7 +462,22 @@ pub fn spawn(cmd_rx: Receiver<Command>, evt_tx: Sender<Event>, wake: impl Fn() +
                     gen,
                     cancel,
                 } => {
-                    run_query(&evt_tx, &doc, &text, engine, gen, &cancel, &wake);
+                    // A query on a file this big runs threads of its own: whatever
+                    // goes wrong in one is an answer for this query, not the end of
+                    // this thread, which every later command waits on.
+                    let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        run_query(&evt_tx, &doc, &text, engine, gen, &cancel, &wake);
+                    }));
+                    if ran.is_err() {
+                        send(
+                            &evt_tx,
+                            Event::QueryError {
+                                gen,
+                                error: "the query stopped because of an internal error".to_owned(),
+                            },
+                            &wake,
+                        );
+                    }
                 }
             }
         }
@@ -475,14 +522,23 @@ fn merge_files(
         read_time += doc.parse_time;
         files.push(MergedFile {
             bytes: doc.byte_len,
-            shape: describe(&doc.root),
+            shape: describe(doc.root()),
         });
         names.push(path.file_name().map_or_else(
             || path.display().to_string(),
             |n| n.to_string_lossy().into_owned(),
         ));
-        // Only the value is kept: the file's mapping ends here.
-        let Document { root, .. } = doc;
+        // Only the value is kept. A file too big to be one (the sizes above
+        // were of what the file systems said, which is nothing for a pipe) is
+        // not merged.
+        let byte_len = doc.byte_len;
+        let Content::Tree(root) = doc.content else {
+            anyhow::bail!(
+                "{} is {}, too big to merge — a merge happens in memory",
+                path.display(),
+                human_bytes(byte_len)
+            );
+        };
         inputs.push(root);
     }
 
@@ -505,25 +561,33 @@ fn merge_files(
     })
 }
 
-/// A few words on what `value` is, for the merge file list.
-pub(crate) fn describe(value: &Value) -> String {
+/// A few words on what `root` is, for the merge file list.
+pub(crate) fn describe<V: ValueView>(root: V) -> String {
     let count =
         |n: usize, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
-    match value {
-        Value::Array(a) => format!("array · {}", count(a.len(), "item", "items")),
-        Value::Object(o) => format!("object · {}", count(o.len(), "key", "keys")),
-        Value::String(_) => "string".to_owned(),
-        Value::Number(_) => "number".to_owned(),
-        Value::Bool(_) => "boolean".to_owned(),
-        Value::Null => "null".to_owned(),
+    match root.kind() {
+        ValueKind::Array => format!("array · {}", count(root.child_count(), "item", "items")),
+        ValueKind::Object => format!("object · {}", count(root.child_count(), "key", "keys")),
+        ValueKind::String => "string".to_owned(),
+        ValueKind::Number => "number".to_owned(),
+        ValueKind::Bool => "boolean".to_owned(),
+        ValueKind::Null => "null".to_owned(),
     }
 }
 
-/// Download `url`'s body into a temporary file, then parse it with the same
-/// mmap-backed path a locally opened file would use (Architecture §1) —
-/// keeping URL downloads on the same footing as local files rather than
-/// materializing the whole response in RAM up front.
-fn download_to_temp_file(url: &str) -> anyhow::Result<Document> {
+/// Download `url`'s body and load it. A body of fewer than `spill_at` bytes is
+/// held in memory and parsed from there, as pasted text is, and never touches
+/// the disk. A larger one is streamed into a temporary file in `spill_dir`
+/// instead of being held in memory whole, and then loaded like a file opened
+/// from disk: from `spill_at` bytes, which is [`jsonquery_core::LAZY_THRESHOLD`]
+/// where it is not a test, that is mapped and indexed, not parsed.
+///
+/// The temporary file has no name from the moment it is made, so nothing of it
+/// can be left behind whatever happens, and a lazy document that is mapped from
+/// it has it for as long as it lives.
+fn download(url: &str, spill_dir: &Path, spill_at: u64) -> anyhow::Result<Document> {
+    use std::io::{Read, Write};
+
     let mut response = ureq::get(url)
         .call()
         .with_context(|| format!("requesting {url}"))?;
@@ -534,23 +598,68 @@ fn download_to_temp_file(url: &str) -> anyhow::Result<Document> {
         .limit(MAX_DOWNLOAD_BYTES)
         .reader();
 
-    let temp_path = temp_path_for_url(url);
-    let mut file = std::fs::File::create(&temp_path)
-        .with_context(|| format!("creating temporary file {}", temp_path.display()))?;
-    std::io::copy(&mut body, &mut file).with_context(|| format!("downloading {url}"))?;
-    drop(file);
+    let mut head = Vec::new();
+    (&mut body)
+        .take(spill_at)
+        .read_to_end(&mut head)
+        .with_context(|| format!("downloading {url}"))?;
+    if (head.len() as u64) < spill_at {
+        return jsonquery_core::load_bytes(&head, DocumentSource::Url(url.to_string()))
+            .with_context(|| format!("parsing data from {url}"));
+    }
 
-    let mut doc =
-        jsonquery_core::load(&temp_path).with_context(|| format!("parsing data from {url}"))?;
-    doc.source = DocumentSource::Url(url.to_string());
-    Ok(doc)
+    let mut file = create_spill_file(spill_dir, url)?;
+    let written = file.write_all(&head);
+    drop(head);
+    written.context("writing the temporary file")?;
+    std::io::copy(&mut body, &mut file).with_context(|| format!("downloading {url}"))?;
+
+    jsonquery_core::load_open_file(&file, DocumentSource::Url(url.to_string()), spill_at)
+        .with_context(|| format!("parsing data from {url}"))
 }
 
-/// A temp-dir path derived from `url`'s last path segment, prefixed with the
+/// Make the file for `url`'s body, which has no name once it is made, and which
+/// nobody but its owner can read where there are file modes, as what is
+/// downloaded may not be for them. It is one that did not exist, so that nothing
+/// already there — a link someone left at a name in a shared temp dir, say — is
+/// written through.
+///
+/// Unlinked as soon as it is open (a file that is deleted lives on for whoever
+/// has it open, or mapped); on Windows, which cannot do that, made to be
+/// deleted when the last handle to it closes, the mapping's included.
+fn create_spill_file(dir: &Path, url: &str) -> anyhow::Result<std::fs::File> {
+    let path = temp_path_for_url(dir, url);
+    // Read as well as written: it is mapped afterwards.
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_FLAG_DELETE_ON_CLOSE: u32 = 0x0400_0000;
+        const SHARE_READ_WRITE_DELETE: u32 = 0x7;
+        options
+            .custom_flags(FILE_FLAG_DELETE_ON_CLOSE)
+            .share_mode(SHARE_READ_WRITE_DELETE);
+    }
+    let file = options
+        .open(&path)
+        .with_context(|| format!("creating temporary file {}", path.display()))?;
+    #[cfg(unix)]
+    std::fs::remove_file(&path)
+        .with_context(|| format!("unlinking temporary file {}", path.display()))?;
+    Ok(file)
+}
+
+/// A path in `dir` derived from `url`'s last path segment, prefixed with the
 /// pid and a nanosecond timestamp for uniqueness. The prefix also neutralizes
 /// any path-traversal attempt in that segment (e.g. a URL ending in `/..`):
 /// whatever it contains becomes one literal filename component, never `/`.
-fn temp_path_for_url(url: &str) -> PathBuf {
+fn temp_path_for_url(dir: &Path, url: &str) -> PathBuf {
     let path_part = url.split(['?', '#']).next().unwrap_or(url);
     let file_name = path_part
         .rsplit('/')
@@ -561,10 +670,109 @@ fn temp_path_for_url(url: &str) -> PathBuf {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    std::env::temp_dir().join(format!(
+    dir.join(format!(
         "jsonquery_gui-{}-{nanos}-{file_name}",
         std::process::id()
     ))
+}
+
+/// Write a node out as pretty-printed JSON — the document, or one row of its
+/// tree — for the "Save…" buttons. A parsed value is serialized; a node of a very
+/// large document is written straight from its file, a piece at a time, so that
+/// saving a gigabyte takes no memory.
+fn save_root(root: Root<'_>, path: &Path) -> anyhow::Result<()> {
+    match root {
+        Root::Tree(value) => save_json(value, path),
+        Root::Lazy(node) => {
+            ensure_unchanged(root)?;
+            let saved = save_node(node, path);
+            // A file that was cut short while it was being copied is not copied:
+            // what was written has zeros where the rest of it was.
+            if let Err(e) = ensure_unchanged(root) {
+                let _ = std::fs::remove_file(path);
+                return Err(e);
+            }
+            saved
+        }
+    }
+}
+
+/// Write a document that is kept as its file out to `path`, laid out as asked,
+/// straight from the file, which takes no memory however big it is.
+fn save_formatted(streamed: &crate::tools::jobs::Streamed, path: &Path) -> anyhow::Result<()> {
+    let root = streamed.doc.root();
+    let Root::Lazy(node) = root else {
+        anyhow::bail!("that document is in memory");
+    };
+    ensure_unchanged(root)?;
+    let style = crate::tools::jobs::style_of(&streamed.options);
+    let file =
+        std::fs::File::create(path).with_context(|| format!("creating {}", path.display()))?;
+    let mut out = std::io::BufWriter::with_capacity(1 << 20, file);
+    let written = node
+        .write_styled(&mut out, style, PrettyLimits::default())
+        .and_then(|_| std::io::Write::flush(&mut out))
+        .with_context(|| format!("writing {}", path.display()));
+    // A file that was cut short while it was being copied is not copied.
+    if let Err(e) = ensure_unchanged(root) {
+        let _ = std::fs::remove_file(path);
+        return Err(e);
+    }
+    written
+}
+
+/// An error if the file a document is kept in was cut short while it was open
+/// (see [`jsonquery_core::lazy::LazyTree::damaged`]): what is read from it is
+/// then not the file's.
+fn ensure_unchanged(root: Root<'_>) -> anyhow::Result<()> {
+    match root {
+        Root::Lazy(node) if node.tree().damaged() => {
+            anyhow::bail!(jsonquery_core::lazy::CHANGED_WHILE_OPEN)
+        }
+        _ => Ok(()),
+    }
+}
+
+fn save_node(node: Node<'_>, path: &Path) -> anyhow::Result<()> {
+    let file =
+        std::fs::File::create(path).with_context(|| format!("creating {}", path.display()))?;
+    let mut out = std::io::BufWriter::with_capacity(1 << 20, file);
+    node.write_pretty(&mut out, PrettyLimits::default())
+        .and_then(|_| std::io::Write::flush(&mut out))
+        .with_context(|| format!("writing {}", path.display()))
+}
+
+/// A node as the text "Copy to Clipboard" puts on the clipboard.
+fn root_text(root: Root<'_>) -> anyhow::Result<String> {
+    match root {
+        Root::Tree(value) => Ok(serde_json::to_string_pretty(value)?),
+        Root::Lazy(node) => {
+            if node.byte_len() > MAX_COPY_BYTES {
+                anyhow::bail!(
+                    "that value is {}, too big to copy: use Save… to write it to a file",
+                    human_bytes(node.byte_len() as u64)
+                );
+            }
+            ensure_unchanged(root)?;
+            let text = node.to_pretty_string(PrettyLimits::default()).0;
+            ensure_unchanged(root)?;
+            Ok(text)
+        }
+    }
+}
+
+/// The text view's rendering of a document, cut after `node_budget` nodes. One
+/// that is kept as its file is also cut by size, so that a few nodes that are
+/// huge cannot make a text that is.
+fn bounded_text(root: Root<'_>, node_budget: usize) -> (String, bool) {
+    match root {
+        Root::Tree(value) => jsonquery_core::pretty_print_bounded(value, node_budget),
+        Root::Lazy(node) => node.to_pretty_string(PrettyLimits {
+            nodes: node_budget,
+            bytes: TEXT_VIEW_BYTES,
+            string_bytes: TEXT_VIEW_STRING_BYTES,
+        }),
+    }
 }
 
 /// Write a value out as pretty-printed JSON — used by both "Save…" buttons,
@@ -608,14 +816,19 @@ fn run_query(
     wake: &impl Fn(),
 ) {
     let start = Instant::now();
-    let result = engine
-        .engine()
-        .run(&doc.root, text, cancel, &mut |event| match event {
-            QueryEvent::Item(value) => send(evt_tx, Event::QueryItem { gen, value }, wake),
-            QueryEvent::ItemError(error) => {
-                send(evt_tx, Event::QueryItemError { gen, error }, wake)
-            }
-        });
+    let mut on_event = |event| match event {
+        QueryEvent::Item(value) => send(evt_tx, Event::QueryItem { gen, value }, wake),
+        QueryEvent::ItemError(error) => send(evt_tx, Event::QueryItemError { gen, error }, wake),
+    };
+    let result = match &doc.content {
+        Content::Tree(value) => engine.engine().run(value, text, cancel, &mut on_event),
+        // A document too big to be a value is read from its file as the query
+        // goes: the part of the query that can be is walked, and jq is given the
+        // rest a piece at a time.
+        Content::Lazy(tree) => {
+            jsonquery_query::lazy::run(engine, tree, text, cancel, &mut on_event)
+        }
+    };
 
     match result {
         Ok(_count) => send(
@@ -648,6 +861,8 @@ fn send(evt_tx: &Sender<Event>, event: Event, wake: &impl Fn()) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use jsonquery_core::PathSegment;
+    use serde_json::Value;
 
     fn temp_dir(name: &str) -> PathBuf {
         let dir =
@@ -669,7 +884,10 @@ mod tests {
         let b = write(&dir, "b.json", r#"{"k": 1}"#);
         let outcome =
             merge_files(&[b.clone(), a.clone()], "$files", &AtomicBool::new(false)).unwrap();
-        assert_eq!(outcome.doc.root, serde_json::json!(["b.json", "a.json"]));
+        assert_eq!(
+            outcome.doc.tree(),
+            Some(&serde_json::json!(["b.json", "a.json"]))
+        );
         let shapes: Vec<_> = outcome.files.iter().map(|f| f.shape.as_str()).collect();
         assert_eq!(shapes, ["object · 1 key", "array · 2 items"]);
         assert_eq!(outcome.doc.source.label(), "(merged from 2 files)");
@@ -1001,6 +1219,505 @@ mod tests {
             }
             _ => panic!("expected the job's answer"),
         }
+    }
+
+    /// Serve `body` once, over HTTP, from a port of its own; the URL to fetch it
+    /// from.
+    fn serve(body: Vec<u8>) -> String {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            // The request, up to the blank line that ends its headers.
+            let mut request = Vec::new();
+            let mut chunk = [0u8; 1024];
+            while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                match stream.read(&mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => request.extend_from_slice(&chunk[..n]),
+                }
+            }
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                 Content-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = stream
+                .write_all(head.as_bytes())
+                .and_then(|()| stream.write_all(&body));
+        });
+        format!("http://127.0.0.1:{port}/data.json")
+    }
+
+    /// `body`: `[1, 2, 3]`, then blanks up to `len` bytes.
+    fn padded(len: usize) -> Vec<u8> {
+        let mut body = b"[1, 2, 3]".to_vec();
+        body.resize(len, b' ');
+        body
+    }
+
+    fn files_in(dir: &Path) -> usize {
+        std::fs::read_dir(dir).unwrap().count()
+    }
+
+    /// The value a document stands for, whichever way it is kept.
+    fn value_of(doc: &Document) -> serde_json::Value {
+        match &doc.content {
+            Content::Tree(value) => value.clone(),
+            Content::Lazy(tree) => tree.root().to_value(usize::MAX).unwrap(),
+        }
+    }
+
+    #[test]
+    fn a_small_download_is_parsed_from_memory_and_never_touches_the_disk() {
+        let url = serve(br#"{"n": [1, 2, 3]}"#.to_vec());
+        // A folder that is not there: a temporary file could not be made in it.
+        let nowhere = temp_dir("download-small").join("not-there");
+        let doc = download(&url, &nowhere, 1024).unwrap();
+        assert_eq!(doc.tree(), Some(&serde_json::json!({"n": [1, 2, 3]})));
+        assert_eq!(doc.byte_len, 16);
+        assert_eq!(doc.source.label(), url);
+        assert!(!doc.is_lazy());
+    }
+
+    #[test]
+    fn an_empty_download_is_an_empty_array() {
+        let url = serve(Vec::new());
+        let doc = download(&url, &temp_dir("download-empty"), 1024).unwrap();
+        assert_eq!(doc.tree(), Some(&serde_json::json!([])));
+        assert_eq!((doc.byte_len, doc.top_level_values), (0, 0));
+    }
+
+    #[test]
+    fn a_large_download_is_kept_in_a_file_that_was_never_there_to_see() {
+        let dir = temp_dir("download-large");
+        let url = serve(padded(5000));
+        let doc = download(&url, &dir, 1024).unwrap();
+        // Mapped, and indexed rather than parsed, from a file nobody can open.
+        assert!(doc.is_lazy() && doc.lazy().unwrap().is_mapped());
+        assert_eq!(value_of(&doc), serde_json::json!([1, 2, 3]));
+        assert_eq!(doc.byte_len, 5000);
+        assert_eq!(doc.source.label(), url);
+        // Unlinked while it is open, where a file that is deleted lives on for
+        // whoever has it open; Windows deletes it when the last handle to it, the
+        // mapping's, is closed.
+        #[cfg(unix)]
+        assert_eq!(files_in(&dir), 0, "no file, though the document is open");
+        // And the mapping is good for as long as the document is.
+        assert_eq!(value_of(&doc), serde_json::json!([1, 2, 3]));
+        drop(doc);
+        assert_eq!(files_in(&dir), 0, "nothing is left once it is closed");
+    }
+
+    #[test]
+    fn a_large_download_needs_somewhere_to_go() {
+        let nowhere = temp_dir("download-nowhere").join("not-there");
+        let url = serve(padded(5000));
+        let err = download(&url, &nowhere, 1024).err().expect("no folder");
+        assert!(
+            format!("{err:#}").contains("creating temporary file"),
+            "{err:#}"
+        );
+    }
+
+    #[test]
+    fn a_large_download_that_is_not_json_leaves_no_file_behind() {
+        let dir = temp_dir("download-bad");
+        let url = serve(vec![b'x'; 5000]);
+        let err = download(&url, &dir, 1024).err().expect("not JSON");
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("parsing data from") && message.contains("parsing JSON"),
+            "{message}"
+        );
+        assert_eq!(files_in(&dir), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_file_a_download_spills_into_is_private_to_the_user_and_has_no_name() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = temp_dir("spill-mode");
+        let file = create_spill_file(&dir, "http://example.test/a.json").unwrap();
+        assert_eq!(file.metadata().unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(files_in(&dir), 0, "unlinked as soon as it is open");
+        // It can be written, read back and mapped all the same.
+        std::io::Write::write_all(&mut &file, b"[1]").unwrap();
+        let doc = jsonquery_core::load_open_file(
+            &file,
+            DocumentSource::Url("http://example.test/a.json".to_owned()),
+            1,
+        )
+        .unwrap();
+        assert!(doc.lazy().unwrap().is_mapped());
+        assert_eq!(value_of(&doc), serde_json::json!([1]));
+    }
+
+    #[test]
+    fn the_temporary_file_is_named_after_the_end_of_the_url_inside_the_folder_given() {
+        let dir = Path::new("spill");
+        for (url, name) in [
+            ("http://h.test/a/b/data.json", "data.json"),
+            ("http://h.test/data.json?x=1#top", "data.json"),
+            ("http://h.test/", "download.json"),
+        ] {
+            let path = temp_path_for_url(dir, url);
+            assert_eq!(path.parent(), Some(dir), "{url}");
+            let file_name = path.file_name().unwrap().to_string_lossy().into_owned();
+            assert!(file_name.starts_with("jsonquery_gui-"), "{file_name}");
+            assert!(file_name.ends_with(&format!("-{name}")), "{file_name}");
+        }
+        // A `..` stays a part of one name rather than a step up.
+        let path = temp_path_for_url(dir, "http://h.test/..");
+        assert_eq!(path.parent(), Some(dir));
+    }
+
+    // ---- a document that is kept as its file ------------------------------
+
+    const USERS: &str = r#"{"users": [{"name": "Ada", "tags": ["x", "y"]},
+        {"name": "Alan", "tags": []}, {"name": "Cy"}], "n": 3}"#;
+
+    /// A document of `text` that is indexed rather than parsed, as one of 256 MiB
+    /// or more is, made from a file of its own.
+    fn lazy_document(name: &str, text: &str) -> Arc<Document> {
+        let dir = temp_dir(name);
+        let path = write(&dir, "doc.json", text);
+        let file = std::fs::File::open(path).unwrap();
+        let doc = jsonquery_core::load_open_file(
+            &file,
+            DocumentSource::Url("http://example.test/doc.json".to_owned()),
+            1,
+        )
+        .unwrap();
+        assert!(doc.is_lazy());
+        Arc::new(doc)
+    }
+
+    fn query_items(doc: &Arc<Document>, text: &str) -> (Vec<Value>, Vec<String>) {
+        let (commands, events) = start_worker();
+        commands
+            .send(Command::Query {
+                doc: doc.clone(),
+                text: text.to_owned(),
+                engine: jsonquery_query::Kind::Jq,
+                gen: 1,
+                cancel: Arc::new(AtomicBool::new(false)),
+            })
+            .unwrap();
+        let (mut items, mut errors) = (Vec::new(), Vec::new());
+        loop {
+            match events.recv_timeout(WAIT).unwrap() {
+                Event::QueryItem { value, .. } => items.push(value),
+                Event::QueryItemError { error, .. } => errors.push(error),
+                Event::QueryDone { .. } => return (items, errors),
+                Event::QueryError { error, .. } => {
+                    errors.push(error);
+                    return (items, errors);
+                }
+                _ => panic!("expected the query's events"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_query_over_a_document_kept_as_its_file_gives_what_it_gives_over_a_value() {
+        let doc = lazy_document("lazy-query", USERS);
+        let (items, errors) = query_items(&doc, ".users[] | select(.tags | length > 0) | .name");
+        assert_eq!(items, [serde_json::json!("Ada")]);
+        assert!(errors.is_empty(), "{errors:?}");
+        let (items, _) = query_items(&doc, ".users | map(.name) | join(\"+\")");
+        assert_eq!(items, [serde_json::json!("Ada+Alan+Cy")]);
+        let (items, _) = query_items(&doc, ".users | length");
+        assert_eq!(items, [serde_json::json!(3)]);
+    }
+
+    #[test]
+    fn jsonpath_and_jmespath_read_a_document_kept_as_its_file_too() {
+        let doc = lazy_document("lazy-jsonpath", USERS);
+        for (engine, text, expected) in [
+            (
+                jsonquery_query::Kind::JsonPath,
+                "$.users[?(@.tags[0] == 'x')].name",
+                serde_json::json!("Ada"),
+            ),
+            (
+                jsonquery_query::Kind::JmesPath,
+                // (An empty list is not true, so Alan is out.)
+                "users[?tags].name | length(@)",
+                serde_json::json!(1),
+            ),
+        ] {
+            let (commands, events) = start_worker();
+            commands
+                .send(Command::Query {
+                    doc: doc.clone(),
+                    text: text.to_owned(),
+                    engine,
+                    gen: 1,
+                    cancel: Arc::new(AtomicBool::new(false)),
+                })
+                .unwrap();
+            match events.recv_timeout(WAIT).unwrap() {
+                Event::QueryItem { value, .. } => assert_eq!(value, expected, "{text}"),
+                _ => panic!("expected the query's result: {text}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_row_of_a_document_kept_as_its_file_is_saved_as_pretty_json() {
+        let doc = lazy_document("lazy-save", USERS);
+        let out = temp_dir("lazy-save").join("out.json");
+        let (commands, events) = start_worker();
+        for (node_path, expected) in [
+            (
+                Some(vec![
+                    PathSegment::Key("users".into()),
+                    PathSegment::Index(0),
+                ]),
+                "{\n  \"name\": \"Ada\",\n  \"tags\": [\n    \"x\",\n    \"y\"\n  ]\n}",
+            ),
+            (
+                None,
+                &*serde_json::to_string_pretty(&serde_json::from_str::<Value>(USERS).unwrap())
+                    .unwrap(),
+            ),
+        ] {
+            commands
+                .send(Command::SaveFile {
+                    doc: doc.clone(),
+                    node_path,
+                    path: out.clone(),
+                })
+                .unwrap();
+            match events.recv_timeout(WAIT).unwrap() {
+                Event::Saved(saved) => assert_eq!(saved, out),
+                _ => panic!("expected the save to be reported"),
+            }
+            assert_eq!(std::fs::read_to_string(&out).unwrap(), expected);
+        }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn a_document_whose_file_was_cut_short_is_refused_not_shown_as_zeros() {
+        let numbers: Vec<String> = (0..40_000).map(|n| n.to_string()).collect();
+        let doc = lazy_document("lazy-cut", &format!("[{}]", numbers.join(",")));
+        let dir = temp_dir("lazy-cut");
+        let tree = doc.lazy().unwrap();
+        assert!(!tree.damaged());
+
+        // Another program cuts the file short. Reading past the cut, which used to
+        // end the whole process, is what finds it out.
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(dir.join("doc.json"))
+            .unwrap()
+            .set_len(16_384)
+            .unwrap();
+        assert_eq!(tree.bytes()[tree.len() - 1], 0);
+        assert!(tree.damaged());
+
+        // A query says so rather than answering from zeros...
+        let (items, errors) = query_items(&doc, "length");
+        assert!(items.is_empty(), "{items:?}");
+        assert!(errors[0].contains("changed on disk"), "{errors:?}");
+
+        let (commands, events) = start_worker();
+        // ... a save writes nothing...
+        let out = dir.join("out.json");
+        commands
+            .send(Command::SaveFile {
+                doc: doc.clone(),
+                node_path: None,
+                path: out.clone(),
+            })
+            .unwrap();
+        match events.recv_timeout(WAIT).unwrap() {
+            Event::SaveError(message) => assert!(message.contains("changed on disk"), "{message}"),
+            _ => panic!("expected the save to be refused"),
+        }
+        assert!(!out.exists());
+
+        // ... and neither does a copy, nor a search, put out what is not in the file.
+        commands
+            .send(Command::CopyNode {
+                target: CopyTarget::Source {
+                    doc: doc.clone(),
+                    node_path: None,
+                },
+                format: OutputFormat::Json,
+            })
+            .unwrap();
+        match events.recv_timeout(WAIT).unwrap() {
+            Event::CopyError(message) => assert!(message.contains("changed on disk"), "{message}"),
+            _ => panic!("expected the copy to be refused"),
+        }
+        commands
+            .send(Command::Search {
+                root: SearchRoot::Source(doc),
+                text: "7".to_owned(),
+                regex: false,
+                gen: 1,
+            })
+            .unwrap();
+        match events.recv_timeout(WAIT).unwrap() {
+            Event::SearchError { error, .. } => {
+                assert!(error.contains("changed on disk"), "{error}")
+            }
+            _ => panic!("expected the search to be refused"),
+        }
+    }
+
+    #[test]
+    fn a_document_kept_as_its_file_is_saved_laid_out_as_format_was_asked_to() {
+        use jsonquery_query::reformat::{self, Indent};
+
+        let text = r#"{"a": [1, "é", "\u00e9\n"], "b": {}, "c": [], "d": {"x": 1.50}}"#;
+        let doc = lazy_document("lazy-formatted", text);
+        let value: Value = serde_json::from_str(text).unwrap();
+        let out = temp_dir("lazy-formatted").join("out.json");
+        let (commands, events) = start_worker();
+        for options in [
+            reformat::Options::default(),
+            reformat::Options {
+                indent: Indent::Minified,
+                sort_keys: false,
+                ascii_only: true,
+            },
+            reformat::Options {
+                indent: Indent::Tab,
+                sort_keys: false,
+                ascii_only: false,
+            },
+        ] {
+            commands
+                .send(Command::SaveFormatted {
+                    streamed: crate::tools::jobs::Streamed {
+                        doc: doc.clone(),
+                        options,
+                    },
+                    path: out.clone(),
+                })
+                .unwrap();
+            match events.recv_timeout(WAIT).unwrap() {
+                Event::Saved(saved) => assert_eq!(saved, out),
+                _ => panic!("expected the save to be reported"),
+            }
+            assert_eq!(
+                std::fs::read_to_string(&out).unwrap(),
+                reformat::render(&value, &options),
+                "{options:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_row_of_a_document_kept_as_its_file_is_copied_as_pretty_json() {
+        let doc = lazy_document("lazy-copy", USERS);
+        let (commands, events) = start_worker();
+        commands
+            .send(Command::CopyNode {
+                target: CopyTarget::Source {
+                    doc,
+                    node_path: Some(vec![PathSegment::Key("n".into())]),
+                },
+                format: OutputFormat::Json,
+            })
+            .unwrap();
+        match events.recv_timeout(WAIT).unwrap() {
+            Event::CopyReady(text) => assert_eq!(text, "3"),
+            _ => panic!("expected the copied text"),
+        }
+    }
+
+    #[test]
+    fn a_search_of_a_document_kept_as_its_file_finds_what_one_of_a_value_does() {
+        let doc = lazy_document("lazy-search", USERS);
+        let parsed: Value = serde_json::from_str(USERS).unwrap();
+        let (commands, events) = start_worker();
+        for (text, regex) in [
+            ("al", false),
+            ("^A\\w+$", true),
+            ("tags", false),
+            ("zzz", false),
+        ] {
+            commands
+                .send(Command::Search {
+                    root: SearchRoot::Source(doc.clone()),
+                    text: text.to_owned(),
+                    regex,
+                    gen: 5,
+                })
+                .unwrap();
+            let Event::SearchDone { matches, .. } = events.recv_timeout(WAIT).unwrap() else {
+                panic!("expected the search's answer");
+            };
+            assert_eq!(
+                matches,
+                jsonquery_core::search(&parsed, text, regex).unwrap(),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_text_of_a_document_kept_as_its_file_is_cut_by_nodes_as_that_of_a_value_is() {
+        let doc = lazy_document("lazy-text", USERS);
+        let parsed: Value = serde_json::from_str(USERS).unwrap();
+        let (commands, events) = start_worker();
+        for budget in [3, 7, 1000] {
+            commands
+                .send(Command::RenderText {
+                    target: TextTarget::Source(doc.clone()),
+                    node_budget: budget,
+                    gen: 2,
+                    format: OutputFormat::Json,
+                })
+                .unwrap();
+            let Event::TextRendered {
+                text, truncated, ..
+            } = events.recv_timeout(WAIT).unwrap()
+            else {
+                panic!("expected the rendered text");
+            };
+            assert_eq!(
+                (text, truncated),
+                jsonquery_core::pretty_print_bounded(&parsed, budget),
+                "{budget} nodes"
+            );
+        }
+    }
+
+    #[test]
+    fn a_result_found_in_a_document_kept_as_its_file_is_located_in_it() {
+        let doc = lazy_document("lazy-find", USERS);
+        let (commands, events) = start_worker();
+        commands
+            .send(Command::FindInSource {
+                doc,
+                target: serde_json::json!("Alan"),
+                nth: 1,
+                rel: vec![PathSegment::Key("name".into())],
+                gen: 9,
+            })
+            .unwrap();
+        let Event::Found { matches, .. } = events.recv_timeout(WAIT).unwrap() else {
+            panic!("expected the answer");
+        };
+        assert_eq!(
+            matches.paths,
+            [vec![
+                PathSegment::Key("users".into()),
+                PathSegment::Index(1),
+                PathSegment::Key("name".into())
+            ]]
+        );
     }
 
     #[test]

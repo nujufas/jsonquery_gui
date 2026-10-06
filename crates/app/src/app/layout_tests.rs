@@ -2119,7 +2119,7 @@ fn merging_two_files_and_opening_the_result_in_the_main_window() {
     let open = center_of(&h, "Open in main window");
     h.click(open.x, open.y);
     let doc = h.app.doc.clone().expect("the merge opened");
-    assert_eq!(doc.root, serde_json::json!([1, 2, 3]));
+    assert_eq!(doc.tree(), Some(&serde_json::json!([1, 2, 3])));
     assert_eq!(doc.source.label(), "(merged from 2 files)");
     assert_eq!(h.app.source_input, "", "nothing to reload from the field");
 }
@@ -2850,7 +2850,7 @@ fn patching_a_document_and_opening_the_result_in_the_main_window() {
 
     press(&mut h, "Open in main window");
     let doc = h.app.doc.clone().expect("the result opened");
-    assert_eq!(doc.root, serde_json::json!({"a": 1, "b": 2}));
+    assert_eq!(doc.tree(), Some(&serde_json::json!({"a": 1, "b": 2})));
     assert_eq!(doc.source.label(), "(patched)");
     assert_eq!(h.app.source_input, "", "nothing to reload from the field");
     assert!(is_drawn(&h, "(patched)"), "{:?}", h.texts());
@@ -3567,4 +3567,134 @@ fn clicking_the_alert_opens_its_popup_above_the_status_bar() {
 
     h.click(alert.center().x, alert.center().y);
     assert!(text_rect(&h, "Wayland detected").is_none(), "closed again");
+}
+
+// ---- a document kept on disk ------------------------------------------------
+
+/// `text` as a document that is indexed, as one of 256 MiB or more is, and shown
+/// in the window the way a loaded one is.
+fn show_lazily(h: &mut Harness, text: &str) -> std::fs::File {
+    // A directory of its own for each: the tests run side by side, and a file that
+    // another test writes over while this one has it mapped ends the process.
+    static MADE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let dir = std::env::temp_dir().join(format!(
+        "jsonquery-layout-lazy-{}-{}",
+        std::process::id(),
+        MADE.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("doc.json");
+    std::fs::write(&path, text).unwrap();
+    // Opened to be written too, for the test that cuts the file short.
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&path)
+        .unwrap();
+    let doc = jsonquery_core::load_open_file(&file, DocumentSource::File(path), 1).unwrap();
+    assert!(doc.is_lazy());
+    // The mapping holds the file once it is unlinked.
+    let _ = std::fs::remove_dir_all(&dir);
+    h.app.document_loaded(Arc::new(doc));
+    h.settle();
+    file
+}
+
+fn thousand_numbers(count: usize) -> String {
+    format!(
+        "[{}]",
+        (0..count)
+            .map(|n| n.to_string())
+            .collect::<Vec<_>>()
+            .join(",")
+    )
+}
+
+/// The row text of a run, as the tree draws it.
+fn run_row(h: &Harness, text: &str) -> Option<egui::Rect> {
+    text_rects(&h.shapes)
+        .into_iter()
+        .find(|(t, _)| t.contains(text))
+        .map(|(_, rect)| rect)
+}
+
+#[test]
+fn a_long_list_of_a_document_kept_on_disk_is_shown_in_runs_that_open() {
+    let mut h = Harness::new();
+    show_lazily(&mut h, &thousand_numbers(2_500));
+
+    assert!(run_row(&h, "(2500 items)").is_some(), "the list itself");
+    let first = run_row(&h, "[0 … 999]").expect("the first run");
+    assert!(run_row(&h, "[1000 … 1999]").is_some(), "the second run");
+    assert!(run_row(&h, "[2000 … 2499]  (500 items)").is_some());
+    assert!(
+        h.texts().iter().all(|(t, _)| t != "7: "),
+        "none of the children until a run is opened"
+    );
+
+    // The arrow is just left of the row's text.
+    h.click(first.min.x - 8.0, first.center().y);
+    assert!(
+        h.texts().iter().any(|(t, _)| t == "7: "),
+        "the first run is open: {:?}",
+        h.texts()
+    );
+    // A thousand rows are under it now, and the other runs below them, out of sight.
+    assert!(run_row(&h, "[1000 … 1999]").is_none());
+
+    h.click(first.min.x - 8.0, first.center().y);
+    assert!(h.texts().iter().all(|(t, _)| t != "7: "), "closed again");
+    assert!(
+        run_row(&h, "[1000 … 1999]").is_some(),
+        "and the others are back"
+    );
+}
+
+#[test]
+fn a_parsed_document_shows_every_row_as_it_always_did() {
+    let mut h = Harness::new();
+    load(&mut h, &thousand_numbers(2_500));
+    assert!(run_row(&h, "[0 … 999]").is_none(), "no runs");
+    assert!(run_row(&h, "(2500 items)").is_some());
+    assert!(
+        h.texts().iter().any(|(t, _)| t == "7: "),
+        "the rows are there"
+    );
+}
+
+#[test]
+fn a_document_kept_on_disk_says_it_was_indexed() {
+    let mut h = Harness::new();
+    show_lazily(&mut h, "[1, 2, 3]");
+    assert!(
+        h.texts().iter().any(|(t, _)| t.starts_with("Indexed in ")),
+        "{:?}",
+        h.texts()
+    );
+    let mut h = Harness::new();
+    load(&mut h, "[1, 2, 3]");
+    assert!(h.texts().iter().any(|(t, _)| t.starts_with("Parsed in ")));
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn a_document_whose_file_was_cut_short_says_so_in_the_status_bar() {
+    let mut h = Harness::new();
+    let file = show_lazily(&mut h, &thousand_numbers(40_000));
+    assert!(
+        !h.texts().iter().any(|(t, _)| t.contains("changed on disk")),
+        "nothing is wrong yet"
+    );
+
+    // Another program cuts the file short; reading past the cut is what finds out.
+    file.set_len(16_384).unwrap();
+    let doc = h.app.doc.clone().unwrap();
+    let tree = doc.lazy().unwrap();
+    assert_eq!(tree.bytes()[tree.len() - 1], 0);
+    h.settle();
+    assert!(
+        h.texts().iter().any(|(t, _)| t.contains("changed on disk")),
+        "{:?}",
+        h.texts()
+    );
 }

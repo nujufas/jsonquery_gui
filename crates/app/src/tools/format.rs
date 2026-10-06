@@ -40,7 +40,8 @@ pub(super) struct Format {
 impl Default for Format {
     fn default() -> Self {
         Self {
-            input: Operand::new("Input", "format_input", "Paste JSON here, or drop a file"),
+            input: Operand::new("Input", "format_input", "Paste JSON here, or drop a file")
+                .and_documents_on_disk(),
             options: Options::default(),
             run: Run::default(),
         }
@@ -151,7 +152,10 @@ impl Format {
         }
 
         let text = self.run.outcome().map(|f| f.text.clone());
-        let too_big = text.as_ref().is_some_and(|t| t.len() > COPY_LIMIT);
+        // A document that is kept as its file is written from there as it is saved,
+        // and is no text to copy.
+        let streamed = self.run.outcome().and_then(|f| f.streamed.clone());
+        let too_big = streamed.is_some() || text.as_ref().is_some_and(|t| t.len() > COPY_LIMIT);
         let mut act = None;
         header(
             ui,
@@ -213,7 +217,10 @@ impl Format {
                     .set_file_name(name)
                     .add_filter("JSON", &["json"])
                     .save_file()?;
-                Some(Request::SaveText { text, path })
+                Some(match streamed {
+                    Some(streamed) => Request::SaveFormatted { streamed, path },
+                    None => Request::SaveText { text, path },
+                })
             }
         }
     }
@@ -233,6 +240,12 @@ impl Format {
 
 /// "3.4 KB (was 1.2 KB)".
 fn summary(formatted: &Formatted) -> String {
+    if formatted.streamed.is_some() {
+        return format!(
+            "{} — written from its file when saved",
+            human_bytes(formatted.bytes_in)
+        );
+    }
     format!(
         "{} (was {})",
         human_bytes(formatted.text.len() as u64),

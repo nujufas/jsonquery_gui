@@ -10,7 +10,7 @@ crossbeam-channel = "0.5.16"
 jaq-core = "3.1.1"
 jaq-json = "2.0.3"
 jaq-std = "3.0.3"
-jmespath = "0.5.0"
+jmespath = { version = "0.5.0", features = ["sync"] }
 # JSON Schema validation (the Tools window's "Validate schema"). Without its
 # default features it can neither fetch a `$ref` over HTTP nor read one from a
 # file: a schema pasted into a viewer should not be able to do either.

@@ -53,6 +53,10 @@ pub(super) struct Operand {
     file: Option<String>,
     /// Why the last file could not be used.
     problem: Option<String>,
+    /// Whether the page can work on a document that is kept as its file, whatever
+    /// its size (Format writes it out as it goes), and so takes the open one
+    /// when it is.
+    takes_documents_on_disk: bool,
 }
 
 impl Operand {
@@ -66,7 +70,14 @@ impl Operand {
             name: None,
             file: None,
             problem: None,
+            takes_documents_on_disk: false,
         }
+    }
+
+    /// A box for a page that can work on a document kept as its file, however big.
+    pub fn and_documents_on_disk(mut self) -> Self {
+        self.takes_documents_on_disk = true;
+        self
     }
 
     /// Nothing to work on yet.
@@ -179,7 +190,8 @@ impl Operand {
     /// refuse (see [`MAX_TOOL_BYTES`]) is not taken — the box says so and stays
     /// as it was — rather than keep a huge document alive for nothing.
     pub fn use_document(&mut self, doc: Arc<Document>) {
-        if doc.byte_len > MAX_TOOL_BYTES {
+        let kept_on_disk = self.takes_documents_on_disk && doc.is_lazy();
+        if doc.byte_len > MAX_TOOL_BYTES && !kept_on_disk {
             self.problem = Some(format!(
                 "The open document is {}, more than the {} these tools take",
                 human_bytes(doc.byte_len),
@@ -549,6 +561,29 @@ mod tests {
         o.use_document(fits);
         assert!(matches!(o.input(), Some(Input::Document(_))));
         assert!(o.problem.is_none());
+    }
+
+    #[test]
+    fn a_page_that_works_from_the_file_takes_a_document_kept_on_disk_of_any_size() {
+        let dir = temp_dir("on-disk");
+        let path = dir.join("big.json");
+        std::fs::write(&path, "[1, 2]").unwrap();
+        let file = std::fs::File::open(&path).unwrap();
+        let doc = jsonquery_core::load_open_file(&file, DocumentSource::File(path), 1).unwrap();
+        assert!(doc.is_lazy());
+        // Said to be bigger than any tool takes.
+        let mut big = doc;
+        big.byte_len = MAX_TOOL_BYTES * 10;
+        let big = Arc::new(big);
+
+        let mut other = operand();
+        other.use_document(big.clone());
+        assert!(other.problem.is_some() && other.input().is_none());
+
+        let mut format = operand().and_documents_on_disk();
+        format.use_document(big);
+        assert!(format.problem.is_none());
+        assert!(matches!(format.input(), Some(Input::Document(_))));
     }
 
     #[test]

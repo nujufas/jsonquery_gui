@@ -83,6 +83,45 @@ pub struct RowInfo {
     pub scalar_preview: Option<String>,
     /// Whether this row is a container that is currently expanded.
     pub expanded: bool,
+    /// For a row that stands for a run of the children of the container at
+    /// `path` rather than for a node (see [`GroupState`]): which run. Its
+    /// `child_count` is how many there are in it.
+    pub group: Option<GroupSpan>,
+}
+
+/// A container with more children than this is shown, when the tree is told
+/// to group, as runs of them (see [`group_size`]).
+pub const GROUP_LIMIT: usize = 1000;
+
+/// A run of the children of a container, `start..end`, shown as a row of its
+/// own: the way a list too long to scroll through is shown, as in the
+/// developer tools of a browser.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct GroupSpan {
+    pub start: usize,
+    pub end: usize,
+}
+
+/// Which runs of which containers are expanded, as [`ExpandState`] says which
+/// containers are.
+pub type GroupState = HashSet<(NodePath, GroupSpan)>;
+
+/// How many children go in a group when `count` of them are shown in groups:
+/// the largest power of [`GROUP_LIMIT`] that leaves more than one group, so that
+/// no list is more than that long and none is more than three levels deep for a
+/// billion children. `None` when there are few enough to show as they are.
+pub fn group_size(count: usize) -> Option<usize> {
+    if count <= GROUP_LIMIT {
+        return None;
+    }
+    let mut size = GROUP_LIMIT;
+    while size
+        .checked_mul(GROUP_LIMIT)
+        .is_some_and(|bigger| bigger < count)
+    {
+        size *= GROUP_LIMIT;
+    }
+    Some(size)
 }
 
 fn is_expanded(path: &NodePath, expand: &ExpandState) -> bool {
@@ -92,9 +131,30 @@ fn is_expanded(path: &NodePath, expand: &ExpandState) -> bool {
 /// Flatten `root` into the list of currently-visible rows, given `expand`.
 /// Collapsed subtrees are skipped entirely (not walked), not just hidden.
 pub fn flatten_visible<V: ValueView>(root: V, expand: &ExpandState) -> Vec<RowInfo> {
+    flatten(root, expand, None)
+}
+
+/// [`flatten_visible`] for a document that can have lists of millions: a
+/// container of more than [`GROUP_LIMIT`] children, when expanded, shows runs
+/// of them as rows of their own, which `groups` says are open. No more than
+/// a few thousand rows are made however long the lists are, and only the
+/// children of the runs that are open are looked at.
+pub fn flatten_grouped<V: ValueView>(
+    root: V,
+    expand: &ExpandState,
+    groups: &GroupState,
+) -> Vec<RowInfo> {
+    flatten(root, expand, Some(groups))
+}
+
+fn flatten<V: ValueView>(
+    root: V,
+    expand: &ExpandState,
+    groups: Option<&GroupState>,
+) -> Vec<RowInfo> {
     let mut out = Vec::new();
     let mut path = Vec::new();
-    push_node(root, None, &mut path, 0, expand, &mut out);
+    push_node(root, None, &mut path, 0, expand, groups, &mut out);
     out
 }
 
@@ -104,6 +164,7 @@ fn push_node<V: ValueView>(
     path: &mut NodePath,
     depth: usize,
     expand: &ExpandState,
+    groups: Option<&GroupState>,
     out: &mut Vec<RowInfo>,
 ) {
     let kind = value.kind();
@@ -118,18 +179,128 @@ fn push_node<V: ValueView>(
         child_count,
         scalar_preview: value.scalar_preview(),
         expanded,
+        group: None,
     });
 
     if !expanded {
         return;
     }
 
-    for (child_key, child) in value.iter_children() {
+    push_children(
+        &value,
+        kind,
+        path,
+        depth + 1,
+        0..child_count,
+        expand,
+        groups,
+        out,
+    );
+}
+
+/// The rows of children `range` of the container `value`, at `depth`: the
+/// children themselves, or, when there are more than [`GROUP_LIMIT`] of them
+/// and the tree groups, the runs they are in (and the rows of those that are
+/// open).
+#[allow(clippy::too_many_arguments)]
+fn push_children<V: ValueView>(
+    value: &V,
+    kind: ValueKind,
+    path: &mut NodePath,
+    depth: usize,
+    range: std::ops::Range<usize>,
+    expand: &ExpandState,
+    groups: Option<&GroupState>,
+    out: &mut Vec<RowInfo>,
+) {
+    let count = range.len();
+    if let (Some(open), Some(size)) = (groups, group_size(count)) {
+        let mut start = range.start;
+        while start < range.end {
+            let span = GroupSpan {
+                start,
+                end: (start + size).min(range.end),
+            };
+            let expanded = open.contains(&(path.clone(), span));
+            out.push(RowInfo {
+                path: path.clone(),
+                depth,
+                key: None,
+                kind,
+                child_count: span.end - span.start,
+                scalar_preview: None,
+                expanded,
+                group: Some(span),
+            });
+            if expanded {
+                push_children(
+                    value,
+                    kind,
+                    path,
+                    depth + 1,
+                    span.start..span.end,
+                    expand,
+                    groups,
+                    out,
+                );
+            }
+            start = span.end;
+        }
+        return;
+    }
+
+    for (child_key, child) in value.iter_children_from(range.start).take(count) {
         let child_key = child_key.expect("iter_children yields a key/index for every child");
         path.push(child_key.clone());
-        push_node(child, Some(child_key), path, depth + 1, expand, out);
+        push_node(child, Some(child_key), path, depth, expand, groups, out);
         path.pop();
     }
+}
+
+/// Which runs have to be open for the node at `path` to be shown by
+/// [`flatten_grouped`]: for each container along the way that has more than
+/// [`GROUP_LIMIT`] children, the runs, innermost last, that the child on the way
+/// is in. Empty when `path` is not in the document.
+pub fn groups_containing<V: ValueView>(
+    root: V,
+    path: &[PathSegment],
+) -> Vec<(NodePath, GroupSpan)> {
+    let mut found = Vec::new();
+    let mut cur = root;
+    for (depth, seg) in path.iter().enumerate() {
+        let count = cur.child_count();
+        let position = match seg {
+            PathSegment::Index(i) => (*i < count).then_some(*i),
+            PathSegment::Key(k) => cur
+                .iter_children()
+                .position(|(key, _)| matches!(key, Some(PathSegment::Key(ref name)) if name == k)),
+        };
+        let Some(position) = position else {
+            return Vec::new();
+        };
+        let (mut start, mut end) = (0, count);
+        while let Some(size) = group_size(end - start) {
+            let from = start + (position - start) / size * size;
+            let to = (from + size).min(end);
+            found.push((
+                path[..depth].to_vec(),
+                GroupSpan {
+                    start: from,
+                    end: to,
+                },
+            ));
+            (start, end) = (from, to);
+        }
+        let next = match seg {
+            PathSegment::Key(k) => cur.child_by_key(k),
+            PathSegment::Index(i) => cur.child_at(*i),
+        };
+        let Some(next) = next else {
+            return Vec::new();
+        };
+        cur = next;
+    }
+    found
 }
 
 /// Resolve a node path back to its value, e.g. for a "copy value" action.
@@ -355,7 +526,7 @@ fn structurally_equal<V: ValueView>(value: &V, target: &Value) -> bool {
 /// Cap on how many hits [`search`] collects, protecting memory and the
 /// results panel against a search that matches almost everything in a huge
 /// document (e.g. an empty pattern).
-const MAX_SEARCH_MATCHES: usize = 5_000;
+pub(crate) const MAX_SEARCH_MATCHES: usize = 5_000;
 
 /// Search `root` for every node whose key or scalar value contains `query`
 /// (case-insensitively), or — if `use_regex` — matches it as a regular
@@ -776,6 +947,156 @@ mod tests {
     fn search_invalid_regex_is_an_error() {
         let v = json!({"a": 1});
         assert!(search(&v, "(unclosed", true).is_err());
+    }
+
+    fn span(start: usize, end: usize) -> GroupSpan {
+        GroupSpan { start, end }
+    }
+
+    fn nulls(n: usize) -> Value {
+        Value::Array(vec![Value::Null; n])
+    }
+
+    #[test]
+    fn lists_are_grouped_by_powers_of_the_limit() {
+        for (count, size) in [
+            (0, None),
+            (1, None),
+            (1_000, None),
+            (1_001, Some(1_000)),
+            (999_999, Some(1_000)),
+            (1_000_000, Some(1_000)),
+            (1_000_001, Some(1_000_000)),
+            (1_000_000_000, Some(1_000_000)),
+            (1_000_000_001, Some(1_000_000_000)),
+            (usize::MAX, Some(1_000_000_000_000_000_000)),
+        ] {
+            assert_eq!(group_size(count), size, "{count} children");
+        }
+    }
+
+    #[test]
+    fn a_long_list_is_shown_as_runs_of_it() {
+        let v = nulls(2_500);
+        let mut expand = new_expanded_at_root();
+        let groups = GroupState::new();
+
+        let rows = flatten_grouped(&v, &expand, &groups);
+        assert_eq!(rows.len(), 4);
+        assert!(rows[0].group.is_none() && rows[0].expanded);
+        let spans: Vec<_> = rows[1..].iter().map(|r| r.group.unwrap()).collect();
+        assert_eq!(spans, [span(0, 1000), span(1000, 2000), span(2000, 2500)]);
+        assert_eq!(
+            rows[1..].iter().map(|r| r.child_count).collect::<Vec<_>>(),
+            [1000, 1000, 500]
+        );
+        assert!(rows[1..].iter().all(|r| r.depth == 1 && !r.expanded));
+        // A run is at the container's path, and says nothing of any one child.
+        assert!(rows[1..]
+            .iter()
+            .all(|r| r.path.is_empty() && r.key.is_none()));
+
+        // Open the last run: its children are under it, with their own paths.
+        let mut open = GroupState::new();
+        open.insert((Vec::new(), span(2000, 2500)));
+        let rows = flatten_grouped(&v, &expand, &open);
+        assert_eq!(rows.len(), 4 + 500);
+        assert!(rows[3].expanded);
+        assert_eq!(rows[4].path, vec![PathSegment::Index(2000)]);
+        assert_eq!(rows[4].depth, 2);
+        assert_eq!(rows[503].path, vec![PathSegment::Index(2499)]);
+
+        // Not told to group, a tree shows all of them, as it always did.
+        expand.insert(Vec::new());
+        assert_eq!(flatten_visible(&v, &expand).len(), 2_501);
+        // And a list that is not long shows as it is, whatever it is told.
+        assert_eq!(flatten_grouped(&nulls(1000), &expand, &open).len(), 1_001);
+    }
+
+    #[test]
+    fn a_very_long_list_is_in_runs_of_runs() {
+        let v = nulls(1_200_000);
+        let expand = new_expanded_at_root();
+        let mut open = GroupState::new();
+        let rows = flatten_grouped(&v, &expand, &open);
+        let spans: Vec<_> = rows[1..].iter().map(|r| r.group.unwrap()).collect();
+        assert_eq!(spans, [span(0, 1_000_000), span(1_000_000, 1_200_000)]);
+
+        open.insert((Vec::new(), span(0, 1_000_000)));
+        let rows = flatten_grouped(&v, &expand, &open);
+        // The root, the run that is open, the 1000 runs in it, the other run.
+        assert_eq!(rows.len(), 1 + 1 + 1000 + 1);
+        assert_eq!(rows[7].group, Some(span(5_000, 6_000)));
+        assert_eq!(rows[7].depth, 2);
+
+        open.insert((Vec::new(), span(5_000, 6_000)));
+        let rows = flatten_grouped(&v, &expand, &open);
+        assert_eq!(rows.len(), 1 + 1 + 1000 + 1000 + 1);
+        assert_eq!(rows[8].path, vec![PathSegment::Index(5_000)]);
+        assert_eq!(rows[8].depth, 3);
+        assert_eq!(rows[1007].path, vec![PathSegment::Index(5_999)]);
+        assert_eq!(rows[1008].group, Some(span(6_000, 7_000)));
+    }
+
+    #[test]
+    fn the_children_of_a_long_object_are_in_runs_too() {
+        let object: serde_json::Map<String, Value> =
+            (0..1_500).map(|i| (format!("k{i}"), json!(i))).collect();
+        let v = Value::Object(object);
+        let expand = new_expanded_at_root();
+        let mut open = GroupState::new();
+        open.insert((Vec::new(), span(1000, 1500)));
+        let rows = flatten_grouped(&v, &expand, &open);
+        assert_eq!(rows.len(), 1 + 2 + 500);
+        assert_eq!(rows[3].key, Some(PathSegment::Key("k1000".into())));
+        assert_eq!(rows[3].scalar_preview.as_deref(), Some("1000"));
+        assert_eq!(rows[502].key, Some(PathSegment::Key("k1499".into())));
+    }
+
+    #[test]
+    fn the_runs_to_open_to_reach_a_node_are_found() {
+        let v = nulls(1_300_000);
+        assert_eq!(
+            groups_containing(&v, &[PathSegment::Index(1_234_567)]),
+            vec![
+                (vec![], span(1_000_000, 1_300_000)),
+                (vec![], span(1_234_000, 1_235_000)),
+            ]
+        );
+        assert_eq!(
+            groups_containing(&v, &[PathSegment::Index(5)]),
+            vec![(vec![], span(0, 1_000_000)), (vec![], span(0, 1_000))]
+        );
+        assert!(groups_containing(&v, &[PathSegment::Index(1_300_000)]).is_empty());
+
+        let object: serde_json::Map<String, Value> =
+            (0..1_500).map(|i| (format!("k{i}"), json!(i))).collect();
+        let doc = json!({"small": [1, 2], "big": Value::Object(object)});
+        let path = vec![
+            PathSegment::Key("big".into()),
+            PathSegment::Key("k1200".into()),
+        ];
+        assert_eq!(
+            groups_containing(&doc, &path),
+            vec![(vec![PathSegment::Key("big".into())], span(1000, 1500))]
+        );
+        // Nothing to open on the way to a node in a short container, or to one
+        // that is not there.
+        assert!(groups_containing(
+            &doc,
+            &[PathSegment::Key("small".into()), PathSegment::Index(1)]
+        )
+        .is_empty());
+        assert!(groups_containing(&doc, &[PathSegment::Key("nope".into())]).is_empty());
+        assert!(groups_containing(&doc, &[]).is_empty());
+
+        // And the node is in the rows once those are open and its ancestors are.
+        let mut expand = new_expanded_at_root();
+        expand.insert(vec![PathSegment::Key("big".into())]);
+        let mut open = GroupState::new();
+        open.extend(groups_containing(&doc, &path));
+        let rows = flatten_grouped(&doc, &expand, &open);
+        assert!(rows.iter().any(|r| r.path == path && r.group.is_none()));
     }
 
     #[test]

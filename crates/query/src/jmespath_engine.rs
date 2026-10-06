@@ -17,7 +17,6 @@
 //! `Value`'s own variants (as `Variable::Number` also wraps a plain
 //! `serde_json::Number`) sidesteps that Serialize round trip entirely.
 
-use std::rc::Rc;
 use std::sync::atomic::AtomicBool;
 
 use jmespath::{JmespathError, Rcvar, ToJmespath, Variable};
@@ -34,18 +33,20 @@ impl ToJmespath for RawVariable {
     }
 }
 
-fn value_to_variable(value: &Value) -> Variable {
+pub(crate) fn value_to_variable(value: &Value) -> Variable {
     match value {
         Value::Null => Variable::Null,
         Value::Bool(b) => Variable::Bool(*b),
         Value::Number(n) => Variable::Number(n.clone()),
         Value::String(s) => Variable::String(s.clone()),
-        Value::Array(arr) => {
-            Variable::Array(arr.iter().map(|v| Rc::new(value_to_variable(v))).collect())
-        }
+        Value::Array(arr) => Variable::Array(
+            arr.iter()
+                .map(|v| Rcvar::new(value_to_variable(v)))
+                .collect(),
+        ),
         Value::Object(map) => Variable::Object(
             map.iter()
-                .map(|(k, v)| (k.clone(), Rc::new(value_to_variable(v))))
+                .map(|(k, v)| (k.clone(), Rcvar::new(value_to_variable(v))))
                 .collect(),
         ),
     }
@@ -66,7 +67,7 @@ impl QueryEngine for JmesPathEngine {
         on_event: &mut dyn FnMut(QueryEvent),
     ) -> Result<usize, QueryError> {
         let expr = jmespath::compile(query_src).map_err(|e| QueryError::Parse(e.to_string()))?;
-        let data = RawVariable(Rc::new(value_to_variable(input)));
+        let data = RawVariable(Rcvar::new(value_to_variable(input)));
         let result = expr
             .search(data)
             .map_err(|e| QueryError::Engine(e.to_string()))?;

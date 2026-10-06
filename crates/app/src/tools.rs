@@ -83,6 +83,12 @@ pub enum Request {
     Save { doc: Arc<Document>, path: PathBuf },
     /// Write the text to `path`.
     SaveText { text: Arc<str>, path: PathBuf },
+    /// Write a document that is kept as its file to `path`, laid out as Format was
+    /// asked to, a piece at a time.
+    SaveFormatted {
+        streamed: jobs::Streamed,
+        path: PathBuf,
+    },
     /// Show the value at this JSON Pointer in the document open in the main
     /// window.
     Show(String),
@@ -381,7 +387,12 @@ impl Tools {
         };
 
         // A save the window asked for: remember which, to say how it went.
-        if let Some(Request::Save { path, .. } | Request::SaveText { path, .. }) = &request {
+        if let Some(
+            Request::Save { path, .. }
+            | Request::SaveText { path, .. }
+            | Request::SaveFormatted { path, .. },
+        ) = &request
+        {
             self.shared.saving = Some((self.tool, path.clone()));
             self.shared.say(self.tool, "Saving…", false);
         }
