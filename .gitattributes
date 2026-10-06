@@ -1,0 +1,5 @@
+# Shell scripts are run by bash, and scripts/jsonquery-x11.sh is also built into
+# the program (include_str!) and checked by its tests: LF on every platform,
+# whatever core.autocrlf says. (The Windows runners of the CI have it on, and
+# checked the script out with CRLF.)
+*.sh text eol=lf

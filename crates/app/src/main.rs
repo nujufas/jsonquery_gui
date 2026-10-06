@@ -12,6 +12,8 @@ mod tools;
 mod tree_view;
 mod tutorial;
 mod worker;
+mod x11_alert;
+mod x11_launcher;
 
 /// Must match the AppImage's `.desktop` file (`StartupWMClass=jsonquery_gui`)
 /// so window managers associate the running window with the launcher icon —

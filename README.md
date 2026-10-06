@@ -271,7 +271,11 @@ the regular **jsonquery**: click that one, and drop files on its window.
 - **Everything else** (the tar.gz, the snap, the Arch package, an older
   AppImage): [`scripts/jsonquery-x11.sh`](scripts/jsonquery-x11.sh) adds the
   entry (and, if you ask, a shortcut on the Desktop) with one command. The
-  tar.gz has the script inside; for the others download it first:
+  tar.gz has the script inside. For the others, the program carries it: when it
+  is running on native Wayland, a **⚠** appears at the bottom right, next to the
+  **ℹ**. Click it, then **Download jsonquery-x11.sh**, and choose where to save
+  it; the popup then shows the command to run, with a **Copy command** button.
+  Or download it yourself:
 
 ```sh
 curl -fLO https://raw.githubusercontent.com/nujufas/jsonquery_gui/master/scripts/jsonquery-x11.sh

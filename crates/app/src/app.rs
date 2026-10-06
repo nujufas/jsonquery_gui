@@ -20,6 +20,7 @@ use crate::tools::{self, Tools};
 use crate::tree_view::{RowAction, TreeView};
 use crate::tutorial::{LoadRequest, Tutorial};
 use crate::worker::{self, Command, CopyTarget, Event, SearchRoot};
+use crate::x11_alert::X11Alert;
 
 mod satellites;
 
@@ -142,6 +143,9 @@ pub struct App {
     /// The (i) info window (also a second native window) — license, source,
     /// issues/contact, privacy and known limitations.
     info_window: InfoWindow,
+    /// The ⚠ beside the (i), on a Wayland desktop: files can't be dropped on
+    /// the window there, and what to do about it (`x11_alert.rs`).
+    x11_alert: X11Alert,
     /// How long each of those windows that was closed has waited for the main
     /// window to drop it (`satellites.rs`).
     leaving: Leaving,
@@ -406,6 +410,12 @@ impl App {
             tutorial: Tutorial::default(),
             tools: Tools::default(),
             info_window: InfoWindow::default(),
+            // The layout tests must not depend on the session they run from.
+            x11_alert: if cfg!(test) {
+                X11Alert::default()
+            } else {
+                X11Alert::detect()
+            },
             leaving: Leaving::default(),
             dock: Dock::default(),
             raise_window: None,
@@ -2278,13 +2288,21 @@ impl App {
         // `self.expand_results()`), which would otherwise conflict with the
         // second closure's separate `&mut self.info_window` borrow — taken
         // out for the duration and put back afterwards.
+        //
+        // The right side is laid out right to left: the (i) first, so that it
+        // stays in the corner, and on native Wayland the alert (⚠) beside it.
         let mut info_window = std::mem::take(&mut self.info_window);
+        let mut x11_alert = std::mem::take(&mut self.x11_alert);
         egui::Sides::new().shrink_right().show(
             ui,
             |ui| self.status_bar_text(ui),
-            |ui| info_button(ui, &mut info_window),
+            |ui| {
+                info_button(ui, &mut info_window);
+                x11_alert.ui(ui);
+            },
         );
         self.info_window = info_window;
+        self.x11_alert = x11_alert;
     }
 
     fn status_bar_text(&mut self, ui: &mut egui::Ui) {

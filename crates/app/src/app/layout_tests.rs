@@ -3499,3 +3499,72 @@ fn saving_after_expanding_writes_the_rows_in_the_queries_format() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// The ⚠ beside the (i), on a Wayland desktop (`x11_alert.rs` tests the widget on
+// its own). The tests never read the session they run from: the app starts with
+// the alert hidden and these turn it on.
+
+fn text_rect(h: &Harness, wanted: &str) -> Option<egui::Rect> {
+    text_rects(&h.shapes)
+        .into_iter()
+        .find(|(t, _)| t == wanted)
+        .map(|(_, rect)| rect)
+}
+
+#[test]
+fn on_wayland_the_alert_sits_beside_the_info_button_and_moves_nothing() {
+    let mut h = Harness::new();
+    let bar = h.panel("status_bar").expect("the status bar");
+    let info = text_rect(&h, "ℹ").expect("the (i) button");
+    assert!(
+        text_rect(&h, "⚠").is_none(),
+        "no alert unless the desktop is Wayland"
+    );
+
+    h.app.x11_alert = X11Alert::new(true);
+    h.settle();
+    let alert = text_rect(&h, "⚠").expect("the alert");
+    assert!(
+        (alert.center().y - info.center().y).abs() < 2.0,
+        "on the (i)'s row: {alert:?} vs {info:?}"
+    );
+    assert!(alert.max.x < info.min.x, "to the left of it: {alert:?}");
+    assert!(
+        info.min.x - alert.max.x < 24.0,
+        "next to it, not across the bar: {alert:?} vs {info:?}"
+    );
+    assert_eq!(
+        text_rect(&h, "ℹ"),
+        Some(info),
+        "the (i) stays in the corner"
+    );
+    assert_eq!(h.panel("status_bar"), Some(bar), "the bar is as it was");
+}
+
+#[test]
+fn clicking_the_alert_opens_its_popup_above_the_status_bar() {
+    let mut h = Harness::new();
+    h.app.x11_alert = X11Alert::new(true);
+    h.settle();
+    let bar = h.panel("status_bar").expect("the status bar");
+    let alert = text_rect(&h, "⚠").expect("the alert");
+    assert!(
+        text_rect(&h, "Wayland detected").is_none(),
+        "closed at first"
+    );
+
+    h.click(alert.center().x, alert.center().y);
+    let heading = text_rect(&h, "Wayland detected").expect("the popup is open");
+    assert!(heading.max.y <= bar.min.y, "above the bar: {heading:?}");
+    for (text, rect) in text_rects(&h.shapes) {
+        if text.contains("Wayland detected") || text.contains("Download") {
+            assert!(
+                rect.max.x <= SCREEN.x && rect.min.x >= 0.0,
+                "{text:?} is inside the window: {rect:?}"
+            );
+        }
+    }
+
+    h.click(alert.center().x, alert.center().y);
+    assert!(text_rect(&h, "Wayland detected").is_none(), "closed again");
+}
