@@ -124,7 +124,7 @@ impl Validate {
 
     fn inputs_pane(&mut self, ui: &mut egui::Ui, env: &Env) {
         ui.add_enabled_ui(!self.run.running(), |ui| {
-            if stacked(ui, env.open_doc, &mut self.document, &mut self.schema) {
+            if stacked(ui, env, &mut self.document, &mut self.schema) {
                 self.changed();
             }
         });

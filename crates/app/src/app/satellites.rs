@@ -1,8 +1,8 @@
 //! The windows besides the main window and the panes' windows: the Tools
-//! window, the tutorial and About.
+//! window, the tutorial, About and the Settings.
 //!
 //! Each is a viewport of its own, with its state in the app (`Tools`,
-//! `Tutorial`, `InfoWindow`). They are drawn the way a pane's window is
+//! `Tutorial`, `InfoWindow`, `SettingsWindow`). They are drawn the way a pane's window is
 //! (`App::show_popped_panes` has the reasons): on a desktop each is a
 //! *deferred* viewport, which eframe redraws by itself and whose frame calls
 //! back into the app through its lock (`Shared`), so that it goes on working
@@ -23,17 +23,23 @@ pub(super) enum Satellite {
     Tools,
     Tutorial,
     About,
+    Settings,
 }
 
 impl Satellite {
-    pub(super) const ALL: [Satellite; 3] =
-        [Satellite::Tools, Satellite::Tutorial, Satellite::About];
+    pub(super) const ALL: [Satellite; 4] = [
+        Satellite::Tools,
+        Satellite::Tutorial,
+        Satellite::About,
+        Satellite::Settings,
+    ];
 
     fn index(self) -> usize {
         match self {
             Satellite::Tools => 0,
             Satellite::Tutorial => 1,
             Satellite::About => 2,
+            Satellite::Settings => 3,
         }
     }
 
@@ -43,6 +49,7 @@ impl Satellite {
             Satellite::Tools => tools::viewport_id(),
             Satellite::Tutorial => tutorial::viewport_id(),
             Satellite::About => info_viewport_id(),
+            Satellite::Settings => crate::settings_window::viewport_id(),
         }
     }
 }
@@ -51,7 +58,7 @@ impl Satellite {
 /// window to drop it: nothing but the main window's next frame ends a window
 /// (it stops showing it).
 #[derive(Default)]
-pub(super) struct Leaving([Option<f64>; 3]);
+pub(super) struct Leaving([Option<f64>; Satellite::ALL.len()]);
 
 impl Leaving {
     /// How long (in seconds, `now` being egui's clock) the closed window has
@@ -72,6 +79,7 @@ impl App {
             Satellite::Tools => self.tools.is_open(),
             Satellite::Tutorial => self.tutorial.is_open(),
             Satellite::About => self.info_window.is_open(),
+            Satellite::Settings => self.settings_window.is_open(),
         }
     }
 
@@ -80,6 +88,12 @@ impl App {
             Satellite::Tools => self.tools.close(),
             Satellite::Tutorial => self.tutorial.close(),
             Satellite::About => self.info_window.close(),
+            // What was typed in a box, and is a limit, is kept.
+            Satellite::Settings => {
+                if let Some(settings) = self.settings_window.close(&self.settings) {
+                    self.apply_settings(settings);
+                }
+            }
         }
     }
 
@@ -88,6 +102,7 @@ impl App {
             Satellite::Tools => self.tools.builder(),
             Satellite::Tutorial => self.tutorial.builder(),
             Satellite::About => self.info_window.builder(),
+            Satellite::Settings => self.settings_window.builder(),
         }
     }
 
@@ -107,6 +122,9 @@ impl App {
     ) {
         let Some(shared) = shared.filter(|_| !ctx.embed_viewports()) else {
             self.info_window.show(ctx);
+            if let Some(settings) = self.settings_window.show(ctx, &self.settings, &self.store) {
+                self.apply_settings(settings);
+            }
             if let Some(request) = self.tutorial.show(ctx) {
                 self.apply_tutorial_request(request);
             }
@@ -173,6 +191,14 @@ impl App {
                 }
             }
             Satellite::About => info_window_frame(ui),
+            Satellite::Settings => {
+                if let Some(settings) =
+                    self.settings_window
+                        .window_frame(ui, &self.settings, &self.store)
+                {
+                    self.apply_settings(settings);
+                }
+            }
         }
 
         if clicked {
@@ -236,6 +262,6 @@ mod tests {
     fn every_window_is_in_the_list_once() {
         let mut indexes: Vec<_> = Satellite::ALL.iter().map(|w| w.index()).collect();
         indexes.sort_unstable();
-        assert_eq!(indexes, [0, 1, 2]);
+        assert_eq!(indexes, [0, 1, 2, 3]);
     }
 }

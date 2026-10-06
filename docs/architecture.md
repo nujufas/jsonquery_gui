@@ -24,7 +24,8 @@ UI thread (egui/eframe):
 ## 2. File ingest
 
 A file opened from disk comes in one of two ways, by its size
-(`jsonquery_core::LAZY_THRESHOLD`, 256 MiB). A smaller one is read into memory
+(`jsonquery_core::LAZY_THRESHOLD`, 256 MiB, which is where the user's setting
+starts: `LoadLimits`, from the app's [settings](settings.md)). A smaller one is read into memory
 and parsed into an owned `serde_json::Value` with the `arbitrary_precision`
 feature enabled — a 64-bit snowflake-style ID or a Postgres bigint survives a
 query byte-for-byte instead of silently rounding through an `f64` the way naive
@@ -269,6 +270,42 @@ jsonquery/
 ├── docs/                     # this site
 └── benches/                  # criterion benchmarks against synthetic large files
 ```
+
+## 9. Settings
+
+What the user can set is `settings.rs` in the app crate, and how it gets to where
+it is used:
+
+- **`settings/limits.rs`** — the limits on file sizes: `Limit` (the nine of them,
+  with their name in the file, label and explanation, which the window shows as
+  a tooltip; `Limit::MAIN` is the one it shows at first, the others are
+  `is_advanced`), `FileLimits` (their values;
+  the defaults are taken from where each was defined, `jsonquery_core::LoadLimits`
+  and `jsonquery_query::lazy::Limits`, so that there is one place a default is
+  changed), and how a size is typed and written (`parse_size`, `size_text`).
+- **`settings/interface.rs`** — what the window looks like: the theme, whether the
+  query box suggests, the size of the window and of the query panel and Source.
+- **`settings.rs`** — `Settings` (both), and `Store`, which reads and writes the
+  one file, `~/.jsonquery/settings.json` (`JSONQUERY_HOME`), writing only what
+  differs from the defaults, and never failing the app: what cannot be read or
+  used is said (`Store::notes`) and left as the default; what cannot be written is
+  said (`Store::error`) and the settings last for the run.
+- **`settings_window.rs`** — the Settings window (a satellite window, like About):
+  the one main limit, and the others under a collapsing *Advanced*. It is small
+  and says little (tooltips), and is made as tall as the Advanced limits need
+  when they are opened, and as it was when they are closed (a `ViewportCommand`
+  sent once they have slid fully open or shut; a window embedded in the main
+  one, where there is no real window to resize, opens tall enough for them).
+
+`main` reads the settings before the window opens, which is opened as it was left
+(`main_window`), and hands them to the app. A limit reaches the code that holds
+to it as a parameter and not a global: the worker thread starts with the limits
+and takes new ones by `Command::UseLimits` (it loads files, downloads, merges,
+runs tool jobs, copies and runs queries by them: `load_with`, `download`,
+`merge_files`, `jobs::run`, `root_text`, `lazy::run_with`); the Tools window has
+the one it needs on the UI thread (`Tools::use_limit`). The interface is watched
+by `App::note_interface` each frame, and written once it has stopped changing for
+0.6 s, and from `eframe::App::on_exit`.
 
 ## Scaling beyond in-memory
 

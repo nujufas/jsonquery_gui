@@ -4,8 +4,8 @@
 //! ([`run`]) and answers with an [`Outcome`]. None of it touches the UI.
 //!
 //! Like Merge, these work in memory and are for documents that are not very
-//! large: a job is refused when what it is given adds up to more than
-//! [`MAX_TOOL_BYTES`].
+//! large: a job is refused when what it is given adds up to more than what the
+//! user lets the tools take (`FileLimits::tools`, 128 MB unless they changed it).
 
 use std::ops::Range;
 use std::path::PathBuf;
@@ -21,9 +21,7 @@ use jsonquery_query::{patch, schema};
 use serde_json::Value;
 
 use crate::app::human_bytes;
-
-/// The most a job is given to work on, all its documents together.
-pub const MAX_TOOL_BYTES: u64 = 128 * 1024 * 1024;
+use crate::settings::FileLimits;
 
 /// How much of a long text a preview holds: this many lines, and this many
 /// bytes, whichever comes first.
@@ -42,17 +40,19 @@ pub enum Input {
 }
 
 impl Input {
-    /// The document, if this is one that is kept as its file (see
-    /// `jsonquery_core::LAZY_THRESHOLD`): the open one, or a file that is that big.
-    fn kept_on_disk(&self) -> anyhow::Result<Option<Arc<Document>>> {
+    /// The document, if this is one that is kept as its file (from the size the
+    /// user keeps files on disk from, `limits`): the open one, or a file that is
+    /// that big.
+    fn kept_on_disk(&self, limits: &FileLimits) -> anyhow::Result<Option<Arc<Document>>> {
         match self {
             Input::Text(_) => Ok(None),
             Input::Document(doc) => Ok(doc.is_lazy().then(|| doc.clone())),
             Input::File(path) => {
-                if self.size()? < jsonquery_core::LAZY_THRESHOLD {
+                if self.size()? < limits.keep_on_disk() {
                     return Ok(None);
                 }
-                let doc = jsonquery_core::load(path).with_context(|| path.display().to_string())?;
+                let doc = jsonquery_core::load_with(path, limits.load())
+                    .with_context(|| path.display().to_string())?;
                 Ok(doc.is_lazy().then(|| Arc::new(doc)))
             }
         }
@@ -68,11 +68,11 @@ impl Input {
         })
     }
 
-    fn load(&self) -> anyhow::Result<Loaded> {
+    fn load(&self, limits: &FileLimits) -> anyhow::Result<Loaded> {
         match self {
             Input::Text(text) => {
                 let doc = jsonquery_core::load_text(text)?;
-                let (root, read) = in_memory(doc)?;
+                let (root, read) = in_memory(doc, limits)?;
                 Ok(Loaded {
                     held: Held::Owned(root),
                     bytes: text.len() as u64,
@@ -80,9 +80,13 @@ impl Input {
                 })
             }
             Input::File(path) => {
-                let doc = jsonquery_core::load(path).with_context(|| path.display().to_string())?;
+                // Parsed, whatever the tools are allowed to take, rather than kept
+                // on disk from a lower size than that.
+                let doc = jsonquery_core::load_with(path, limits.load_for_tools())
+                    .with_context(|| path.display().to_string())?;
                 let bytes = doc.byte_len;
-                let (root, read) = in_memory(doc).with_context(|| path.display().to_string())?;
+                let (root, read) =
+                    in_memory(doc, limits).with_context(|| path.display().to_string())?;
                 Ok(Loaded {
                     held: Held::Owned(root),
                     bytes,
@@ -91,7 +95,7 @@ impl Input {
             }
             Input::Document(doc) => {
                 if doc.is_lazy() {
-                    return Err(too_big_to_work_on(doc.byte_len));
+                    return Err(too_big_to_work_on(doc.byte_len, limits));
                 }
                 Ok(Loaded {
                     held: Held::Shared(doc.clone()),
@@ -106,17 +110,28 @@ impl Input {
 /// The value of a document that was loaded for a job, which has to be the
 /// whole of it in memory: one too big for that (it is kept as its file, read as
 /// it is looked at) is not something these can work on.
-fn in_memory(doc: Document) -> anyhow::Result<(Value, Duration)> {
+fn in_memory(doc: Document, limits: &FileLimits) -> anyhow::Result<(Value, Duration)> {
     let byte_len = doc.byte_len;
     match doc.content {
         Content::Tree(root) => Ok((root, doc.parse_time)),
-        Content::Lazy(_) => Err(too_big_to_work_on(byte_len)),
+        Content::Lazy(_) => Err(too_big_to_work_on(byte_len, limits)),
     }
 }
 
-fn too_big_to_work_on(bytes: u64) -> anyhow::Error {
+fn too_big_to_work_on(bytes: u64, limits: &FileLimits) -> anyhow::Error {
+    // A document kept on disk is over what the user keeps files on disk from;
+    // where that is lower than what the tools take, it is the other limit that
+    // is in the way, and the one to say.
+    let why = if bytes <= limits.tools() {
+        format!(
+            " (it is kept on disk, as a file of {} or more is: see Settings)",
+            human_bytes(limits.keep_on_disk())
+        )
+    } else {
+        String::new()
+    };
     anyhow::anyhow!(
-        "that is {}, too big for this: it works on the whole document in memory",
+        "that is {}, too big for this: it works on the whole document in memory{why}",
         human_bytes(bytes)
     )
 }
@@ -300,21 +315,21 @@ pub struct Validated {
 
 /// Run `job`. The error is text for the page to show; `"cancelled"` when
 /// `cancel` was set.
-pub fn run(job: Job, cancel: &AtomicBool) -> Result<Outcome, String> {
-    run_job(job, cancel).map_err(|e| format!("{e:#}"))
+pub fn run(job: Job, cancel: &AtomicBool, limits: &FileLimits) -> Result<Outcome, String> {
+    run_job(job, cancel, limits).map_err(|e| format!("{e:#}"))
 }
 
-fn run_job(job: Job, cancel: &AtomicBool) -> anyhow::Result<Outcome> {
+fn run_job(job: Job, cancel: &AtomicBool, limits: &FileLimits) -> anyhow::Result<Outcome> {
     let start = Instant::now();
     match job {
         Job::Format { input, options } => {
             // A document too big to be text in memory is written from its file when it
             // is saved; what is made now is the beginning of it.
-            if let Some(doc) = input.kept_on_disk().context("Input")? {
+            if let Some(doc) = input.kept_on_disk(limits).context("Input")? {
                 return format_from_disk(doc, options, start, cancel);
             }
-            check_size(&[&input])?;
-            let loaded = input.load().context("Input")?;
+            check_size(&[&input], limits)?;
+            let loaded = input.load(limits).context("Input")?;
             stop_if_cancelled(cancel)?;
             let text = reformat::render(loaded.held.value(), &options);
             Ok(Outcome::Format(Formatted {
@@ -326,9 +341,9 @@ fn run_job(job: Job, cancel: &AtomicBool) -> anyhow::Result<Outcome> {
             }))
         }
         Job::Diff { left, right, take } => {
-            check_size(&[&left, &right])?;
-            let first = left.load().context("Left")?;
-            let second = right.load().context("Right")?;
+            check_size(&[&left, &right], limits)?;
+            let first = left.load(limits).context("Left")?;
+            let second = right.load(limits).context("Right")?;
             stop_if_cancelled(cancel)?;
             let merged: Value;
             let (mut before, mut after) = (first.held.value(), second.held.value());
@@ -341,7 +356,7 @@ fn run_job(job: Job, cancel: &AtomicBool) -> anyhow::Result<Outcome> {
                     Side::Left => second.bytes,
                     Side::Right => first.bytes,
                 };
-                if text.len() as u64 + kept > MAX_TOOL_BYTES {
+                if text.len() as u64 + kept > limits.tools() {
                     bail!(
                         "the {} document would be {}, which with the other is over the {} \
                          these tools can take — they work in memory",
@@ -350,7 +365,7 @@ fn run_job(job: Job, cancel: &AtomicBool) -> anyhow::Result<Outcome> {
                             Side::Right => "Right",
                         },
                         human_bytes(text.len() as u64),
-                        human_bytes(MAX_TOOL_BYTES)
+                        human_bytes(limits.tools())
                     );
                 }
                 match take.into {
@@ -384,9 +399,9 @@ fn run_job(job: Job, cancel: &AtomicBool) -> anyhow::Result<Outcome> {
             patch: patch_input,
             merge_patch,
         } => {
-            check_size(&[&document, &patch_input])?;
-            let loaded = document.load().context("Document")?;
-            let patch_loaded = patch_input.load().context("Patch")?;
+            check_size(&[&document, &patch_input], limits)?;
+            let loaded = document.load(limits).context("Document")?;
+            let patch_loaded = patch_input.load(limits).context("Patch")?;
             stop_if_cancelled(cancel)?;
             let read = loaded.read;
             let patch_value = patch_loaded.held.value();
@@ -425,9 +440,9 @@ fn run_job(job: Job, cancel: &AtomicBool) -> anyhow::Result<Outcome> {
             schema: schema_input,
             check_formats,
         } => {
-            check_size(&[&document, &schema_input])?;
-            let loaded = document.load().context("Document")?;
-            let schema_loaded = schema_input.load().context("Schema")?;
+            check_size(&[&document, &schema_input], limits)?;
+            let loaded = document.load(limits).context("Document")?;
+            let schema_loaded = schema_input.load(limits).context("Schema")?;
             stop_if_cancelled(cancel)?;
             let report = schema::validate(
                 schema_loaded.held.value(),
@@ -516,16 +531,16 @@ fn format_from_disk(
     }))
 }
 
-fn check_size(inputs: &[&Input]) -> anyhow::Result<()> {
+fn check_size(inputs: &[&Input], limits: &FileLimits) -> anyhow::Result<()> {
     let mut total = 0u64;
     for input in inputs {
-        total += input.size()?;
+        total = total.saturating_add(input.size()?);
     }
-    if total > MAX_TOOL_BYTES {
+    if total > limits.tools() {
         bail!(
             "that is {}, over the {} these tools can take — they work in memory",
             human_bytes(total),
-            human_bytes(MAX_TOOL_BYTES)
+            human_bytes(limits.tools())
         );
     }
     Ok(())
@@ -581,13 +596,23 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::scratch_dir::{ScratchDir, ScratchFile};
 
     fn text(s: &str) -> Input {
         Input::Text(s.to_owned())
     }
 
     fn go(job: Job) -> Result<Outcome, String> {
-        run(job, &AtomicBool::new(false))
+        go_with(job, &FileLimits::default())
+    }
+
+    fn go_with(job: Job, limits: &FileLimits) -> Result<Outcome, String> {
+        run(job, &AtomicBool::new(false), limits)
+    }
+
+    /// What the tools take by default.
+    fn tool_bytes() -> u64 {
+        FileLimits::default().tools()
     }
 
     fn formatted(job: Job) -> Formatted {
@@ -600,7 +625,8 @@ mod tests {
 
     /// A document that is indexed rather than parsed, as one of 256 MiB or more is.
     fn lazy_document(name: &str) -> Arc<Document> {
-        let path = temp_dir(name).join("big.json");
+        let dir = temp_dir(name);
+        let path = dir.join("big.json");
         std::fs::write(&path, "[1, 2, 3]").unwrap();
         let file = std::fs::File::open(&path).unwrap();
         let doc = jsonquery_core::load_open_file(&file, DocumentSource::File(path), 1).unwrap();
@@ -612,7 +638,7 @@ mod tests {
     fn a_document_kept_on_disk_is_too_big_for_a_tool_and_says_so() {
         // Every tool works on the whole document in memory.
         let err = Input::Document(lazy_document("lazy-input"))
-            .load()
+            .load(&FileLimits::default())
             .err()
             .expect("refused");
         let message = format!("{err:#}");
@@ -630,6 +656,116 @@ mod tests {
         .err()
         .expect("refused");
         assert!(err.contains("too big for this"), "{err}");
+    }
+
+    /// The default limits with these set.
+    fn limits_with(set: &[(crate::settings::Limit, u64)]) -> FileLimits {
+        let mut limits = FileLimits::default();
+        for (limit, bytes) in set {
+            limits.set(*limit, *bytes);
+        }
+        limits
+    }
+
+    /// A file of `bytes` bytes of JSON, in a folder that goes when it does.
+    fn json_file(name: &str, bytes: usize) -> ScratchFile {
+        let file = temp_dir(name).into_file("a.json");
+        let mut text = b"[1]".to_vec();
+        text.resize(bytes, b' ');
+        std::fs::write(&file, text).unwrap();
+        file
+    }
+
+    #[test]
+    fn what_the_tools_take_is_the_limit_the_user_set() {
+        use crate::settings::Limit;
+        let format = |text: String, limits: &FileLimits| {
+            go_with(
+                Job::Format {
+                    input: Input::Text(text),
+                    options: reformat::Options::default(),
+                },
+                limits,
+            )
+        };
+        let long = format!("[1{}]", " ".repeat(3000));
+        let small = limits_with(&[(Limit::Tools, 2048)]);
+        let err = format(long.clone(), &small).err().expect("over 2 KB");
+        assert!(
+            err.contains("over the 2.0 KB these tools can take"),
+            "{err}"
+        );
+        assert!(format("[1]".to_owned(), &small).is_ok());
+        // The default takes it.
+        assert!(format(long, &FileLimits::default()).is_ok());
+    }
+
+    #[test]
+    fn a_file_kept_on_disk_from_a_lower_size_than_the_tools_take_is_parsed_for_a_tool() {
+        use crate::settings::Limit;
+        // 5000 bytes: over where files are kept on disk from, under what the tools take.
+        let path = json_file("kept-lower", 5000);
+        let limits = limits_with(&[(Limit::KeepOnDisk, 1024), (Limit::Tools, 64 * 1024)]);
+        let Ok(Outcome::Diff(d)) = go_with(
+            Job::Diff {
+                left: Input::File(path.to_path_buf()),
+                right: text("[1]"),
+                take: None,
+            },
+            &limits,
+        ) else {
+            panic!("a tool that needs the document in memory has it parsed")
+        };
+        assert!(d.equal);
+
+        // Format, which writes from the file, keeps it there.
+        let f = formatted_with(
+            Job::Format {
+                input: Input::File(path.to_path_buf()),
+                options: reformat::Options::default(),
+            },
+            &limits,
+        );
+        assert!(f.streamed.is_some(), "written from the file as it is saved");
+    }
+
+    fn formatted_with(job: Job, limits: &FileLimits) -> Formatted {
+        match go_with(job, limits) {
+            Ok(Outcome::Format(f)) => f,
+            Ok(_) => panic!("not a format outcome"),
+            Err(e) => panic!("{e}"),
+        }
+    }
+
+    #[test]
+    fn a_document_kept_on_disk_but_under_the_limit_is_refused_with_the_reason() {
+        // 9 bytes: kept on disk (a test made it so), and far under what tools take.
+        let err = go(Job::Patch {
+            document: Input::Document(lazy_document("lazy-reason")),
+            patch: text("[]"),
+            merge_patch: false,
+        })
+        .err()
+        .expect("refused");
+        assert!(
+            err.contains("too big for this")
+                && err.contains("kept on disk")
+                && err.contains("Settings"),
+            "{err}"
+        );
+
+        // One that is over what the tools take has no need of the reason.
+        let mut doc = lazy_document("lazy-no-reason");
+        Arc::get_mut(&mut doc).unwrap().byte_len = tool_bytes() * 2;
+        let err = Input::Document(doc)
+            .load(&FileLimits::default())
+            .err()
+            .expect("refused");
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("too big for this") && !message.contains("kept on disk"),
+            "{message}"
+        );
     }
 
     #[test]
@@ -661,11 +797,8 @@ mod tests {
         assert!(err.contains("keys sorted"), "{err}");
     }
 
-    fn temp_dir(name: &str) -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("jsonquery-jobs-{name}-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    fn temp_dir(name: &str) -> ScratchDir {
+        ScratchDir::new("jobs", name)
     }
 
     fn write(dir: &Path, name: &str, body: &str) -> PathBuf {
@@ -745,7 +878,7 @@ mod tests {
         let path = dir.join("big.json");
         std::fs::File::create(&path)
             .unwrap()
-            .set_len(MAX_TOOL_BYTES + 1)
+            .set_len(tool_bytes() + 1)
             .unwrap();
         let Err(error) = go(Job::Format {
             input: Input::File(path),
@@ -764,7 +897,7 @@ mod tests {
             // Each alone is fine; the two of them are over.
             std::fs::File::create(path)
                 .unwrap()
-                .set_len(MAX_TOOL_BYTES / 2 + 1)
+                .set_len(tool_bytes() / 2 + 1)
                 .unwrap();
         }
         let Err(error) = go(Job::Diff {
@@ -782,7 +915,7 @@ mod tests {
         let big = Arc::new(Document::from_value(
             json!([1]),
             DocumentSource::Pasted,
-            MAX_TOOL_BYTES + 1,
+            tool_bytes() + 1,
             Duration::ZERO,
         ));
         let Err(error) = go(Job::Format {
@@ -803,6 +936,7 @@ mod tests {
                 options: reformat::Options::default(),
             },
             &cancel,
+            &FileLimits::default(),
         ) else {
             panic!("should be cancelled")
         };

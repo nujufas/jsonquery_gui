@@ -103,7 +103,7 @@ impl Patch {
 
     fn inputs_pane(&mut self, ui: &mut egui::Ui, env: &Env) {
         ui.add_enabled_ui(!self.run.running(), |ui| {
-            if stacked(ui, env.open_doc, &mut self.document, &mut self.patch) {
+            if stacked(ui, env, &mut self.document, &mut self.patch) {
                 self.run.clear();
             }
         });

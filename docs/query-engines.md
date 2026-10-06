@@ -38,8 +38,9 @@ dialect produced it.
 
 ## Very large files
 
-A file of 256 MiB or more is not a value in memory but a lazy, memory-mapped
-document (see [Scaling beyond in-memory](architecture.md#scaling-beyond-in-memory)),
+A file of 256 MiB or more (the size is a [setting](settings.md), as are the
+limits a query holds itself to on such a file) is not a value in memory but a lazy,
+memory-mapped document (see [Scaling beyond in-memory](architecture.md#scaling-beyond-in-memory)),
 and the dialects do not all work on one:
 
 - **jq** reads the file as it goes: a path, a slice, `length`, `keys`, `type`,

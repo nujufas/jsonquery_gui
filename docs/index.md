@@ -3,8 +3,10 @@
 A native desktop tool for querying and browsing large JSON files — fast to
 open, fast to scroll, fast to query. This page covers the problem and goals;
 [Architecture](architecture.md) covers how it's built,
-[Query Engines](query-engines.md) covers the supported query dialects, and
-[Tutorial](tutorial.md) documents the built-in lessons window.
+[Query Engines](query-engines.md) covers the supported query dialects,
+[Tutorial](tutorial.md) documents the built-in lessons window, and
+[Settings](settings.md) covers the limits on file sizes, and what the app
+remembers of how you left it.
 
 ## The problem
 

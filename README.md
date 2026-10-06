@@ -97,6 +97,15 @@ patches and validates documents too. Built in Rust with
 
   ![The Results pane popped out into a window of its own; the main window gives the Source pane the full width](docs/images/screenshot-popout.png)
 - **Light and dark themes**, switchable from the toolbar.
+- **Settings and a memory** — the ⚙ at the right end of the status bar opens a
+  small window with the **limit on file sizes** that matters: from what size a
+  file is memory-mapped and kept on disk instead of being loaded. Under
+  *Advanced* are the others: how much the Tools window takes, how big a
+  download or a copy may be, how much a query on a huge file may hold. Hover a
+  name for what it does and its default, which is what the app has always used.
+  The app also starts as you left it: the theme, whether autocomplete is on, the
+  size of the window (maximized or not) and of its panes. All of it is in one
+  small file, `~/.jsonquery/settings.json`. See [docs/settings.md](docs/settings.md).
 - **Keyboard shortcuts** — `Ctrl+Enter` run/apply, `Ctrl+F` search,
   `Ctrl+S` save (both scoped to whichever panel you last clicked), `F1`
   tutorial.
@@ -112,7 +121,8 @@ box by pasting, by dropping a file on the window, with **Open file…**, or with
 or opened in the main window as a document of its own, to query like any
 other. `Ctrl+Enter` runs the tab's main button and **Cancel** stops a job. The
 tools work in memory, so they are for documents that are not very large (what
-a run is given may add up to 128 MB). Details in [docs/tools.md](docs/tools.md).
+a run is given may add up to 128 MB, which is a setting). Details in
+[docs/tools.md](docs/tools.md).
 
 ### Merge JSON
 
@@ -189,7 +199,7 @@ point inside the schema.
   moved it. (Windows, macOS and X11 can; only X11 has been tried — the
   XWayland entry above gets you there on a Wayland desktop.)
 - **A file of 256 MiB or more is not parsed but kept on disk and read as you look
-  at it** (memory-mapped, and indexed once when it opens), so that a gigabyte of
+  at it** (that size is a setting; memory-mapped, and indexed once when it opens), so that a gigabyte of
   JSON takes megabytes, not the twelve to seventeen times its size that a parsed
   tree does. Long lists are shown in runs of a thousand; jq queries read the file
   as they go, so `.[] | select(…) | .name`, `map(…)`, `length`, `.[1234567]`,
@@ -200,7 +210,7 @@ point inside the schema.
   work the same way (`$[?(@.qty > 48)].id`, ``[?qty > `48`].id``), apart from
   functions that need a whole big list (`sort_by`, `max`). Format in the Tools
   window writes such a file indented or minified without holding it; the rest of
-  the Tools window, and Copy of more than 64 MiB, don't work on one, and the file
+  the Tools window, and Copy of more than 64 MiB (a setting too), don't work on one, and the file
   should stay as it is while it is open (if another program
   cuts it short, the app says so and refuses to answer from what is gone, rather
   than closing). See
@@ -377,13 +387,14 @@ application on a virtual X display of its own (Xvfb with the fluxbox window
 manager, so it never touches your desktop), clicks and types into it the way a
 person would, and reads the screen back with Tesseract OCR, pixel checks and
 the clipboard — egui draws everything itself and has no accessibility tree to
-query. As of October 2026 it has 588 test cases in 22 suites, one directory
+query. As of October 2026 it has 612 test cases in 23 suites, one directory
 per area of the app (launch and window, opening sources, the toolbar and
 status bar, query engines, query highlighting, the query box, autocomplete,
 tree and text views, context menus, search, saving, keyboard shortcuts,
 pop-out panes, the Tools window, the tutorial and About windows, pane headers,
 drag and drop, the jq functions the app adds, CSV and TSV output, the
-tutorial's pages for them, and whole workflows from a file to a saved file).
+tutorial's pages for them, the settings it keeps, and whole workflows from a
+file to a saved file).
 The file dialogs are answered by a stand-in for the desktop's file-chooser
 portal, so the open and save cases run unattended too. Each area is specified
 by a document in the suite's `docs/`, and a traceability matrix gives every

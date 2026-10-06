@@ -346,12 +346,12 @@ impl Diff {
         let mut changed = false;
         left.show(ui, |ui| {
             ui.add_enabled_ui(!running, |ui| {
-                changed |= self.left.ui(ui, env.open_doc, target == 0);
+                changed |= self.left.ui(ui, env, target == 0);
             });
         });
         right.show(ui, |ui| {
             ui.add_enabled_ui(!running, |ui| {
-                changed |= self.right.ui(ui, env.open_doc, target == 1);
+                changed |= self.right.ui(ui, env, target == 1);
             });
         });
         if changed {

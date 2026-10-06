@@ -5,8 +5,8 @@ pub mod tree;
 pub mod view;
 
 pub use document::{
-    load, load_bytes, load_open_file, load_text, Content, Document, DocumentSource, Root,
-    LAZY_THRESHOLD,
+    load, load_bytes, load_open_file, load_text, load_with, Content, Document, DocumentSource,
+    LoadLimits, Root, LAZY_THRESHOLD, MAX_STREAM_BYTES,
 };
 pub use tree::{
     flatten_grouped, flatten_visible, group_size, groups_containing, locate, new_expanded_at_root,

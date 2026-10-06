@@ -30,10 +30,29 @@ pub const LAZY_THRESHOLD: u64 = 256 * 1024 * 1024;
 /// The most that is read from what is not a regular file (a pipe, say): it has
 /// no length to go by and may have no end. The same "few GB" ceiling as a URL
 /// download has.
-#[cfg(not(test))]
-const MAX_STREAM_BYTES: u64 = 4 * 1024 * 1024 * 1024;
-#[cfg(test)]
-const MAX_STREAM_BYTES: u64 = 1024 * 1024;
+pub const MAX_STREAM_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+
+/// The sizes that decide how a file is brought in. The default is what the app
+/// has always done ([`LAZY_THRESHOLD`], [`MAX_STREAM_BYTES`]); the app's settings
+/// can change them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LoadLimits {
+    /// A file of at least this many bytes is kept as it is, memory-mapped and
+    /// indexed, rather than read and parsed (see [`LAZY_THRESHOLD`]).
+    pub lazy_threshold: u64,
+    /// The most that is read from what is not a regular file, one byte more of
+    /// which is an error (see [`MAX_STREAM_BYTES`]).
+    pub stream_bytes: u64,
+}
+
+impl Default for LoadLimits {
+    fn default() -> Self {
+        Self {
+            lazy_threshold: LAZY_THRESHOLD,
+            stream_bytes: MAX_STREAM_BYTES,
+        }
+    }
+}
 
 /// Where a [`Document`]'s bytes came from.
 pub enum DocumentSource {
@@ -232,15 +251,20 @@ impl<'a> ValueView for Root<'a> {
 /// [`LAZY_THRESHOLD`] bytes, memory-mapped and indexed (see [`crate::lazy`]).
 /// Either way the file is checked as JSON, all of it, before this returns.
 pub fn load(path: impl AsRef<Path>) -> Result<Document> {
-    load_via(path.as_ref(), LAZY_THRESHOLD, map_file)
+    load_with(path, LoadLimits::default())
 }
 
-/// [`load`] with the size from which a file is kept lazy and the way of mapping
-/// one as parameters, so that both ways in can be tried on a small file, and a
+/// [`load`] with the sizes that decide how the file is brought in given (the
+/// app's settings can change them from what [`load`] uses).
+pub fn load_with(path: impl AsRef<Path>, limits: LoadLimits) -> Result<Document> {
+    load_limited(path.as_ref(), limits, map_file)
+}
+
+/// [`load_with`] with the way of mapping a file as a parameter too, so that a
 /// mapping that fails can be made to.
-fn load_via(
+fn load_limited(
     path: &Path,
-    lazy_threshold: u64,
+    limits: LoadLimits,
     map: impl FnOnce(&File) -> io::Result<Mmap>,
 ) -> Result<Document> {
     let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
@@ -248,30 +272,50 @@ fn load_via(
         &file,
         DocumentSource::File(path.to_path_buf()),
         &path.display().to_string(),
-        lazy_threshold,
+        limits,
         map,
     )
 }
 
+/// [`load`] with the size from which a file is kept lazy and the way of mapping
+/// one as parameters, so that both ways in can be tried on a small file.
+#[cfg(test)]
+fn load_via(
+    path: &Path,
+    lazy_threshold: u64,
+    map: impl FnOnce(&File) -> io::Result<Mmap>,
+) -> Result<Document> {
+    let limits = LoadLimits {
+        lazy_threshold,
+        ..LoadLimits::default()
+    };
+    load_limited(path, limits, map)
+}
+
 /// [`load`] for a file that is already open — a download's temporary file,
 /// which has no name — as the document from `source`, kept lazy if it is
-/// `lazy_threshold` bytes or more ([`LAZY_THRESHOLD`], where it is not a test).
+/// `lazy_threshold` bytes or more (as a file is, from [`LoadLimits`]).
 pub fn load_open_file(
     file: &File,
     source: DocumentSource,
     lazy_threshold: u64,
 ) -> Result<Document> {
     let name = source.label();
-    load_file(file, source, &name, lazy_threshold, map_file)
+    let limits = LoadLimits {
+        lazy_threshold,
+        ..LoadLimits::default()
+    };
+    load_file(file, source, &name, limits, map_file)
 }
 
 fn load_file(
     file: &File,
     source: DocumentSource,
     name: &str,
-    lazy_threshold: u64,
+    limits: LoadLimits,
     map: impl FnOnce(&File) -> io::Result<Mmap>,
 ) -> Result<Document> {
+    let lazy_threshold = limits.lazy_threshold;
     let meta = file
         .metadata()
         .with_context(|| format!("reading metadata for {name}"))?;
@@ -302,7 +346,7 @@ fn load_file(
         }
     }
 
-    let bytes = read_bytes(file, &meta, name)?;
+    let bytes = read_bytes(file, &meta, name, limits.stream_bytes)?;
     if bytes.len() as u64 >= lazy_threshold {
         // Too big to parse into a tree, and not to be mapped: the bytes are
         // kept, which takes one file's worth of memory and no more.
@@ -319,8 +363,9 @@ fn load_file(
     })
 }
 
-/// Bring a file's bytes in, to the end.
-fn read_bytes(file: &File, meta: &Metadata, name: &str) -> Result<Vec<u8>> {
+/// Bring a file's bytes in, to the end — or, for what is not a regular file, to
+/// `stream_bytes`.
+fn read_bytes(file: &File, meta: &Metadata, name: &str, stream_bytes: u64) -> Result<Vec<u8>> {
     let mut bytes = Vec::new();
     // One byte more than the file says it has, so that a file of just that
     // length is read without its buffer growing to find the end of it. A file
@@ -334,7 +379,7 @@ fn read_bytes(file: &File, meta: &Metadata, name: &str) -> Result<Vec<u8>> {
     let limit = if meta.is_file() {
         u64::MAX
     } else {
-        MAX_STREAM_BYTES
+        stream_bytes
     };
     file.take(limit.saturating_add(1))
         .read_to_end(&mut bytes)
@@ -586,9 +631,13 @@ mod tests {
         assert_eq!(doc.byte_len, 18);
     }
 
-    /// What `load_via` makes of `bytes` written into a named pipe.
+    /// The ceiling of a pipe, where a test has to go past it: a megabyte, not the
+    /// gigabytes of [`MAX_STREAM_BYTES`].
+    const CEILING: u64 = 1024 * 1024;
+
+    /// What `load_limited` makes of `bytes` written into a named pipe.
     #[cfg(unix)]
-    fn load_through_a_pipe(name: &str, bytes: Vec<u8>, lazy_threshold: u64) -> Result<Document> {
+    fn load_through_a_pipe(name: &str, bytes: Vec<u8>, limits: LoadLimits) -> Result<Document> {
         let dir = Scratch::new(name);
         let path = dir.0.join("pipe.json");
         // std cannot make one, and this crate has no libc.
@@ -604,7 +653,7 @@ mod tests {
             // A reader that has had enough closes the pipe: not this thread's error.
             let _ = pipe.write_all(&bytes);
         });
-        let result = load_via(&path, lazy_threshold, map_file);
+        let result = load_limited(&path, limits, map_file);
         writer.join().unwrap();
         result
     }
@@ -614,7 +663,12 @@ mod tests {
     fn a_pipe_that_hands_over_a_lot_is_kept_lazy_in_memory_not_mapped() {
         // Its size is only known once it has been read, and it cannot be mapped:
         // the bytes are held, and indexed, rather than parsed into a tree.
-        let doc = load_through_a_pipe("lazy-pipe", br#"{"from": "a pipe"}"#.to_vec(), 10).unwrap();
+        let limits = LoadLimits {
+            lazy_threshold: 10,
+            ..LoadLimits::default()
+        };
+        let doc =
+            load_through_a_pipe("lazy-pipe", br#"{"from": "a pipe"}"#.to_vec(), limits).unwrap();
         assert!(doc.is_lazy() && !doc.lazy().unwrap().is_mapped());
         assert_eq!(value_of(&doc), json!({"from": "a pipe"}));
         assert_eq!(doc.byte_len, 18);
@@ -628,13 +682,17 @@ mod tests {
             bytes.resize(len as usize, b' ');
             bytes
         };
-        let doc = load_through_a_pipe("at-ceiling", blanks(MAX_STREAM_BYTES), u64::MAX).unwrap();
+        let limits = LoadLimits {
+            lazy_threshold: u64::MAX,
+            stream_bytes: CEILING,
+        };
+        let doc = load_through_a_pipe("at-ceiling", blanks(CEILING), limits).unwrap();
         assert_eq!(doc.tree(), Some(&json!([1])));
-        assert_eq!(doc.byte_len, MAX_STREAM_BYTES);
+        assert_eq!(doc.byte_len, CEILING);
 
         // Finite, so that a ceiling that stopped working would fail this and not
         // fill the memory of whoever runs it.
-        let err = load_through_a_pipe("past-ceiling", blanks(MAX_STREAM_BYTES + 1), u64::MAX)
+        let err = load_through_a_pipe("past-ceiling", blanks(CEILING + 1), limits)
             .err()
             .expect("one byte more than is read");
         let err = format!("{err:#}");
@@ -645,12 +703,43 @@ mod tests {
     fn a_regular_file_is_not_held_to_the_ceiling_of_a_pipe() {
         let dir = Scratch::new("regular-over-ceiling");
         let mut text = b"[1]".to_vec();
-        text.resize(MAX_STREAM_BYTES as usize + 100, b' ');
+        text.resize(CEILING as usize + 100, b' ');
         let path = dir.write("long.json", &text);
         // Read, as a file below the lazy size is; it ends where it says it does.
-        let doc = load_via(&path, u64::MAX, map_file).unwrap();
+        let limits = LoadLimits {
+            lazy_threshold: u64::MAX,
+            stream_bytes: CEILING,
+        };
+        let doc = load_limited(&path, limits, map_file).unwrap();
         assert_eq!(doc.tree(), Some(&json!([1])));
-        assert_eq!(doc.byte_len, MAX_STREAM_BYTES + 100);
+        assert_eq!(doc.byte_len, CEILING + 100);
+    }
+
+    #[test]
+    fn the_limits_are_what_the_app_has_always_used_unless_they_are_changed() {
+        let limits = LoadLimits::default();
+        assert_eq!(limits.lazy_threshold, 256 * 1024 * 1024);
+        assert_eq!(limits.stream_bytes, 4 * 1024 * 1024 * 1024);
+        assert_eq!(limits.lazy_threshold, LAZY_THRESHOLD);
+        assert_eq!(limits.stream_bytes, MAX_STREAM_BYTES);
+    }
+
+    #[test]
+    fn load_with_keeps_a_file_lazy_from_the_threshold_it_is_given() {
+        let dir = Scratch::new("limits-threshold");
+        let path = dir.write("a.json", "[1, 2, 3]");
+        let at = |lazy_threshold| LoadLimits {
+            lazy_threshold,
+            ..LoadLimits::default()
+        };
+        // Nine bytes: lazy from nine, parsed from ten — not from 256 MiB.
+        assert!(load_with(&path, at(9)).unwrap().is_lazy());
+        assert!(!load_with(&path, at(10)).unwrap().is_lazy());
+        assert!(!load(&path).unwrap().is_lazy());
+        // A lower size than the default does not need a bigger file, and a
+        // higher one keeps a file parsed that the default would have mapped.
+        assert!(load_with(&path, at(1)).unwrap().is_lazy());
+        assert!(!load_with(&path, at(u64::MAX)).unwrap().is_lazy());
     }
 
     #[cfg(unix)]
@@ -703,11 +792,15 @@ mod tests {
         let path = dir.write("body.json", r#"{"k": [1, 2, 3]}"#);
         let file = File::open(&path).unwrap();
         let source = || DocumentSource::Url("http://example.test/body.json".to_owned());
-        let lazy = load_file(&file, source(), "the download", 4, map_file).unwrap();
+        let at = |lazy_threshold| LoadLimits {
+            lazy_threshold,
+            ..LoadLimits::default()
+        };
+        let lazy = load_file(&file, source(), "the download", at(4), map_file).unwrap();
         assert!(lazy.is_lazy());
         assert_eq!(value_of(&lazy), json!({"k": [1, 2, 3]}));
         assert_eq!(lazy.source.label(), "http://example.test/body.json");
-        let small = load_file(&file, source(), "the download", u64::MAX, map_file).unwrap();
+        let small = load_file(&file, source(), "the download", at(u64::MAX), map_file).unwrap();
         assert_eq!(small.tree(), Some(&json!({"k": [1, 2, 3]})));
     }
 

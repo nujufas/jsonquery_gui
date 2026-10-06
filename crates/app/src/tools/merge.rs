@@ -23,7 +23,7 @@ use super::widgets::{
 };
 use super::Request;
 use crate::app::human_bytes;
-use crate::worker::{describe, MergeOutcome, MAX_MERGE_BYTES};
+use crate::worker::{describe, MergeOutcome};
 
 const MOVE_UP: &str = "⏶";
 const MOVE_DOWN: &str = "⏷";
@@ -103,9 +103,10 @@ impl Merge {
         }
 
         let mut request = None;
+        let tool_bytes = env.tool_bytes;
         command_bar(ui, "merge_command", |ui| request = self.command_ui(ui));
         let (left, right) = halves(ui, "merge_panes", RIGHT_MIN);
-        left.show(ui, |ui| self.files_pane(ui));
+        left.show(ui, |ui| self.files_pane(ui, tool_bytes));
         right.show(ui, |ui| {
             if let Some(r) = self.result_pane(ui) {
                 request = Some(r);
@@ -184,15 +185,15 @@ impl Merge {
     }
 
     /// The left pane: the files, in the order they will be merged.
-    fn files_pane(&mut self, ui: &mut egui::Ui) {
+    fn files_pane(&mut self, ui: &mut egui::Ui, tool_bytes: u64) {
         ui.add_enabled_ui(!self.run.running(), |ui| {
-            self.files_header(ui);
+            self.files_header(ui, tool_bytes);
             self.files_list(ui);
         });
     }
 
     /// "Files (3)" with the buttons that change the list, at the right.
-    fn files_header(&mut self, ui: &mut egui::Ui) {
+    fn files_header(&mut self, ui: &mut egui::Ui, tool_bytes: u64) {
         let title = match self.files.len() {
             0 => "Files".to_owned(),
             n => format!("Files ({n})"),
@@ -236,7 +237,7 @@ impl Merge {
         )
         .on_hover_text(format!(
             "Merged in the order listed. Merging happens in memory, so the files can add up to {}.",
-            human_bytes(MAX_MERGE_BYTES)
+            human_bytes(tool_bytes)
         ));
     }
 

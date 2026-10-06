@@ -69,6 +69,9 @@ pub(super) struct Env<'a> {
     /// Whether files dropped on the window are this page's to take — not when
     /// the window is embedded in the main one, which has taken them already.
     pub own_input: bool,
+    /// The most the tools take, all of a job's documents together: the user's
+    /// limit (`settings.rs`).
+    pub tool_bytes: u64,
     pub shared: &'a mut Shared,
 }
 

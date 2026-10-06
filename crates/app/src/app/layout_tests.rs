@@ -5,6 +5,7 @@
 //! every time `cargo test` runs.
 
 use super::*;
+use crate::scratch_dir::{ScratchDir, ScratchFile};
 use egui::containers::panel::PanelState;
 use std::collections::HashMap;
 
@@ -14,6 +15,11 @@ struct Harness {
     ctx: egui::Context,
     app: App,
     time: f64,
+    /// How big the window is, which a test may change.
+    screen: egui::Vec2,
+    /// What the window says of itself (maximized, the monitor it is on…), which a
+    /// test may change.
+    window: egui::ViewportInfo,
     shapes: Vec<egui::epaint::ClippedShape>,
     /// Every viewport command any frame has sent.
     commands: Vec<egui::ViewportCommand>,
@@ -23,12 +29,33 @@ struct Harness {
 
 impl Harness {
     fn new() -> Self {
+        Self::with_app(App::with_context, SCREEN, egui::ViewportInfo::default())
+    }
+
+    /// The app as it starts with its settings kept in `store`.
+    fn with_store(store: Store) -> Self {
+        Self::with_store_in(store, SCREEN, egui::ViewportInfo::default())
+    }
+
+    /// The same, in a window of this size that says this of itself from the first
+    /// frame (as one opened at a size does).
+    fn with_store_in(store: Store, screen: egui::Vec2, window: egui::ViewportInfo) -> Self {
+        Self::with_app(|ctx| App::with_store(ctx, store), screen, window)
+    }
+
+    fn with_app(
+        make: impl FnOnce(&egui::Context) -> App,
+        screen: egui::Vec2,
+        window: egui::ViewportInfo,
+    ) -> Self {
         let ctx = egui::Context::default();
-        let app = App::with_context(&ctx);
+        let app = make(&ctx);
         let mut h = Self {
             ctx,
             app,
             time: 0.0,
+            screen,
+            window,
             shapes: Vec::new(),
             commands: Vec::new(),
             copied: Vec::new(),
@@ -40,12 +67,15 @@ impl Harness {
 
     /// One frame in which `f` runs instead of the whole app.
     fn run_with(&mut self, events: Vec<egui::Event>, mut f: impl FnMut(&mut App, &mut egui::Ui)) {
-        let input = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, SCREEN)),
+        let mut input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, self.screen)),
             time: Some(self.time),
             events,
             ..Default::default()
         };
+        input
+            .viewports
+            .insert(egui::ViewportId::ROOT, self.window.clone());
         self.time += 1.0 / 60.0;
         let app = &mut self.app;
         let mut output = self.ctx.run_ui(input, |ui| f(app, ui));
@@ -176,6 +206,19 @@ impl Harness {
             self.pointer(x, y);
         }
         self.button(x, to, false);
+        self.settle();
+    }
+
+    /// Press at `(from, y)`, drag to `(to, y)` in small steps, release.
+    fn drag_x(&mut self, from: f32, y: f32, to: f32) {
+        self.pointer(from, y);
+        self.button(from, y, true);
+        let steps = 12;
+        for i in 1..=steps {
+            let x = from + (to - from) * i as f32 / steps as f32;
+            self.pointer(x, y);
+        }
+        self.button(to, y, false);
         self.settle();
     }
 
@@ -576,10 +619,9 @@ fn a_popped_pane_keeps_what_the_user_had_in_it() {
     let mut h = Harness::new();
     h.app.query_text = long_query(40);
     h.click(300.0, 80.0);
-    h.key(
-        egui::Key::End,
-        egui::Modifiers::CTRL | egui::Modifiers::COMMAND,
-    );
+    // To the end of the text. Not Ctrl+End: on macOS egui's text box reads
+    // Ctrl and a letter as an Emacs key and ignores the rest, End included.
+    h.key(egui::Key::ArrowDown, egui::Modifiers::COMMAND);
     for _ in 0..30 {
         h.frame();
     }
@@ -962,10 +1004,19 @@ struct Windows {
 
 impl Windows {
     fn new() -> Self {
+        Self::with_app(App::with_context)
+    }
+
+    /// The same, with the settings kept in `store`.
+    fn with_store(store: Store) -> Self {
+        Self::with_app(|ctx| App::with_store(ctx, store))
+    }
+
+    fn with_app(make: impl FnOnce(&egui::Context) -> App) -> Self {
         let ctx = egui::Context::default();
         // What eframe does wherever there are windows to open.
         ctx.set_embed_viewports(false);
-        let shared = Arc::new(Mutex::new(App::with_context(&ctx)));
+        let shared = Arc::new(Mutex::new(make(&ctx)));
         let mut w = Self {
             ctx,
             shared,
@@ -1138,6 +1189,7 @@ impl Windows {
                 Satellite::Tools => app.tools.open_or_focus(&self.ctx),
                 Satellite::Tutorial => app.tutorial.open_or_focus(&self.ctx),
                 Satellite::About => app.info_window.open_or_focus(&self.ctx),
+                Satellite::Settings => app.settings_window.open_or_focus(&self.ctx),
             }
         }
         self.main_frame(Vec::new());
@@ -1348,7 +1400,7 @@ fn the_tools_tutorial_and_about_windows_are_redrawn_on_their_own_not_as_part_of_
             "{which:?}: the main window's frame says it may have something new to show"
         );
     }
-    assert_eq!(w.open.len(), 3, "and nothing else is a window");
+    assert_eq!(w.open.len(), 4, "and nothing else is a window");
 }
 
 #[test]
@@ -2036,13 +2088,11 @@ fn the_source_windows_row_has_room_for_everything_it_says() {
 
 // The Tools window (the 🛠 button) and its Merge JSON.
 
-/// A JSON file with `json` in it, in a folder of its own.
-fn temp_json(name: &str, json: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!("jsonquery-tools-test-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join(name);
-    std::fs::write(&path, json).unwrap();
-    path
+/// A JSON file with `json` in it, in a folder of its own that goes when it does.
+fn temp_json(name: &str, json: &str) -> ScratchFile {
+    let file = ScratchDir::new("tools-test", "json").into_file(name);
+    std::fs::write(&file, json).unwrap();
+    file
 }
 
 /// The middle of `text`, wherever it was drawn last frame.
@@ -2099,7 +2149,9 @@ fn merging_two_files_and_opening_the_result_in_the_main_window() {
     let a = temp_json("merge_a.json", "[1, 2]");
     let b = temp_json("merge_b.json", "[3]");
     let ctx = h.ctx.clone();
-    h.app.tools.add_files(&ctx, vec![a, b]);
+    h.app
+        .tools
+        .add_files(&ctx, vec![a.to_path_buf(), b.to_path_buf()]);
     h.settle();
     assert!(is_drawn(&h, "Files (2)"), "{:?}", h.texts());
     assert!(is_drawn(&h, "merge_a.json") && is_drawn(&h, "merge_b.json"));
@@ -2130,7 +2182,9 @@ fn a_failed_merge_says_why_and_editing_the_files_clears_it() {
     let a = temp_json("fail_a.json", "[1]");
     let b = temp_json("fail_b.json", r#"{"a": 1}"#);
     let ctx = h.ctx.clone();
-    h.app.tools.add_files(&ctx, vec![a, b]);
+    h.app
+        .tools
+        .add_files(&ctx, vec![a.to_path_buf(), b.to_path_buf()]);
     h.settle();
 
     let merge = center_of(&h, "Merge");
@@ -2167,7 +2221,7 @@ fn dropping_several_files_on_the_main_window_lists_them_for_merging() {
         dropped_files: files
             .iter()
             .map(|f| {
-                std::sync::Arc::new(FakeDroppedFile(f.clone()))
+                std::sync::Arc::new(FakeDroppedFile(f.to_path_buf()))
                     as std::sync::Arc<dyn egui::DroppedFile + Send + Sync>
             })
             .collect(),
@@ -2229,7 +2283,9 @@ fn the_toolbar_has_room_for_its_labels_and_buttons_in_every_state() {
     let a = temp_json("bar_a.json", "[1]");
     let b = temp_json("bar_b.json", "[2]");
     let ctx = h.ctx.clone();
-    h.app.tools.add_files(&ctx, vec![a, b]);
+    h.app
+        .tools
+        .add_files(&ctx, vec![a.to_path_buf(), b.to_path_buf()]);
     h.settle();
     let merge = center_of(&h, "Merge");
     h.click(merge.x, merge.y);
@@ -2245,7 +2301,7 @@ fn a_cancelled_merge_is_not_shown_as_an_error() {
     let mut h = Harness::new();
     let a = temp_json("cancel_a.json", "[1]");
     let ctx = h.ctx.clone();
-    h.app.tools.add_files(&ctx, vec![a]);
+    h.app.tools.add_files(&ctx, vec![a.to_path_buf()]);
     h.settle();
     h.app.tools.merge_done(0, Err("cancelled".to_owned()));
     h.settle();
@@ -3259,6 +3315,7 @@ fn an_answer_for_another_tool_is_reported_not_trusted() {
             options: jsonquery_query::reformat::Options::default(),
         },
         &std::sync::atomic::AtomicBool::new(false),
+        &crate::settings::FileLimits::default(),
     );
     h.app.tools.job_done(Tool::Diff, 0, formatted);
     h.settle();
@@ -3697,4 +3754,1114 @@ fn a_document_whose_file_was_cut_short_says_so_in_the_status_bar() {
         "{:?}",
         h.texts()
     );
+}
+
+// ---- the Settings window ----------------------------------------------------
+
+use crate::settings::{FileLimits, Group, Limit};
+
+/// A folder of its own for the settings of one test, and where the file goes.
+fn settings_file(name: &str) -> std::path::PathBuf {
+    static MADE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    std::env::temp_dir()
+        .join(format!(
+            "jsonquery-layout-settings-{name}-{}-{}",
+            std::process::id(),
+            MADE.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+        ))
+        .join("jsonquery_gui")
+        .join("settings.json")
+}
+
+fn forget_settings(file: &std::path::Path) {
+    let _ = std::fs::remove_dir_all(file.parent().and_then(|p| p.parent()).unwrap());
+}
+
+fn open_settings(h: &mut Harness) {
+    let gear = text_rect(h, "⚙").expect("the ⚙ button is in the status bar");
+    h.click(gear.center().x, gear.center().y);
+    assert!(h.app.settings_window.is_open());
+    h.settle();
+}
+
+/// The header of the Advanced limits (it says how many of them are not what they
+/// were when some are not), where it is drawn.
+fn advanced_header(h: &Harness) -> Option<egui::Rect> {
+    text_rects(&h.shapes)
+        .into_iter()
+        .find(|(t, _)| t.starts_with("Advanced"))
+        .map(|(_, rect)| rect)
+}
+
+/// Open the Advanced limits, which the window shows closed (or close them).
+fn toggle_advanced(h: &mut Harness) {
+    let header = advanced_header(h).unwrap_or_else(|| panic!("Advanced is drawn: {:?}", h.texts()));
+    h.click(header.center().x, header.center().y);
+    // They slide open or shut.
+    h.pause(0.3);
+}
+
+/// Open the Advanced limits, which the window shows closed.
+fn open_advanced(h: &mut Harness) {
+    toggle_advanced(h);
+    assert!(
+        is_drawn(h, Limit::Copy.label()),
+        "the Advanced limits are shown: {:?}",
+        h.texts()
+    );
+}
+
+/// Where the box of `limit` is.
+fn limit_box(h: &Harness, limit: Limit) -> egui::Rect {
+    h.ctx
+        .read_response(egui::Id::new(("settings_limit", limit.key())))
+        .unwrap_or_else(|| panic!("the box of {limit:?} is drawn: {:?}", h.texts()))
+        .rect
+}
+
+/// Type `text` over what is in the box of `limit`, without confirming it.
+fn type_in_limit(h: &mut Harness, limit: Limit, text: &str) {
+    let at = limit_box(h, limit).center();
+    h.click(at.x, at.y);
+    h.key(egui::Key::A, egui::Modifiers::COMMAND);
+    h.type_text(text);
+    h.settle();
+}
+
+/// Type `text` over what is in the box of `limit` and press Enter.
+fn set_limit(h: &mut Harness, limit: Limit, text: &str) {
+    type_in_limit(h, limit, text);
+    h.key(egui::Key::Enter, egui::Modifiers::NONE);
+    h.settle();
+}
+
+/// What the box of `limit` shows.
+fn limit_text(h: &Harness, limit: Limit) -> String {
+    let at = limit_box(h, limit);
+    // The last that is drawn there is the top one: the window is over the main
+    // window's own texts.
+    text_rects(&h.shapes)
+        .into_iter()
+        .filter(|(_, rect)| at.contains(rect.min))
+        .map(|(text, _)| text)
+        .next_back()
+        .unwrap_or_default()
+}
+
+/// `bytes` of JSON in a file of its own, opened and waited for.
+fn open_file_of(h: &mut Harness, bytes: usize) {
+    static MADE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let dir = std::env::temp_dir().join(format!(
+        "jsonquery-layout-open-{}-{}",
+        std::process::id(),
+        MADE.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("doc.json");
+    let mut text = b"[1, 2, 3]".to_vec();
+    text.resize(bytes, b' ');
+    std::fs::write(&path, text).unwrap();
+    let before = h.app.doc.clone();
+    h.app.open_file(path);
+    for _ in 0..300 {
+        h.frame();
+        let replaced = match (&before, &h.app.doc) {
+            (_, None) => false,
+            (None, Some(_)) => true,
+            (Some(was), Some(now)) => !Arc::ptr_eq(was, now),
+        };
+        if replaced {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    h.settle();
+    assert!(h.app.doc.is_some(), "the file opened");
+}
+
+#[test]
+fn the_settings_button_is_beside_the_info_button_and_opens_the_window() {
+    let mut h = Harness::new();
+    let info = text_rect(&h, "ℹ").expect("the (i) button");
+    let gear = text_rect(&h, "⚙").expect("the settings button");
+    assert!(
+        (gear.center().y - info.center().y).abs() < 2.0,
+        "on the (i)'s row: {gear:?} vs {info:?}"
+    );
+    assert!(
+        gear.max.x < info.min.x && info.min.x - gear.max.x < 24.0,
+        "just left of it: {gear:?} vs {info:?}"
+    );
+    assert!(!is_drawn(&h, "File size limits"), "closed at first");
+
+    open_settings(&mut h);
+    assert!(is_drawn(&h, "File size limits"), "{:?}", h.texts());
+    assert!(is_drawn(&h, Limit::KeepOnDisk.label()));
+    assert_eq!(
+        limit_text(&h, Limit::KeepOnDisk),
+        "256 MB",
+        "the limit shows what it is"
+    );
+    assert_eq!(
+        h.app.settings,
+        Settings::default(),
+        "nothing changed by looking"
+    );
+}
+
+#[test]
+fn the_settings_button_moves_neither_the_info_button_nor_the_status_bar() {
+    let mut h = Harness::new();
+    let bar = h.panel("status_bar").expect("the status bar");
+    let info = text_rect(&h, "ℹ").expect("the (i) button");
+    open_settings(&mut h);
+    assert_eq!(h.panel("status_bar"), Some(bar));
+    assert_eq!(
+        text_rect(&h, "ℹ"),
+        Some(info),
+        "the (i) stays in the corner"
+    );
+}
+
+#[test]
+fn a_limit_typed_in_its_box_is_taken_on_enter_and_kept_for_the_next_start() {
+    let file = settings_file("enter");
+    let mut h = Harness::with_store(Store::at(Some(file.clone())));
+    open_settings(&mut h);
+    assert!(is_drawn_containing(&h, "Kept in "), "{:?}", h.texts());
+
+    type_in_limit(&mut h, Limit::KeepOnDisk, "512 MB");
+    assert_eq!(
+        h.app.settings,
+        Settings::default(),
+        "typing alone does not change it"
+    );
+    h.key(egui::Key::Enter, egui::Modifiers::NONE);
+    h.settle();
+    assert_eq!(h.app.settings.limits.keep_on_disk(), 512 * 1024 * 1024);
+    assert_eq!(limit_text(&h, Limit::KeepOnDisk), "512 MB");
+    let kept: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&file).expect("it was written")).unwrap();
+    assert_eq!(
+        kept,
+        serde_json::json!({"limits": {"keep_on_disk_from": "512 MB"}})
+    );
+
+    // The next start finds it there.
+    let mut again = Harness::with_store(Store::at(Some(file.clone())));
+    assert_eq!(again.app.settings.limits.keep_on_disk(), 512 * 1024 * 1024);
+    open_settings(&mut again);
+    assert_eq!(limit_text(&again, Limit::KeepOnDisk), "512 MB");
+    forget_settings(&file);
+}
+
+#[test]
+fn a_limit_is_taken_when_the_box_loses_the_focus_by_a_click_elsewhere_too() {
+    let mut h = Harness::new();
+    open_settings(&mut h);
+    open_advanced(&mut h);
+    type_in_limit(&mut h, Limit::Copy, "8 MB");
+    let heading = text_rect(&h, "File size limits").expect("the heading");
+    h.click(heading.center().x, heading.center().y);
+    assert_eq!(h.app.settings.limits.copy(), 8 * 1024 * 1024);
+}
+
+#[test]
+fn the_worker_opens_files_by_the_limit_that_was_set() {
+    let mut h = Harness::new();
+    open_file_of(&mut h, 4096);
+    assert!(!h.app.doc.as_ref().unwrap().is_lazy(), "parsed, as always");
+
+    open_settings(&mut h);
+    set_limit(&mut h, Limit::KeepOnDisk, "2 KB");
+    open_file_of(&mut h, 4096);
+    assert!(
+        h.app.doc.as_ref().unwrap().is_lazy(),
+        "kept on disk from 2 KB"
+    );
+    assert!(
+        is_drawn_containing(&h, "Indexed in "),
+        "and the status bar says it was indexed: {:?}",
+        h.texts()
+    );
+
+    // Put back, it is parsed again.
+    press(&mut h, "Reset");
+    assert!(h.app.settings.limits.all_default());
+    open_file_of(&mut h, 4096);
+    assert!(!h.app.doc.as_ref().unwrap().is_lazy());
+}
+
+#[test]
+fn what_is_not_a_size_is_said_so_and_not_taken() {
+    let mut h = Harness::new();
+    open_settings(&mut h);
+    open_advanced(&mut h);
+    set_limit(&mut h, Limit::Tools, "banana");
+    assert_eq!(h.app.settings, Settings::default());
+    assert!(
+        is_drawn_containing(&h, "Not a size") && is_drawn_containing(&h, "the limit stays 128 MB"),
+        "{:?}",
+        h.texts()
+    );
+    assert_eq!(
+        limit_text(&h, Limit::Tools),
+        "banana",
+        "what was typed is left to fix"
+    );
+
+    // A size below what a limit can be.
+    set_limit(&mut h, Limit::Tools, "10 B");
+    assert_eq!(h.app.settings, Settings::default());
+    assert!(is_drawn_containing(&h, "Too small"), "{:?}", h.texts());
+
+    // Fixed, it goes through and the complaint is gone.
+    set_limit(&mut h, Limit::Tools, "64 MB");
+    assert_eq!(h.app.settings.limits.tools(), 64 * 1024 * 1024);
+    assert!(
+        !is_drawn_containing(&h, "the limit stays"),
+        "{:?}",
+        h.texts()
+    );
+}
+
+#[test]
+fn escape_puts_back_what_was_there() {
+    let mut h = Harness::new();
+    open_settings(&mut h);
+    open_advanced(&mut h);
+    type_in_limit(&mut h, Limit::Download, "12 GB");
+    h.key(egui::Key::Escape, egui::Modifiers::NONE);
+    h.settle();
+    assert_eq!(h.app.settings, Settings::default());
+    assert_eq!(limit_text(&h, Limit::Download), "4 GB");
+}
+
+#[test]
+fn reset_puts_one_limit_back_and_restore_defaults_puts_them_all_back() {
+    let mut h = Harness::new();
+    open_settings(&mut h);
+    open_advanced(&mut h);
+    set_limit(&mut h, Limit::Copy, "8 MB");
+    set_limit(&mut h, Limit::Tools, "64 MB");
+    assert!(!h.app.settings.limits.all_default());
+
+    // Reset is in the row of the limit; the first one that can be pressed is
+    // the first limit that is not the default (Tools), above Copy.
+    let resets: Vec<_> = h.pop_buttons("Reset");
+    assert_eq!(resets.len(), Limit::ALL.len().min(resets.len()));
+    let tools = limit_box(&h, Limit::Tools).center();
+    let reset = resets
+        .iter()
+        .find(|p| (p.y - tools.y).abs() < 4.0)
+        .expect("Reset is on the row of the limit");
+    h.click(reset.x, reset.y);
+    assert!(h.app.settings.limits.is_default(Limit::Tools));
+    assert_eq!(
+        h.app.settings.limits.copy(),
+        8 * 1024 * 1024,
+        "only that one"
+    );
+
+    press(&mut h, "Restore defaults");
+    assert_eq!(h.app.settings, Settings::default());
+    assert_eq!(limit_text(&h, Limit::Copy), "64 MB");
+}
+
+#[test]
+fn restore_defaults_is_there_to_press_only_when_something_differs() {
+    let mut h = Harness::new();
+    open_settings(&mut h);
+    open_advanced(&mut h);
+    let restore = center_of(&h, "Restore defaults");
+    h.click(restore.x, restore.y);
+    assert_eq!(h.app.settings, Settings::default(), "nothing to restore");
+    set_limit(&mut h, Limit::Copy, "8 MB");
+    let restore = center_of(&h, "Restore defaults");
+    h.click(restore.x, restore.y);
+    assert!(h.app.settings.limits.all_default());
+}
+
+#[test]
+fn a_settings_file_with_something_wrong_in_it_says_so_in_the_window() {
+    let file = settings_file("wrong");
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(
+        &file,
+        r#"{"limits": {"download": "banana", "copy": "8 MB"}}"#,
+    )
+    .unwrap();
+    let mut h = Harness::with_store(Store::at(Some(file.clone())));
+    assert_eq!(
+        h.app.settings.limits.copy(),
+        8 * 1024 * 1024,
+        "what is fine is used"
+    );
+    assert_eq!(
+        h.app.settings.limits.download(),
+        FileLimits::default().download()
+    );
+    open_settings(&mut h);
+    assert!(
+        is_drawn_containing(&h, "⚠ download: not a size"),
+        "{:?}",
+        h.texts()
+    );
+    forget_settings(&file);
+}
+
+#[test]
+fn a_settings_file_that_cannot_be_written_says_so_and_the_limit_still_applies() {
+    let file = settings_file("unwritable");
+    // A file where the folder should be.
+    std::fs::create_dir_all(file.parent().unwrap().parent().unwrap()).unwrap();
+    std::fs::write(file.parent().unwrap(), "in the way").unwrap();
+    let mut h = Harness::with_store(Store::at(Some(file.clone())));
+    open_settings(&mut h);
+    open_advanced(&mut h);
+    set_limit(&mut h, Limit::Copy, "8 MB");
+    assert_eq!(
+        h.app.settings.limits.copy(),
+        8 * 1024 * 1024,
+        "applies for this run"
+    );
+    assert!(
+        is_drawn_containing(&h, "Could not save to"),
+        "{:?}",
+        h.texts()
+    );
+    forget_settings(&file);
+}
+
+#[test]
+fn without_a_folder_for_settings_the_window_says_they_are_not_kept() {
+    let mut h = Harness::new();
+    open_settings(&mut h);
+    assert!(
+        is_drawn_containing(&h, "Not kept for next time"),
+        "{:?}",
+        h.texts()
+    );
+    // They still work for the run.
+    open_advanced(&mut h);
+    set_limit(&mut h, Limit::Copy, "8 MB");
+    assert_eq!(h.app.settings.limits.copy(), 8 * 1024 * 1024);
+}
+
+#[test]
+fn the_tools_window_goes_by_the_limit_on_what_it_takes() {
+    let mut h = Harness::new();
+    load(&mut h, &format!("[{}1]", "1,".repeat(3000)));
+    // (The windows are floating over one another here, and the one clicked last
+    // is in front: each is put away when it has been used.)
+    open_settings(&mut h);
+    open_advanced(&mut h);
+    set_limit(&mut h, Limit::Tools, "1 KB");
+    let current = h.app.settings;
+    h.app.settings_window.close(&current);
+    open_tool(&mut h, Tool::Format);
+    press(&mut h, "Open document");
+    assert!(
+        is_drawn_containing(&h, "more than the 1.0 KB these tools take"),
+        "{:?}",
+        h.texts()
+    );
+    assert!(!is_drawn(&h, "The open document"), "so it was not taken");
+
+    // Higher, it is.
+    open_settings(&mut h);
+    open_advanced(&mut h);
+    set_limit(&mut h, Limit::Tools, "1 MB");
+    let current = h.app.settings;
+    h.app.settings_window.close(&current);
+    h.settle();
+    press(&mut h, "Open document");
+    assert!(is_drawn(&h, "The open document"), "{:?}", h.texts());
+}
+
+#[test]
+fn a_limit_typed_but_not_confirmed_is_taken_when_the_window_is_closed() {
+    let mut w = Windows::new();
+    let id = Satellite::Settings.viewport_id();
+    w.open_satellite(Satellite::Settings);
+    w.settle_in(id);
+    // Copy is one of the Advanced limits, which are closed at first.
+    let header = w.rect_in(id, "Advanced").expect("the header is drawn");
+    w.click_in(id, header.center());
+    // The box is on the row of its label, a label's width (and a gap) to the
+    // right of it; the row is indented, and the width is made less by that.
+    let label = w.rect_in(id, "Largest copy").expect("the row is drawn");
+    let width = crate::settings_window::LABEL_WIDTH - egui::Spacing::default().indent;
+    let at = egui::pos2(label.min.x + width + 30.0, label.center().y);
+    w.click_in(id, at);
+    let info = egui::ViewportInfo::default;
+    w.pass(
+        id,
+        info(),
+        vec![egui::Event::Key {
+            key: egui::Key::A,
+            physical_key: Some(egui::Key::A),
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::COMMAND,
+        }],
+    );
+    w.pass(id, info(), vec![egui::Event::Text("8 MB".to_owned())]);
+    w.settle_in(id);
+    assert_eq!(
+        w.app().settings,
+        Settings::default(),
+        "typed over what was there, and not confirmed"
+    );
+
+    w.pass(id, close_request(false, false), Vec::new());
+    assert!(!w.app().satellite_open(Satellite::Settings));
+    assert_eq!(
+        w.app().settings.limits.copy(),
+        8 * 1024 * 1024,
+        "what was typed is taken as the window goes"
+    );
+}
+
+#[test]
+fn the_window_shows_one_limit_and_the_others_when_advanced_is_opened() {
+    let mut h = Harness::new();
+    open_settings(&mut h);
+    assert!(is_drawn(&h, Limit::MAIN.label()), "{:?}", h.texts());
+    assert!(is_drawn(&h, "Advanced"));
+    for limit in Limit::ALL.into_iter().filter(|l| l.is_advanced()) {
+        assert!(
+            !is_drawn(&h, limit.label()),
+            "{limit:?} is not shown at first"
+        );
+    }
+    assert_eq!(h.pop_buttons("Reset").len(), 1, "one limit, one Reset");
+
+    open_advanced(&mut h);
+    for limit in Limit::ALL {
+        assert!(is_drawn(&h, limit.label()), "{limit:?}: {:?}", h.texts());
+    }
+    assert_eq!(h.pop_buttons("Reset").len(), Limit::ALL.len());
+    for group in Group::ALL {
+        // The first group has the one that is not Advanced, and the one that is.
+        assert!(is_drawn(&h, group.title()), "{group:?}: {:?}", h.texts());
+    }
+
+    toggle_advanced(&mut h);
+    for limit in Limit::ALL.into_iter().filter(|l| l.is_advanced()) {
+        assert!(!is_drawn(&h, limit.label()), "{limit:?} is hidden again");
+    }
+    assert!(is_drawn(&h, Limit::MAIN.label()));
+}
+
+#[test]
+fn advanced_is_closed_whenever_the_window_is_opened() {
+    let mut h = Harness::new();
+    open_settings(&mut h);
+    open_advanced(&mut h);
+    let current = h.app.settings;
+    h.app.settings_window.close(&current);
+    h.settle();
+    assert!(!is_drawn(&h, Limit::Copy.label()), "the window is gone");
+    open_settings(&mut h);
+    assert!(
+        !is_drawn(&h, Limit::Copy.label()),
+        "and when it is open again, Advanced is closed: {:?}",
+        h.texts()
+    );
+}
+
+#[test]
+fn advanced_says_how_many_of_its_limits_are_not_the_default() {
+    let file = settings_file("hidden");
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    // Two of the Advanced limits, and the one that is shown.
+    std::fs::write(
+        &file,
+        r#"{"limits": {"tools": "64 MB", "query_gather": "512 MB", "keep_on_disk_from": "300 MB"}}"#,
+    )
+    .unwrap();
+    let mut h = Harness::with_store(Store::at(Some(file.clone())));
+    open_settings(&mut h);
+    assert!(
+        is_drawn(&h, "Advanced (2 changed)"),
+        "what is hidden and is not the default is said: {:?}",
+        h.texts()
+    );
+    press(&mut h, "Restore defaults");
+    assert!(is_drawn(&h, "Advanced"), "{:?}", h.texts());
+    forget_settings(&file);
+}
+
+#[test]
+fn what_a_limit_is_for_is_not_written_in_the_window() {
+    let mut h = Harness::new();
+    open_settings(&mut h);
+    open_advanced(&mut h);
+    for limit in Limit::ALL {
+        let first_words = limit
+            .help()
+            .split_whitespace()
+            .take(6)
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            !is_drawn_containing(&h, &first_words),
+            "{limit:?} is explained in the window: {:?}",
+            h.texts()
+        );
+    }
+    assert!(!is_drawn_containing(&h, "default 256 MB"));
+    assert!(!is_drawn_containing(&h, "Type a size"));
+}
+
+#[test]
+fn hovering_the_name_of_a_limit_says_what_it_is_for_and_what_it_is_by_default() {
+    let mut h = Harness::new();
+    open_settings(&mut h);
+    let name = rect_of(&h, Limit::MAIN.label());
+    // Still over it for a while: a tooltip does not come at once.
+    h.pointer(name.center().x, name.center().y);
+    assert!(!is_drawn_containing(&h, "memory-mapped"), "not at once");
+    for _ in 0..90 {
+        h.frame();
+    }
+    assert!(
+        is_drawn_containing(&h, "memory-mapped, indexed once"),
+        "what it is for: {:?}",
+        h.texts()
+    );
+    assert!(is_drawn(&h, "Default: 256 MB"), "{:?}", h.texts());
+}
+
+/// A pass of the Settings window, `size` big on a screen of `monitor`, as the
+/// window manager tells it.
+fn settings_pass(w: &mut Windows, size: egui::Vec2, monitor: egui::Vec2, events: Vec<egui::Event>) {
+    let info = egui::ViewportInfo {
+        inner_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+        monitor_size: Some(monitor),
+        ..Default::default()
+    };
+    w.pass_sized(Satellite::Settings.viewport_id(), info, events, size);
+}
+
+/// A click in the Settings window, and the passes after it.
+fn settings_click(w: &mut Windows, at: egui::Pos2, size: egui::Vec2, monitor: egui::Vec2) {
+    let button = |pressed| egui::Event::PointerButton {
+        pos: at,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    settings_pass(w, size, monitor, vec![egui::Event::PointerMoved(at)]);
+    settings_pass(w, size, monitor, vec![button(true)]);
+    settings_pass(w, size, monitor, vec![button(false)]);
+    // The limits slide open or shut in a twelfth of a second.
+    for _ in 0..12 {
+        settings_pass(w, size, monitor, Vec::new());
+    }
+}
+
+/// The sizes the Settings window was asked to be, in order.
+fn sizes_asked(w: &Windows) -> Vec<egui::Vec2> {
+    w.commands_in(Satellite::Settings.viewport_id())
+        .into_iter()
+        .filter_map(|command| match command {
+            egui::ViewportCommand::InnerSize(size) => Some(size),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A Settings window opened and drawn at `size` (and the Advanced header's centre).
+fn settings_window_at(size: egui::Vec2, monitor: egui::Vec2) -> (Windows, egui::Pos2) {
+    let mut w = Windows::new();
+    w.open_satellite(Satellite::Settings);
+    for _ in 0..4 {
+        settings_pass(&mut w, size, monitor, Vec::new());
+    }
+    assert!(
+        sizes_asked(&w).is_empty(),
+        "no size is asked for by looking"
+    );
+    let header = w
+        .rect_in(Satellite::Settings.viewport_id(), "Advanced")
+        .expect("the Advanced header is drawn");
+    (w, header.center())
+}
+
+#[test]
+fn the_window_grows_to_hold_the_advanced_limits_and_goes_back_when_they_are_closed() {
+    let opening = egui::vec2(
+        crate::settings_window::OPENING_SIZE[0],
+        crate::settings_window::OPENING_SIZE[1],
+    );
+    let monitor = egui::vec2(1920.0, 1080.0);
+    let (mut w, header) = settings_window_at(opening, monitor);
+
+    settings_click(&mut w, header, opening, monitor);
+    let asked = sizes_asked(&w);
+    assert_eq!(asked.len(), 1, "once: {asked:?}");
+    assert_eq!(asked[0].x, opening.x, "as wide as it was");
+    assert!(
+        asked[0].y > opening.y + 100.0,
+        "taller, to hold eight limits and four titles: {asked:?}"
+    );
+
+    // The window manager gives it the size, and the limits are all there.
+    let id = Satellite::Settings.viewport_id();
+    let grown = asked[0];
+    for _ in 0..4 {
+        settings_pass(&mut w, grown, monitor, Vec::new());
+    }
+    assert!(w.rect_in(id, "Largest copy").is_some());
+    assert!(w.rect_in(id, "Keys of a sort or group").is_some());
+    assert_eq!(sizes_asked(&w).len(), 1, "asked for once");
+
+    // A click on the header closes the limits: the height it had is asked for.
+    settings_click(&mut w, header, grown, monitor);
+    let asked = sizes_asked(&w);
+    assert_eq!(asked.len(), 2, "{asked:?}");
+    assert_eq!(asked[1], opening, "back to what it was");
+    assert!(w.rect_in(id, "Largest copy").is_none());
+}
+
+#[test]
+fn a_window_that_is_tall_enough_for_the_advanced_limits_is_not_resized() {
+    let (size, monitor) = (egui::vec2(430.0, 800.0), egui::vec2(1920.0, 1080.0));
+    let (mut w, header) = settings_window_at(size, monitor);
+    settings_click(&mut w, header, size, monitor);
+    assert!(w
+        .rect_in(Satellite::Settings.viewport_id(), "Largest copy")
+        .is_some());
+    settings_click(&mut w, header, size, monitor);
+    assert!(sizes_asked(&w).is_empty(), "{:?}", sizes_asked(&w));
+}
+
+#[test]
+fn the_window_does_not_grow_past_what_the_screen_has_room_for() {
+    let (size, monitor) = (egui::vec2(430.0, 190.0), egui::vec2(1920.0, 300.0));
+    let (mut w, header) = settings_window_at(size, monitor);
+    settings_click(&mut w, header, size, monitor);
+    let asked = sizes_asked(&w);
+    assert_eq!(asked.len(), 1, "{asked:?}");
+    assert!(
+        (asked[0].y - 270.0).abs() < 0.5,
+        "nine tenths of the screen's height: {asked:?}"
+    );
+}
+
+#[test]
+fn a_window_opened_with_warnings_about_the_file_grows_to_hold_them() {
+    let file = settings_file("warned");
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(
+        &file,
+        r#"{"limits": {"download": "banana", "copy": "grape", "tools": "pear"}, "theme": "purple"}"#,
+    )
+    .unwrap();
+    let mut w = Windows::with_store(Store::at(Some(file.clone())));
+    let opening = egui::vec2(
+        crate::settings_window::OPENING_SIZE[0],
+        crate::settings_window::OPENING_SIZE[1],
+    );
+    let monitor = egui::vec2(1920.0, 1080.0);
+    w.open_satellite(Satellite::Settings);
+    for _ in 0..8 {
+        settings_pass(&mut w, opening, monitor, Vec::new());
+    }
+    let asked = sizes_asked(&w);
+    assert_eq!(asked.len(), 1, "four warnings need room: {asked:?}");
+    assert_eq!(asked[0].x, opening.x);
+    assert!(asked[0].y > opening.y, "{asked:?}");
+
+    // Given the room, it stays: nothing more is asked for, and it does not go back
+    // when the Advanced limits are opened and closed.
+    let grown = asked[0];
+    for _ in 0..8 {
+        settings_pass(&mut w, grown, monitor, Vec::new());
+    }
+    assert_eq!(sizes_asked(&w).len(), 1, "once");
+    forget_settings(&file);
+}
+
+// ---- what the interface looks like, kept for the next start --------------------
+
+/// The settings file of a test that starts with `contents` in it (or none).
+fn start_with(name: &str, contents: Option<&str>) -> (Harness, std::path::PathBuf) {
+    let file = settings_file(name);
+    if let Some(contents) = contents {
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, contents).unwrap();
+    }
+    (Harness::with_store(Store::at(Some(file.clone()))), file)
+}
+
+/// What the settings file says, if there is one.
+fn kept(file: &std::path::Path) -> Option<serde_json::Value> {
+    serde_json::from_str(&std::fs::read_to_string(file).ok()?).ok()
+}
+
+#[test]
+fn starting_and_looking_at_the_app_writes_no_file() {
+    let (mut h, file) = start_with("no-file", None);
+    h.pause(2.0);
+    assert!(!file.exists(), "nothing has been changed: nothing is kept");
+    h.app.flush_settings();
+    assert!(!file.exists());
+    forget_settings(&file);
+}
+
+#[test]
+fn the_app_starts_in_the_theme_it_was_left_in() {
+    let (h, file) = start_with("theme-start", Some(r#"{"theme": "light"}"#));
+    assert_eq!(h.ctx.theme(), egui::Theme::Light);
+    forget_settings(&file);
+    let (h, file) = start_with("theme-start-dark", Some(r#"{"theme": "dark"}"#));
+    assert_eq!(h.ctx.theme(), egui::Theme::Dark);
+    forget_settings(&file);
+    let (h, file) = start_with("theme-start-none", None);
+    assert_eq!(h.ctx.theme(), egui::Theme::Dark, "dark the first time");
+    forget_settings(&file);
+}
+
+#[test]
+fn a_change_of_theme_is_kept_once_it_has_stayed_for_a_moment_and_changing_back_unkeeps_it() {
+    let (mut h, file) = start_with("theme-toggle", None);
+    let sun = text_rect(&h, "☀").expect("the theme button");
+    h.click(sun.center().x, sun.center().y);
+    assert_eq!(h.ctx.theme(), egui::Theme::Light);
+    assert!(
+        !file.exists(),
+        "not written the instant it changed (a moment is waited for)"
+    );
+    h.pause(1.0);
+    assert_eq!(
+        kept(&file),
+        Some(serde_json::json!({"limits": {}, "theme": "light"}))
+    );
+
+    // And back: dark is what the app starts in, so there is nothing to keep.
+    let moon = text_rect(&h, "🌙").expect("the theme button, now a moon");
+    h.click(moon.center().x, moon.center().y);
+    h.pause(1.0);
+    assert_eq!(kept(&file), Some(serde_json::json!({"limits": {}})));
+    forget_settings(&file);
+}
+
+#[test]
+fn a_change_is_not_written_while_it_is_still_changing() {
+    let (mut h, file) = start_with("still-changing", None);
+    for width in [1100.0, 1000.0, 900.0, 950.0, 1000.0, 1050.0] {
+        h.screen = egui::vec2(width, 700.0);
+        h.pause(0.2);
+        assert!(!file.exists(), "still being resized at {width}");
+    }
+    h.pause(1.0);
+    assert_eq!(
+        kept(&file).unwrap()["window"],
+        serde_json::json!({"width": 1050.0, "height": 700.0})
+    );
+    forget_settings(&file);
+}
+
+#[test]
+fn the_size_of_the_window_is_kept_when_it_is_not_the_size_the_app_starts_with() {
+    let (mut h, file) = start_with("window-size", None);
+    h.screen = egui::vec2(1500.0, 900.0);
+    h.pause(1.0);
+    assert_eq!(
+        kept(&file).unwrap()["window"],
+        serde_json::json!({"width": 1500.0, "height": 900.0})
+    );
+    // Back to the usual size: nothing to keep.
+    h.screen = SCREEN;
+    h.pause(1.0);
+    assert!(
+        kept(&file).unwrap().get("window").is_none(),
+        "{:?}",
+        kept(&file)
+    );
+    forget_settings(&file);
+}
+
+#[test]
+fn a_maximized_window_keeps_the_size_it_had_before_and_that_it_was_maximized() {
+    let (mut h, file) = start_with("window-maximized", None);
+    h.screen = egui::vec2(1500.0, 900.0);
+    h.pause(1.0);
+    // Maximized: the screen is as big as the monitor, which is not a size to go
+    // back to.
+    h.window.maximized = Some(true);
+    h.screen = egui::vec2(1920.0, 1080.0);
+    h.pause(1.0);
+    assert_eq!(
+        kept(&file).unwrap()["window"],
+        serde_json::json!({"width": 1500.0, "height": 900.0, "maximized": true})
+    );
+    // Restored, it is not.
+    h.window.maximized = Some(false);
+    h.screen = egui::vec2(1500.0, 900.0);
+    h.pause(1.0);
+    assert_eq!(
+        kept(&file).unwrap()["window"],
+        serde_json::json!({"width": 1500.0, "height": 900.0})
+    );
+    forget_settings(&file);
+}
+
+#[test]
+fn the_size_a_window_has_for_a_moment_on_its_way_to_being_maximized_is_not_kept() {
+    let (mut h, file) = start_with("window-transient", None);
+    h.screen = egui::vec2(1500.0, 900.0);
+    h.pause(1.0);
+    // The window grows to the size of the screen, and only then says it is
+    // maximized: that size is not one to go back to.
+    h.screen = egui::vec2(1920.0, 1080.0);
+    h.pause(0.1);
+    h.window.maximized = Some(true);
+    h.pause(1.0);
+    assert_eq!(
+        kept(&file).unwrap()["window"],
+        serde_json::json!({"width": 1500.0, "height": 900.0, "maximized": true})
+    );
+    // And the other way: it says it is maximized, and has not grown yet; then it
+    // is restored, and shrinks a moment later.
+    h.window.maximized = Some(false);
+    h.pause(0.1);
+    h.screen = egui::vec2(1500.0, 900.0);
+    h.pause(1.0);
+    assert_eq!(
+        kept(&file).unwrap()["window"],
+        serde_json::json!({"width": 1500.0, "height": 900.0})
+    );
+    forget_settings(&file);
+}
+
+#[test]
+fn a_window_left_maximized_is_asked_to_be_when_the_app_starts() {
+    // Some window managers do not maximize a window that asks as it opens.
+    let file = settings_file("window-ask-maximize");
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(&file, r#"{"window": {"maximized": true}}"#).unwrap();
+    let h = Harness::with_store_in(Store::at(Some(file.clone())), SCREEN, Default::default());
+    assert!(
+        h.commands.contains(&egui::ViewportCommand::Maximized(true)),
+        "{:?}",
+        h.commands
+    );
+    forget_settings(&file);
+
+    // One that is maximized already is not asked.
+    let file = settings_file("window-asked-maximize");
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(&file, r#"{"window": {"maximized": true}}"#).unwrap();
+    let h = Harness::with_store_in(
+        Store::at(Some(file.clone())),
+        SCREEN,
+        egui::ViewportInfo {
+            maximized: Some(true),
+            ..Default::default()
+        },
+    );
+    assert!(
+        !h.commands.contains(&egui::ViewportCommand::Maximized(true)),
+        "{:?}",
+        h.commands
+    );
+    // And one that was not left maximized is not either.
+    let (h, file2) = start_with("window-not-maximized", None);
+    assert!(!h.commands.contains(&egui::ViewportCommand::Maximized(true)));
+    forget_settings(&file);
+    forget_settings(&file2);
+}
+
+#[test]
+fn a_window_that_is_minimized_or_full_screen_keeps_nothing_of_its_size() {
+    let (mut h, file) = start_with("window-minimized", None);
+    h.window.minimized = Some(true);
+    h.screen = egui::vec2(0.0, 0.0);
+    h.pause(1.0);
+    assert!(!file.exists(), "a minimized window has no size");
+    h.window.minimized = Some(false);
+    h.window.fullscreen = Some(true);
+    h.screen = egui::vec2(1920.0, 1080.0);
+    h.pause(1.0);
+    assert!(!file.exists(), "nor does one that fills the screen");
+    forget_settings(&file);
+}
+
+#[test]
+fn a_window_too_small_to_use_is_not_a_size_to_keep() {
+    let (mut h, file) = start_with("window-tiny", None);
+    h.screen = egui::vec2(300.0, 200.0);
+    h.pause(1.0);
+    assert!(!file.exists());
+    forget_settings(&file);
+}
+
+#[test]
+fn a_saved_size_bigger_than_the_screen_it_opens_on_is_brought_down_to_it() {
+    // Opened at the size that was saved, on a screen that is smaller.
+    let file = settings_file("window-too-big");
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(&file, r#"{"window": {"width": 3000, "height": 2000}}"#).unwrap();
+    let mut h = Harness::with_store_in(
+        Store::at(Some(file.clone())),
+        egui::vec2(3000.0, 2000.0),
+        egui::ViewportInfo {
+            monitor_size: Some(egui::vec2(1920.0, 1080.0)),
+            ..Default::default()
+        },
+    );
+    h.pause(0.5);
+    assert!(
+        h.commands
+            .contains(&egui::ViewportCommand::InnerSize(egui::vec2(
+                1920.0, 1080.0
+            ))),
+        "{:?}",
+        h.commands
+    );
+    forget_settings(&file);
+
+    // The size of a window that was never changed is not the app's to bring down.
+    let (mut h, file) = start_with("window-default", None);
+    h.window.monitor_size = Some(egui::vec2(1024.0, 768.0));
+    h.pause(0.5);
+    assert!(
+        !h.commands
+            .iter()
+            .any(|c| matches!(c, egui::ViewportCommand::InnerSize(_))),
+        "{:?}",
+        h.commands
+    );
+    forget_settings(&file);
+}
+
+#[test]
+fn the_panes_open_as_big_as_they_were_left() {
+    let (h, file) = start_with(
+        "panes-start",
+        Some(r#"{"panes": {"query_height": 150, "source_share": 0.3}}"#),
+    );
+    assert!(
+        (h.query_panel().height() - 150.0).abs() < 1.0,
+        "{:?}",
+        h.query_panel()
+    );
+    let source = h.panel("source_panel").expect("the source panel");
+    assert!(
+        (source.width() - 0.3 * SCREEN.x).abs() < 2.0,
+        "Source takes 30% of the width: {source:?}"
+    );
+    forget_settings(&file);
+}
+
+#[test]
+fn the_panes_are_as_they_always_were_when_nothing_was_left() {
+    let (h, file) = start_with("panes-default", None);
+    assert!((h.query_panel().bottom() - LEGACY_QUERY_PANEL_BOTTOM).abs() < 0.2);
+    let source = h.panel("source_panel").expect("the source panel");
+    assert!((source.width() - 0.5 * SCREEN.x).abs() < 2.0, "{source:?}");
+    forget_settings(&file);
+}
+
+#[test]
+fn dragging_the_query_panel_is_kept() {
+    let (mut h, file) = start_with("panes-drag", None);
+    let panel = h.query_panel();
+    // The edge under the query panel is what is dragged.
+    h.drag_y(300.0, panel.bottom(), panel.bottom() + 60.0);
+    h.pause(1.0);
+    let height = kept(&file).expect("it was written")["panes"]["query_height"]
+        .as_f64()
+        .expect("a height");
+    assert!(
+        (height - f64::from(h.query_panel().height())).abs() < 1.0,
+        "kept {height}, is {}",
+        h.query_panel().height()
+    );
+    assert!(height > f64::from(panel.height()) + 40.0, "{height}");
+    forget_settings(&file);
+}
+
+#[test]
+fn dragging_the_edge_between_source_and_results_is_kept() {
+    let (mut h, file) = start_with("panes-split", None);
+    let source = h.panel("source_panel").expect("the source panel");
+    h.drag_x(source.right(), 400.0, 300.0);
+    h.pause(1.0);
+    let share = kept(&file).expect("it was written")["panes"]["source_share"]
+        .as_f64()
+        .expect("a share");
+    let now = f64::from(h.panel("source_panel").unwrap().width() / SCREEN.x);
+    assert!((share - now).abs() < 0.01, "kept {share}, is {now}");
+    assert!(share < 0.45, "Source got narrower: {share}");
+    forget_settings(&file);
+}
+
+#[test]
+fn the_light_theme_and_suggestions_are_what_the_app_starts_with_when_they_were_left_so() {
+    let (h, file) = start_with(
+        "start-suggest",
+        Some(r#"{"theme": "light", "autocomplete": true}"#),
+    );
+    assert!(h.app.query_suggest.enabled);
+    assert_eq!(h.ctx.theme(), egui::Theme::Light);
+    forget_settings(&file);
+}
+
+#[test]
+fn turning_suggestions_on_is_kept() {
+    let (mut h, file) = start_with("suggest-toggle", None);
+    let bulb = text_rect(&h, "💡").expect("the suggestions button");
+    h.click(bulb.center().x, bulb.center().y);
+    assert!(h.app.query_suggest.enabled);
+    h.pause(1.0);
+    assert_eq!(
+        kept(&file),
+        Some(serde_json::json!({"limits": {}, "autocomplete": true}))
+    );
+    h.click(bulb.center().x, bulb.center().y);
+    h.pause(1.0);
+    assert_eq!(kept(&file), Some(serde_json::json!({"limits": {}})));
+    forget_settings(&file);
+}
+
+#[test]
+fn what_was_changed_a_moment_ago_is_written_when_the_app_closes() {
+    let (mut h, file) = start_with("flush", None);
+    let sun = text_rect(&h, "☀").expect("the theme button");
+    h.click(sun.center().x, sun.center().y);
+    assert!(!file.exists(), "not yet");
+    // The app is closing before the moment has gone by.
+    h.app.flush_settings();
+    assert_eq!(
+        kept(&file),
+        Some(serde_json::json!({"limits": {}, "theme": "light"}))
+    );
+    forget_settings(&file);
+}
+
+#[test]
+fn the_limits_and_the_interface_are_kept_together_and_neither_loses_the_other() {
+    let (mut h, file) = start_with("together", Some(r#"{"theme": "light"}"#));
+    open_settings(&mut h);
+    open_advanced(&mut h);
+    set_limit(&mut h, Limit::Copy, "8 MB");
+    assert_eq!(
+        kept(&file),
+        Some(serde_json::json!({"limits": {"copy": "8 MB"}, "theme": "light"}))
+    );
+    // And a change of the interface after it keeps the limit.
+    let moon = text_rect(&h, "🌙").expect("the theme button, a moon in the light theme");
+    h.click(moon.center().x, moon.center().y);
+    h.pause(1.0);
+    assert_eq!(
+        kept(&file),
+        Some(serde_json::json!({"limits": {"copy": "8 MB"}}))
+    );
+    forget_settings(&file);
 }

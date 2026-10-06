@@ -132,6 +132,8 @@ pub struct Tools {
     patch: Patch,
     validate: Validate,
     shared: Shared,
+    /// The most the tools take (see `Env::tool_bytes`).
+    tool_bytes: u64,
     icon: Option<Arc<egui::IconData>>,
 }
 
@@ -146,6 +148,7 @@ impl Default for Tools {
             patch: Patch::default(),
             validate: Validate::default(),
             shared: Shared::default(),
+            tool_bytes: crate::settings::DEFAULT_TOOLS_BYTES,
             icon: None,
         }
     }
@@ -172,6 +175,11 @@ impl Tools {
     /// The window was closed (by the user): stop showing it.
     pub fn close(&mut self) {
         self.open = false;
+    }
+
+    /// The most the tools take from now on, all of a job's documents together.
+    pub fn use_limit(&mut self, bytes: u64) {
+        self.tool_bytes = bytes;
     }
 
     /// Open the window on `tool`'s page.
@@ -376,6 +384,7 @@ impl Tools {
         let mut env = Env {
             open_doc,
             own_input,
+            tool_bytes: self.tool_bytes,
             shared: &mut self.shared,
         };
         let request = match self.tool {

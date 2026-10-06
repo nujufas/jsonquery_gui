@@ -17,6 +17,8 @@ use crate::dock::{Central, Dock, Pane};
 use crate::pane_header;
 use crate::query_highlight;
 use crate::query_suggest::{apply_suggestion, QuerySuggest};
+use crate::settings::{Settings, Store, DEFAULT_WINDOW, MIN_WINDOW};
+use crate::settings_window::SettingsWindow;
 use crate::tools::{self, Tools};
 use crate::tree_view::{RowAction, TreeView};
 use crate::tutorial::{LoadRequest, Tutorial};
@@ -63,6 +65,18 @@ const POP_ICON_FONT_SIZE: f32 = 10.0;
 /// How long a window whose pane has been docked waits for the main window to
 /// drop it before it gets out of the way by itself, in seconds.
 const WINDOW_DROP_GRACE_SECS: f64 = 0.5;
+
+/// How long what the interface looks like (the theme, the size of the window and
+/// of its panes) has to stay as it is, in seconds, before it is written to the
+/// settings: a window being dragged to a size is not a size to keep at every
+/// step of the way.
+const INTERFACE_SETTLE_SECS: f64 = 0.5;
+
+/// How long the size of the window and of its panes has to hold still, in
+/// seconds, to be the size they have: a window that is being maximized has the
+/// size of the screen for a moment before it says that it is maximized (or the
+/// other way round), and that is not a size to start with again.
+const LAYOUT_HOLD_SECS: f64 = 0.25;
 
 /// Width the toolbar keeps free to the right of its source field: the "…",
 /// "Load" and "Clear" buttons, the byte size, and the icon buttons pinned to
@@ -144,6 +158,32 @@ pub struct App {
     /// The (i) info window (also a second native window) — license, source,
     /// issues/contact, privacy and known limitations.
     info_window: InfoWindow,
+    /// The ⚙ Settings window (also a second native window): the limit on from
+    /// what size a file is kept on disk, and under Advanced the other limits on
+    /// the size of files.
+    settings_window: SettingsWindow,
+    /// What the user has set (`settings.rs`), and where it is kept between runs.
+    settings: Settings,
+    store: Store,
+    /// What the interface looked like when the settings were last written (or
+    /// read): what `settings.interface` is kept up to date with as the user
+    /// changes the theme, the size of the window and of its panes.
+    interface_kept: crate::settings::Interface,
+    /// What the interface looked like when it was last seen to differ from
+    /// `interface_kept`, and since when (in egui's time): it is written once it
+    /// has stayed as it is for a moment.
+    interface_pending: Option<(crate::settings::Interface, f64)>,
+    /// How high the query panel and how much of the width Source took, as they
+    /// were drawn last (none while the pane is out in a window of its own).
+    seen_query_height: Option<f32>,
+    seen_source_share: Option<f32>,
+    /// A window opened at a saved size was checked against its screen.
+    window_checked: bool,
+    /// What the window and its panes measured when last seen, and since when (in
+    /// egui's time): they are kept once they have held still for a moment.
+    layout_seen: Option<(Layout, f64)>,
+    /// A window that was left maximized was asked to be, as the app started.
+    maximize_asked: bool,
     /// The ⚠ beside the (i), on a Wayland desktop: files can't be dropped on
     /// the window there, and what to do about it (`x11_alert.rs`).
     x11_alert: X11Alert,
@@ -242,6 +282,16 @@ pub struct App {
     /// The bottom panel — `Some` while it is shown: every match of a "Find
     /// All", or the candidates of a "Find in Source".
     hit_list: Option<HitList>,
+}
+
+/// What the window and its panes measure, as far as it is kept for the next start:
+/// the size of the window, how high the query panel is and how much of the width
+/// Source has.
+#[derive(Clone, Copy, PartialEq)]
+struct Layout {
+    window: [f32; 2],
+    query_height: Option<f32>,
+    source_share: Option<f32>,
 }
 
 /// What a "Search…" run looked for — "Find" and "Find All" re-search whenever
@@ -367,22 +417,46 @@ fn wake_windows(ctx: &egui::Context) {
 }
 
 impl App {
-    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        Self::with_context(&cc.egui_ctx)
+    /// The app with `settings`, which were read from `store` and are written
+    /// back to it as they change.
+    pub fn new(cc: &eframe::CreationContext<'_>, store: Store, settings: Settings) -> Self {
+        Self::with_settings(&cc.egui_ctx, store, settings)
     }
 
     /// The whole app needs from eframe is the `egui::Context`, so this is
-    /// what lets the layout tests run it without a window.
+    /// what lets the layout tests run it without a window — and without reading
+    /// the settings of whoever runs them.
+    #[cfg(test)]
     fn with_context(egui_ctx: &egui::Context) -> Self {
+        Self::with_settings(egui_ctx, Store::none(), Settings::default())
+    }
+
+    /// The app with the settings that are in `store`.
+    #[cfg(test)]
+    fn with_store(egui_ctx: &egui::Context, mut store: Store) -> Self {
+        let settings = store.load();
+        Self::with_settings(egui_ctx, store, settings)
+    }
+
+    fn with_settings(egui_ctx: &egui::Context, store: Store, settings: Settings) -> Self {
         let (cmd_tx, cmd_rx) = crossbeam_channel::unbounded();
         let (evt_tx, evt_rx) = crossbeam_channel::unbounded();
 
-        // Deterministic starting theme (rather than following the system,
-        // which would make the light/dark toggle's initial state a surprise).
-        egui_ctx.set_theme(egui::ThemePreference::Dark);
+        // A deterministic starting theme (rather than following the system,
+        // which would make the light/dark toggle's initial state a surprise): the
+        // one the user left, and dark the first time.
+        egui_ctx.set_theme(if settings.interface.dark {
+            egui::ThemePreference::Dark
+        } else {
+            egui::ThemePreference::Light
+        });
+        let mut query_suggest = QuerySuggest::default();
+        query_suggest.set_enabled(settings.interface.autocomplete);
 
         let ctx = egui_ctx.clone();
-        worker::spawn(cmd_rx, evt_tx, move || wake_windows(&ctx));
+        worker::spawn(cmd_rx, evt_tx, settings.limits, move || wake_windows(&ctx));
+        let mut tools = Tools::default();
+        tools.use_limit(settings.limits.tools());
 
         Self {
             cmd_tx,
@@ -407,10 +481,20 @@ impl App {
             query_error: None,
             query_engine: None,
             last_resolved_engine: None,
-            query_suggest: QuerySuggest::default(),
+            query_suggest,
             tutorial: Tutorial::default(),
-            tools: Tools::default(),
+            tools,
             info_window: InfoWindow::default(),
+            settings_window: SettingsWindow::default(),
+            interface_kept: settings.interface,
+            interface_pending: None,
+            seen_query_height: None,
+            seen_source_share: None,
+            window_checked: false,
+            layout_seen: None,
+            maximize_asked: false,
+            settings,
+            store,
             // The layout tests must not depend on the session they run from.
             x11_alert: if cfg!(test) {
                 X11Alert::default()
@@ -1428,6 +1512,19 @@ impl App {
     /// Show the value at a JSON Pointer in the open document, which is what the
     /// Tools window's Validate does for a problem: the pointer goes in the
     /// query box, under the Pointer engine, and runs.
+    /// The user changed the settings (in the Settings window): keep them for the
+    /// next run, and tell what has to know now — the worker, which does what
+    /// the limits on files are about, and the Tools window.
+    fn apply_settings(&mut self, settings: Settings) {
+        if settings == self.settings {
+            return;
+        }
+        self.settings = settings;
+        self.save_settings();
+        self.tools.use_limit(self.settings.limits.tools());
+        let _ = self.cmd_tx.send(Command::UseLimits(self.settings.limits));
+    }
+
     fn show_pointer(&mut self, ctx: &egui::Context, pointer: String) {
         self.query_engine = Some(jsonquery_query::Kind::JsonPointer);
         self.query_text = pointer;
@@ -2297,8 +2394,10 @@ impl App {
         // out for the duration and put back afterwards.
         //
         // The right side is laid out right to left: the (i) first, so that it
-        // stays in the corner, and on native Wayland the alert (⚠) beside it.
+        // stays in the corner, and on native Wayland the alert (⚠) beside it,
+        // and then the ⚙ that opens the Settings.
         let mut info_window = std::mem::take(&mut self.info_window);
+        let mut settings_window = std::mem::take(&mut self.settings_window);
         let mut x11_alert = std::mem::take(&mut self.x11_alert);
         egui::Sides::new().shrink_right().show(
             ui,
@@ -2306,9 +2405,11 @@ impl App {
             |ui| {
                 info_button(ui, &mut info_window);
                 x11_alert.ui(ui);
+                settings_button(ui, &mut settings_window);
             },
         );
         self.info_window = info_window;
+        self.settings_window = settings_window;
         self.x11_alert = x11_alert;
     }
 
@@ -2738,6 +2839,18 @@ fn tutorial_button(ui: &mut egui::Ui, tutorial: &mut Tutorial) {
     }
 }
 
+/// Small ⚙ button beside the (i) — opens the Settings window (or brings it to
+/// the front if it's already open).
+fn settings_button(ui: &mut egui::Ui, window: &mut SettingsWindow) {
+    if ui
+        .small_button("⚙")
+        .on_hover_text("Settings — the limits on the size of files")
+        .clicked()
+    {
+        window.open_or_focus(ui.ctx());
+    }
+}
+
 /// Repo URL that the info window's links are built from — license, source,
 /// issues/contact and the README's "Known limitations" section all live
 /// under it.
@@ -2847,9 +2960,9 @@ fn info_window_contents(ui: &mut egui::Ui) {
     ui.label("Known limitations:");
     ui.label(
         "Drag-and-drop doesn't work on native Wayland (use the Source field, or run \
-         under XWayland); a file of 256 MiB or more is read from disk as you look at it, \
-         and a query that needs all of a long list as a value, and the Tools window \
-         (but for Format), don't work on it.",
+         under XWayland); a file of 256 MB or more (the size is a setting, under ⚙) is \
+         read from disk as you look at it, and a query that needs all of a long list as a \
+         value, and the Tools window (but for Format), don't work on it.",
     );
     ui.hyperlink_to(
         "More in the README",
@@ -2875,14 +2988,18 @@ fn info_button(ui: &mut egui::Ui, info: &mut InfoWindow) {
 pub struct Shared(Arc<Mutex<App>>);
 
 impl Shared {
-    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        Self(Arc::new(Mutex::new(App::new(cc))))
+    pub fn new(cc: &eframe::CreationContext<'_>, store: Store, settings: Settings) -> Self {
+        Self(Arc::new(Mutex::new(App::new(cc, store, settings))))
     }
 }
 
 impl eframe::App for Shared {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         lock(&self.0).show_with(ui, Some(&self.0));
+    }
+
+    fn on_exit(&mut self) {
+        lock(&self.0).flush_settings();
     }
 }
 
@@ -2918,10 +3035,16 @@ impl App {
         if !self.dock.is_popped(Pane::Query) {
             let query = egui::Panel::top("query_bar")
                 .resizable(true)
-                .default_size(QUERY_PANEL_DEFAULT_HEIGHT)
+                .default_size(
+                    self.settings
+                        .interface
+                        .query_height
+                        .unwrap_or(QUERY_PANEL_DEFAULT_HEIGHT),
+                )
                 .min_size(QUERY_PANEL_MIN_HEIGHT)
                 .show(ui, |ui| self.query_pane(ui));
             self.dock.note_docked(Pane::Query, query.response.rect);
+            self.seen_query_height = Some(query.response.rect.height());
         }
         egui::Panel::bottom("status_bar").show(ui, |ui| self.status_bar(ui));
         if self.hit_list.is_some() {
@@ -2942,11 +3065,16 @@ impl App {
                 // top/bottom.
                 let source_frame =
                     egui::Frame::side_top_panel(ui.style()).inner_margin(egui::Margin::same(8));
+                let width = ui.available_width();
+                let share = self.settings.interface.source_share.unwrap_or(0.5);
                 let source = egui::Panel::left("source_panel")
                     .resizable(true)
-                    .default_size(ui.available_width() * 0.5)
+                    .default_size(width * share)
                     .frame(source_frame)
                     .show(ui, |ui| self.source_pane(ui, hovering_drop));
+                if width > 0.0 {
+                    self.seen_source_share = Some(source.response.rect.width() / width);
+                }
                 let results = egui::CentralPanel::default().show(ui, |ui| self.results_pane(ui));
                 self.dock.note_docked(Pane::Source, source.response.rect);
                 self.dock.note_docked(Pane::Results, results.response.rect);
@@ -2973,6 +3101,137 @@ impl App {
         // Only now, so that every pane was drawn in one place this frame.
         self.dock.apply_requests();
         self.show_satellites(&ctx, shared);
+        self.note_interface(&ctx);
+    }
+
+    /// See what the interface looks like — the theme, whether the query box
+    /// suggests, how big the window is and how big its panes are — and, once it
+    /// has stayed as it is for a moment, write it to the settings, which the app
+    /// starts with the next time.
+    fn note_interface(&mut self, ctx: &egui::Context) {
+        let time = ctx.input(|i| i.time);
+        let mut now = self.settings.interface;
+        now.dark = ctx.theme() == egui::Theme::Dark;
+        now.autocomplete = self.query_suggest.enabled;
+
+        let (maximized, fullscreen, minimized, monitor) = ctx.input(|i| {
+            let window = i.viewport();
+            (
+                window.maximized == Some(true),
+                window.fullscreen == Some(true),
+                window.minimized == Some(true),
+                window.monitor_size,
+            )
+        });
+        let size = ctx.viewport_rect().size();
+        // Some window managers ignore a window that asks to be maximized as it
+        // opens (and not one that is asked to be afterwards).
+        if !std::mem::replace(&mut self.maximize_asked, true)
+            && self.settings.interface.maximized
+            && !maximized
+            && !fullscreen
+        {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(true));
+        }
+        // The size of the window and of its panes are what they are when the window
+        // is as the user sizes it. One that is minimized reports a size that means
+        // nothing (and its panes are squeezed into it), and one that is maximized or
+        // full screen has the size of the screen, which is not a size to start with
+        // again: what was kept of the others stays.
+        let sized = !minimized
+            && !maximized
+            && !fullscreen
+            && size.x >= MIN_WINDOW[0] - 1.0
+            && size.y >= MIN_WINDOW[1] - 1.0;
+        if !minimized && !fullscreen {
+            now.maximized = maximized;
+        }
+        if sized {
+            let sample = Layout {
+                window: [size.x.round(), size.y.round()],
+                query_height: self.seen_query_height.map(f32::round),
+                source_share: self
+                    .seen_source_share
+                    .map(|s| (s * 1000.0).round() / 1000.0),
+            };
+            let since = match self.layout_seen {
+                Some((seen, since)) if seen == sample => since,
+                _ => {
+                    self.layout_seen = Some((sample, time));
+                    time
+                }
+            };
+            let mut proposed = now;
+            let usual = (sample.window[0] - DEFAULT_WINDOW[0]).abs() < 0.5
+                && (sample.window[1] - DEFAULT_WINDOW[1]).abs() < 0.5;
+            proposed.window = (!usual).then_some(sample.window);
+            if let Some(height) = sample.query_height {
+                let usual = (height - QUERY_PANEL_DEFAULT_HEIGHT).abs() < 1.0;
+                proposed.query_height = (!usual).then_some(height);
+            }
+            if let Some(share) = sample.source_share {
+                let usual = (share - 0.5).abs() < 0.005;
+                proposed.source_share = (!usual).then_some(share);
+            }
+            // Only a layout that is not the one that is kept has to hold still.
+            if proposed != now {
+                let held = time - since;
+                if held >= LAYOUT_HOLD_SECS {
+                    now = proposed;
+                } else {
+                    ctx.request_repaint_after(Duration::from_secs_f64(LAYOUT_HOLD_SECS - held));
+                }
+            }
+        }
+        // The size saved may be of a bigger screen than this one.
+        if !self.window_checked {
+            if let Some(monitor) = monitor {
+                self.window_checked = true;
+                let too_big = size.x > monitor.x + 1.0 || size.y > monitor.y + 1.0;
+                if self.settings.interface.window.is_some() && !maximized && too_big {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(
+                        size.x.min(monitor.x),
+                        size.y.min(monitor.y),
+                    )));
+                }
+            }
+        }
+
+        self.settings.interface = now;
+        if now == self.interface_kept {
+            self.interface_pending = None;
+            return;
+        }
+        // Wait for it to stop changing: each change starts the wait over.
+        let since = match self.interface_pending {
+            Some((seen, since)) if seen == now => since,
+            _ => {
+                self.interface_pending = Some((now, time));
+                time
+            }
+        };
+        let waited = time - since;
+        if waited >= INTERFACE_SETTLE_SECS {
+            self.save_settings();
+        } else {
+            // Nothing else may ask for a frame to see it through.
+            ctx.request_repaint_after(Duration::from_secs_f64(INTERFACE_SETTLE_SECS - waited));
+        }
+    }
+
+    /// Write the settings, all of them, as they are.
+    fn save_settings(&mut self) {
+        self.store.save(&self.settings);
+        self.interface_kept = self.settings.interface;
+        self.interface_pending = None;
+    }
+
+    /// The app is closing: write what the interface looks like if it was changed
+    /// too short a while ago to have been written.
+    fn flush_settings(&mut self) {
+        if self.settings.interface != self.interface_kept {
+            self.save_settings();
+        }
     }
 
     /// Make each pane that is in a window of its own show there.

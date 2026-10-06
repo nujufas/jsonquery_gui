@@ -45,8 +45,8 @@ Text that holds several top-level values (NDJSON) counts as one array, as it
 does when opened on its own, and numbers keep their exact digits throughout.
 
 All of these work **in memory**, so they are meant for documents that are not
-very large: what a tool is given may add up to **128 MB**. Past that it says so
-and refuses. **Ctrl+Enter** runs the page's main button, and **Cancel** stops a
+very large: what a tool is given may add up to **128 MB** (a [setting](settings.md)).
+Past that it says so and refuses. **Ctrl+Enter** runs the page's main button, and **Cancel** stops a
 job that is still running. If the text is not JSON, the error says which box and
 where: `Input: parsing JSON: expected value at line 3 column 1`.
 
@@ -188,7 +188,7 @@ A text box can only edit about a megabyte, so a document that comes out bigger
 than that is not shown: its box says "Too big to show" and holds it as it is, to
 be used when you compare again, until you clear it or put something else in. A
 move is limited only by what the tools take in all (128 MB, with the other
-document), and says so if it is over.
+document; the same setting), and says so if it is over.
 
 The lines are the pretty-printed documents (two spaces to a level, numbers as
 they were written), and what is marked is exactly what is in the patch. Both
@@ -266,7 +266,8 @@ crate.
 ## Limits
 
 - Every tool but Format works **in memory**: what it is given may add up to
-  **128 MB**. (Use `jq`, or a tool made for it, for bigger things; DuckDB reads
+  **128 MB** by default; the limit is a [setting](settings.md), as is the size from
+  which a file is kept on disk, which a tool can't use (Format excepted). (Use `jq`, or a tool made for it, for bigger things; DuckDB reads
   many JSON files with SQL.) Format writes a document that is kept as its file
   from there, whatever its size, without sorting its keys.
 - A filter that produces more than a million outputs is stopped.
@@ -303,4 +304,4 @@ crate.
   nothing of a file is kept once it is parsed. A file of 256 MiB or more is not a
   value but a lazy document (see the Scaling section in
   [Architecture](architecture.md)); the tools are for files that are not very
-  large, and refuse one, as they refuse anything over 128 MB.
+  large, and refuse one, as they refuse anything over 128 MB (by default).

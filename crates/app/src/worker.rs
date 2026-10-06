@@ -18,26 +18,17 @@ use jsonquery_core::{
 use jsonquery_query::{merge, output, OutputFormat};
 
 use crate::app::human_bytes;
+use crate::settings::FileLimits;
 use crate::tools::jobs::{self, Job, Outcome};
 use crate::tools::Tool;
 
-/// Cap on a URL download's response body, matching the "a few GB" v1 scale
-/// ceiling (Architecture §3) — protects against a malicious or misbehaving
-/// server exhausting disk/memory via an unbounded response.
-const MAX_DOWNLOAD_BYTES: u64 = 4 * 1024 * 1024 * 1024;
-
-/// Cap on the combined size of the files one merge reads. A merge happens in
-/// memory — each file is parsed, then copied into jq's own values, and the
-/// result is built on top — so it is for files that are not very large; past
-/// this, one at a time (or a tool made for it) is the way.
-pub const MAX_MERGE_BYTES: u64 = 128 * 1024 * 1024;
+// The sizes this thread holds the work to (how big a download may be, how much a
+// merge takes, how much "Copy to Clipboard" copies of a very large document) are
+// the user's limits on files (`settings.rs`), which it starts with and takes new
+// ones of from `Command::UseLimits`.
 
 /// Nodes of a merge result shown as the Tools window's preview.
 const MERGE_PREVIEW_NODES: usize = 600;
-
-/// The most that "Copy to Clipboard" takes from a very large document, in bytes
-/// of the file: more is for "Save…", which does not hold it in memory.
-const MAX_COPY_BYTES: usize = 64 * 1024 * 1024;
 
 /// What the text view shows of a very large document: as much text as this, and
 /// of a string as much as that, whatever the number of nodes it is asked for.
@@ -97,6 +88,9 @@ pub enum CopyTarget {
 }
 
 pub enum Command {
+    /// The limits on files the user has set (or put back): what the commands after
+    /// this one go by.
+    UseLimits(FileLimits),
     OpenFile(PathBuf),
     OpenText(String),
     OpenUrl(String),
@@ -278,13 +272,20 @@ pub enum Event {
 
 /// Spawn the worker thread. `wake` is called after every event is sent so
 /// the (otherwise idle, redraw-on-demand) egui context repaints promptly.
-pub fn spawn(cmd_rx: Receiver<Command>, evt_tx: Sender<Event>, wake: impl Fn() + Send + 'static) {
+pub fn spawn(
+    cmd_rx: Receiver<Command>,
+    evt_tx: Sender<Event>,
+    limits: FileLimits,
+    wake: impl Fn() + Send + 'static,
+) {
     std::thread::spawn(move || {
+        let mut limits = limits;
         for cmd in cmd_rx {
             match cmd {
+                Command::UseLimits(new) => limits = new,
                 Command::OpenFile(path) => {
                     send(&evt_tx, Event::Loading, &wake);
-                    let result = jsonquery_core::load(&path).map(Arc::new);
+                    let result = jsonquery_core::load_with(&path, limits.load()).map(Arc::new);
                     send_load_result(&evt_tx, result, &wake);
                 }
                 Command::OpenText(text) => {
@@ -294,9 +295,7 @@ pub fn spawn(cmd_rx: Receiver<Command>, evt_tx: Sender<Event>, wake: impl Fn() +
                 }
                 Command::OpenUrl(url) => {
                     send(&evt_tx, Event::Loading, &wake);
-                    let result =
-                        download(&url, &std::env::temp_dir(), jsonquery_core::LAZY_THRESHOLD)
-                            .map(Arc::new);
+                    let result = download(&url, &std::env::temp_dir(), &limits).map(Arc::new);
                     send_load_result(&evt_tx, result, &wake);
                 }
                 Command::SaveFile {
@@ -337,12 +336,15 @@ pub fn spawn(cmd_rx: Receiver<Command>, evt_tx: Sender<Event>, wake: impl Fn() +
                     let result = match &target {
                         CopyTarget::Source { doc, node_path } => match node_path {
                             Some(np) => match jsonquery_core::resolve(doc.root(), np) {
-                                Some(root) => root_text(root).context("serializing that value"),
+                                Some(root) => {
+                                    root_text(root, limits.copy()).context("serializing that value")
+                                }
                                 None => Err(anyhow::anyhow!(
                                     "that value is no longer part of the document"
                                 )),
                             },
-                            None => root_text(doc.root()).context("serializing the document"),
+                            None => root_text(doc.root(), limits.copy())
+                                .context("serializing the document"),
                         },
                         CopyTarget::Value(v) if format.is_tabular() => Ok(output::rows_text(v)),
                         CopyTarget::Value(v) => {
@@ -428,8 +430,8 @@ pub fn spawn(cmd_rx: Receiver<Command>, evt_tx: Sender<Event>, wake: impl Fn() +
                     gen,
                     cancel,
                 } => {
-                    let result =
-                        merge_files(&paths, &filter, &cancel).map_err(|e| format!("{e:#}"));
+                    let result = merge_files(&paths, &filter, &cancel, &limits)
+                        .map_err(|e| format!("{e:#}"));
                     send(&evt_tx, Event::MergeDone { gen, result }, &wake);
                 }
                 Command::Tool {
@@ -438,7 +440,7 @@ pub fn spawn(cmd_rx: Receiver<Command>, evt_tx: Sender<Event>, wake: impl Fn() +
                     gen,
                     cancel,
                 } => {
-                    let result = jobs::run(job, &cancel);
+                    let result = jobs::run(job, &cancel, &limits);
                     send(&evt_tx, Event::ToolDone { tool, gen, result }, &wake);
                 }
                 Command::SaveFormatted { streamed, path } => {
@@ -466,7 +468,8 @@ pub fn spawn(cmd_rx: Receiver<Command>, evt_tx: Sender<Event>, wake: impl Fn() +
                     // goes wrong in one is an answer for this query, not the end of
                     // this thread, which every later command waits on.
                     let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        run_query(&evt_tx, &doc, &text, engine, gen, &cancel, &wake);
+                        let reply = |event| send(&evt_tx, event, &wake);
+                        run_query(&reply, &doc, &text, engine, gen, &cancel, limits.query());
                     }));
                     if ran.is_err() {
                         send(
@@ -491,6 +494,7 @@ fn merge_files(
     paths: &[PathBuf],
     filter: &str,
     cancel: &AtomicBool,
+    limits: &FileLimits,
 ) -> anyhow::Result<MergeOutcome> {
     let start = Instant::now();
     let total = paths
@@ -501,12 +505,15 @@ fn merge_files(
                 .with_context(|| format!("reading {}", p.display()))
         })
         .sum::<anyhow::Result<u64>>()?;
-    if total > MAX_MERGE_BYTES {
+    // A merge happens in memory — each file is parsed, then copied into jq's own
+    // values, and the result is built on top — so it is for files that are not
+    // very large; past this, one at a time (or a tool made for it) is the way.
+    if total > limits.tools() {
         anyhow::bail!(
             "these files add up to {}, over the {} that can be merged — a merge happens in \
              memory. Open them one at a time instead.",
             human_bytes(total),
-            human_bytes(MAX_MERGE_BYTES)
+            human_bytes(limits.tools())
         );
     }
 
@@ -518,7 +525,10 @@ fn merge_files(
         if cancel.load(Ordering::Relaxed) {
             anyhow::bail!("cancelled");
         }
-        let doc = jsonquery_core::load(path).with_context(|| path.display().to_string())?;
+        // Parsed, whatever is allowed to be merged, rather than kept on disk from
+        // a lower size than that.
+        let doc = jsonquery_core::load_with(path, limits.load_for_tools())
+            .with_context(|| path.display().to_string())?;
         read_time += doc.parse_time;
         files.push(MergedFile {
             bytes: doc.byte_len,
@@ -575,34 +585,39 @@ pub(crate) fn describe<V: ValueView>(root: V) -> String {
     }
 }
 
-/// Download `url`'s body and load it. A body of fewer than `spill_at` bytes is
-/// held in memory and parsed from there, as pasted text is, and never touches
-/// the disk. A larger one is streamed into a temporary file in `spill_dir`
-/// instead of being held in memory whole, and then loaded like a file opened
-/// from disk: from `spill_at` bytes, which is [`jsonquery_core::LAZY_THRESHOLD`]
-/// where it is not a test, that is mapped and indexed, not parsed.
+/// Download `url`'s body and load it. A body of fewer bytes than the user keeps a
+/// file on disk from (`limits`; 256 MB unless they changed it) is held in memory
+/// and parsed from there, as pasted text is, and never touches the disk. A larger
+/// one is streamed into a temporary file in `spill_dir` instead of being held in
+/// memory whole, and then loaded like a file opened from disk: mapped and
+/// indexed, not parsed. A body of more than `limits` lets a download hand over is
+/// an error.
 ///
 /// The temporary file has no name from the moment it is made, so nothing of it
 /// can be left behind whatever happens, and a lazy document that is mapped from
 /// it has it for as long as it lives.
-fn download(url: &str, spill_dir: &Path, spill_at: u64) -> anyhow::Result<Document> {
+fn download(url: &str, spill_dir: &Path, limits: &FileLimits) -> anyhow::Result<Document> {
     use std::io::{Read, Write};
 
+    let spill_at = limits.keep_on_disk();
     let mut response = ureq::get(url)
         .call()
         .with_context(|| format!("requesting {url}"))?;
 
+    // (The reader fails a read that comes after as many bytes as it is to let by,
+    // which is the one that would have found the end of a body that is just that
+    // long: one more is what makes "at most" so.)
     let mut body = response
         .body_mut()
         .with_config()
-        .limit(MAX_DOWNLOAD_BYTES)
+        .limit(limits.download().saturating_add(1))
         .reader();
 
     let mut head = Vec::new();
     (&mut body)
         .take(spill_at)
         .read_to_end(&mut head)
-        .with_context(|| format!("downloading {url}"))?;
+        .map_err(|e| download_error(e, url, limits.download()))?;
     if (head.len() as u64) < spill_at {
         return jsonquery_core::load_bytes(&head, DocumentSource::Url(url.to_string()))
             .with_context(|| format!("parsing data from {url}"));
@@ -612,10 +627,29 @@ fn download(url: &str, spill_dir: &Path, spill_at: u64) -> anyhow::Result<Docume
     let written = file.write_all(&head);
     drop(head);
     written.context("writing the temporary file")?;
-    std::io::copy(&mut body, &mut file).with_context(|| format!("downloading {url}"))?;
+    std::io::copy(&mut body, &mut file).map_err(|e| download_error(e, url, limits.download()))?;
 
     jsonquery_core::load_open_file(&file, DocumentSource::Url(url.to_string()), spill_at)
         .with_context(|| format!("parsing data from {url}"))
+}
+
+/// What went wrong reading a download's body. One that is over the limit on
+/// downloads is said in the terms of that setting, not of the reader that
+/// stopped it.
+fn download_error(error: std::io::Error, url: &str, max: u64) -> anyhow::Error {
+    let over = error
+        .get_ref()
+        .and_then(|inner| inner.downcast_ref::<ureq::Error>())
+        .is_some_and(|inner| matches!(inner, ureq::Error::BodyExceedsLimit(_)));
+    if over {
+        anyhow::anyhow!(
+            "{url} is more than {}, the most that a download or a pipe may hand over \
+             (Settings: Largest download or pipe)",
+            human_bytes(max)
+        )
+    } else {
+        anyhow::Error::new(error).context(format!("downloading {url}"))
+    }
 }
 
 /// Make the file for `url`'s body, which has no name once it is made, and which
@@ -743,11 +777,11 @@ fn save_node(node: Node<'_>, path: &Path) -> anyhow::Result<()> {
 }
 
 /// A node as the text "Copy to Clipboard" puts on the clipboard.
-fn root_text(root: Root<'_>) -> anyhow::Result<String> {
+fn root_text(root: Root<'_>, max_copy: usize) -> anyhow::Result<String> {
     match root {
         Root::Tree(value) => Ok(serde_json::to_string_pretty(value)?),
         Root::Lazy(node) => {
-            if node.byte_len() > MAX_COPY_BYTES {
+            if node.byte_len() > max_copy {
                 anyhow::bail!(
                     "that value is {}, too big to copy: use Save… to write it to a file",
                     human_bytes(node.byte_len() as u64)
@@ -806,19 +840,21 @@ fn send_load_result(
     }
 }
 
+/// Run `text` over `doc` and tell the UI what came of it through `reply`.
+/// `limits` are what a query on a document kept on disk may hold of it.
 fn run_query(
-    evt_tx: &Sender<Event>,
+    reply: &impl Fn(Event),
     doc: &Document,
     text: &str,
     engine: jsonquery_query::Kind,
     gen: u64,
     cancel: &AtomicBool,
-    wake: &impl Fn(),
+    limits: jsonquery_query::lazy::Limits,
 ) {
     let start = Instant::now();
     let mut on_event = |event| match event {
-        QueryEvent::Item(value) => send(evt_tx, Event::QueryItem { gen, value }, wake),
-        QueryEvent::ItemError(error) => send(evt_tx, Event::QueryItemError { gen, error }, wake),
+        QueryEvent::Item(value) => reply(Event::QueryItem { gen, value }),
+        QueryEvent::ItemError(error) => reply(Event::QueryItemError { gen, error }),
     };
     let result = match &doc.content {
         Content::Tree(value) => engine.engine().run(value, text, cancel, &mut on_event),
@@ -826,28 +862,20 @@ fn run_query(
         // goes: the part of the query that can be is walked, and jq is given the
         // rest a piece at a time.
         Content::Lazy(tree) => {
-            jsonquery_query::lazy::run(engine, tree, text, cancel, &mut on_event)
+            jsonquery_query::lazy::run_with(engine, tree, text, limits, cancel, &mut on_event)
         }
     };
 
     match result {
-        Ok(_count) => send(
-            evt_tx,
-            Event::QueryDone {
-                gen,
-                cancelled: cancel.load(Ordering::Relaxed),
-                elapsed: start.elapsed(),
-            },
-            wake,
-        ),
-        Err(e) => send(
-            evt_tx,
-            Event::QueryError {
-                gen,
-                error: e.to_string(),
-            },
-            wake,
-        ),
+        Ok(_count) => reply(Event::QueryDone {
+            gen,
+            cancelled: cancel.load(Ordering::Relaxed),
+            elapsed: start.elapsed(),
+        }),
+        Err(e) => reply(Event::QueryError {
+            gen,
+            error: e.to_string(),
+        }),
     }
 }
 
@@ -861,14 +889,13 @@ fn send(evt_tx: &Sender<Event>, event: Event, wake: &impl Fn()) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scratch_dir::{ScratchDir, ScratchFile};
+    use crate::settings::Limit;
     use jsonquery_core::PathSegment;
     use serde_json::Value;
 
-    fn temp_dir(name: &str) -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("jsonquery-worker-{name}-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    fn temp_dir(name: &str) -> ScratchDir {
+        ScratchDir::new("worker", name)
     }
 
     fn write(dir: &Path, name: &str, text: &str) -> PathBuf {
@@ -882,8 +909,13 @@ mod tests {
         let dir = temp_dir("order");
         let a = write(&dir, "a.json", "[1, 2]");
         let b = write(&dir, "b.json", r#"{"k": 1}"#);
-        let outcome =
-            merge_files(&[b.clone(), a.clone()], "$files", &AtomicBool::new(false)).unwrap();
+        let outcome = merge_files(
+            &[b.clone(), a.clone()],
+            "$files",
+            &AtomicBool::new(false),
+            &FileLimits::default(),
+        )
+        .unwrap();
         assert_eq!(
             outcome.doc.tree(),
             Some(&serde_json::json!(["b.json", "a.json"]))
@@ -899,9 +931,14 @@ mod tests {
         let dir = temp_dir("bad");
         let good = write(&dir, "good.json", "[1]");
         let bad = write(&dir, "bad.json", "[1,");
-        let err = merge_files(&[good, bad.clone()], "add", &AtomicBool::new(false))
-            .err()
-            .expect("a truncated file fails");
+        let err = merge_files(
+            &[good, bad.clone()],
+            "add",
+            &AtomicBool::new(false),
+            &FileLimits::default(),
+        )
+        .err()
+        .expect("a truncated file fails");
         let message = format!("{err:#}");
         assert!(message.contains(&bad.display().to_string()), "{message}");
     }
@@ -913,6 +950,7 @@ mod tests {
             std::slice::from_ref(&missing),
             "add",
             &AtomicBool::new(false),
+            &FileLimits::default(),
         )
         .err()
         .expect("a missing file fails");
@@ -926,11 +964,16 @@ mod tests {
         // Sparse: nothing is written, but the file reports its length.
         std::fs::File::create(&path)
             .unwrap()
-            .set_len(MAX_MERGE_BYTES + 1)
+            .set_len(FileLimits::default().tools() + 1)
             .unwrap();
-        let err = merge_files(&[path], "add", &AtomicBool::new(false))
-            .err()
-            .expect("over the limit");
+        let err = merge_files(
+            &[path],
+            "add",
+            &AtomicBool::new(false),
+            &FileLimits::default(),
+        )
+        .err()
+        .expect("over the limit");
         let message = format!("{err:#}");
         assert!(
             message.contains("add up to") && message.contains("one at a time"),
@@ -943,19 +986,35 @@ mod tests {
         let dir = temp_dir("filter");
         let a = write(&dir, "a.json", "[1]");
         let b = write(&dir, "b.json", r#"{"k": 1}"#);
-        let err = merge_files(&[a, b], "add", &AtomicBool::new(false))
-            .err()
-            .expect("an array and an object do not add");
+        let err = merge_files(
+            &[a, b],
+            "add",
+            &AtomicBool::new(false),
+            &FileLimits::default(),
+        )
+        .err()
+        .expect("an array and an object do not add");
         assert!(format!("{err:#}").contains("cannot calculate"));
     }
 
     const WAIT: Duration = Duration::from_secs(20);
 
     fn start_worker() -> (Sender<Command>, Receiver<Event>) {
+        start_worker_with(FileLimits::default())
+    }
+
+    fn start_worker_with(limits: FileLimits) -> (Sender<Command>, Receiver<Event>) {
         let (cmd_tx, cmd_rx) = crossbeam_channel::unbounded();
         let (evt_tx, evt_rx) = crossbeam_channel::unbounded();
-        spawn(cmd_rx, evt_tx, || {});
+        spawn(cmd_rx, evt_tx, limits, || {});
         (cmd_tx, evt_rx)
+    }
+
+    /// Limits that keep a file on disk from `bytes`, and nothing else changed.
+    fn keeping_on_disk_from(bytes: u64) -> FileLimits {
+        let mut limits = FileLimits::default();
+        limits.set(Limit::KeepOnDisk, bytes);
+        limits
     }
 
     #[test]
@@ -996,13 +1055,17 @@ mod tests {
         }
     }
 
-    fn save_results_as(results: Value, file_name: &str, format: OutputFormat) -> (Event, PathBuf) {
-        let path = temp_dir("save-results").join(file_name);
+    fn save_results_as(
+        results: Value,
+        file_name: &str,
+        format: OutputFormat,
+    ) -> (Event, ScratchFile) {
+        let path = temp_dir("save-results").into_file(file_name);
         let (commands, events) = start_worker();
         commands
             .send(Command::SaveResults {
                 results,
-                path: path.clone(),
+                path: path.to_path_buf(),
                 format,
             })
             .unwrap();
@@ -1016,7 +1079,7 @@ mod tests {
             "results.json",
             OutputFormat::Json,
         );
-        assert!(matches!(event, Event::Saved(ref saved) if *saved == path));
+        assert!(matches!(event, Event::Saved(ref saved) if *saved == *path));
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
             "[\n  \"a,b\",\n  1\n]"
@@ -1030,7 +1093,7 @@ mod tests {
             "results.csv",
             OutputFormat::Csv,
         );
-        assert!(matches!(event, Event::Saved(ref saved) if *saved == path));
+        assert!(matches!(event, Event::Saved(ref saved) if *saved == *path));
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
             "\"Ada\",36\n\"Linus, L.\",28\n"
@@ -1277,7 +1340,7 @@ mod tests {
         let url = serve(br#"{"n": [1, 2, 3]}"#.to_vec());
         // A folder that is not there: a temporary file could not be made in it.
         let nowhere = temp_dir("download-small").join("not-there");
-        let doc = download(&url, &nowhere, 1024).unwrap();
+        let doc = download(&url, &nowhere, &keeping_on_disk_from(1024)).unwrap();
         assert_eq!(doc.tree(), Some(&serde_json::json!({"n": [1, 2, 3]})));
         assert_eq!(doc.byte_len, 16);
         assert_eq!(doc.source.label(), url);
@@ -1287,7 +1350,12 @@ mod tests {
     #[test]
     fn an_empty_download_is_an_empty_array() {
         let url = serve(Vec::new());
-        let doc = download(&url, &temp_dir("download-empty"), 1024).unwrap();
+        let doc = download(
+            &url,
+            &temp_dir("download-empty"),
+            &keeping_on_disk_from(1024),
+        )
+        .unwrap();
         assert_eq!(doc.tree(), Some(&serde_json::json!([])));
         assert_eq!((doc.byte_len, doc.top_level_values), (0, 0));
     }
@@ -1296,7 +1364,7 @@ mod tests {
     fn a_large_download_is_kept_in_a_file_that_was_never_there_to_see() {
         let dir = temp_dir("download-large");
         let url = serve(padded(5000));
-        let doc = download(&url, &dir, 1024).unwrap();
+        let doc = download(&url, &dir, &keeping_on_disk_from(1024)).unwrap();
         // Mapped, and indexed rather than parsed, from a file nobody can open.
         assert!(doc.is_lazy() && doc.lazy().unwrap().is_mapped());
         assert_eq!(value_of(&doc), serde_json::json!([1, 2, 3]));
@@ -1317,7 +1385,9 @@ mod tests {
     fn a_large_download_needs_somewhere_to_go() {
         let nowhere = temp_dir("download-nowhere").join("not-there");
         let url = serve(padded(5000));
-        let err = download(&url, &nowhere, 1024).err().expect("no folder");
+        let err = download(&url, &nowhere, &keeping_on_disk_from(1024))
+            .err()
+            .expect("no folder");
         assert!(
             format!("{err:#}").contains("creating temporary file"),
             "{err:#}"
@@ -1328,7 +1398,9 @@ mod tests {
     fn a_large_download_that_is_not_json_leaves_no_file_behind() {
         let dir = temp_dir("download-bad");
         let url = serve(vec![b'x'; 5000]);
-        let err = download(&url, &dir, 1024).err().expect("not JSON");
+        let err = download(&url, &dir, &keeping_on_disk_from(1024))
+            .err()
+            .expect("not JSON");
         let message = format!("{err:#}");
         assert!(
             message.contains("parsing data from") && message.contains("parsing JSON"),
@@ -1383,10 +1455,15 @@ mod tests {
         {"name": "Alan", "tags": []}, {"name": "Cy"}], "n": 3}"#;
 
     /// A document of `text` that is indexed rather than parsed, as one of 256 MiB
-    /// or more is, made from a file of its own.
+    /// or more is, made from a file of its own. (The file is gone from its folder
+    /// when this returns; the document holds it.)
     fn lazy_document(name: &str, text: &str) -> Arc<Document> {
-        let dir = temp_dir(name);
-        let path = write(&dir, "doc.json", text);
+        lazy_document_in(&temp_dir(name), text)
+    }
+
+    /// The same, from the file `doc.json` that is made in `dir`.
+    fn lazy_document_in(dir: &Path, text: &str) -> Arc<Document> {
+        let path = write(dir, "doc.json", text);
         let file = std::fs::File::open(path).unwrap();
         let doc = jsonquery_core::load_open_file(
             &file,
@@ -1472,7 +1549,8 @@ mod tests {
     #[test]
     fn a_row_of_a_document_kept_as_its_file_is_saved_as_pretty_json() {
         let doc = lazy_document("lazy-save", USERS);
-        let out = temp_dir("lazy-save").join("out.json");
+        let out_dir = temp_dir("lazy-save-out");
+        let out = out_dir.join("out.json");
         let (commands, events) = start_worker();
         for (node_path, expected) in [
             (
@@ -1507,8 +1585,8 @@ mod tests {
     #[test]
     fn a_document_whose_file_was_cut_short_is_refused_not_shown_as_zeros() {
         let numbers: Vec<String> = (0..40_000).map(|n| n.to_string()).collect();
-        let doc = lazy_document("lazy-cut", &format!("[{}]", numbers.join(",")));
         let dir = temp_dir("lazy-cut");
+        let doc = lazy_document_in(&dir, &format!("[{}]", numbers.join(",")));
         let tree = doc.lazy().unwrap();
         assert!(!tree.damaged());
 
@@ -1581,7 +1659,8 @@ mod tests {
         let text = r#"{"a": [1, "é", "\u00e9\n"], "b": {}, "c": [], "d": {"x": 1.50}}"#;
         let doc = lazy_document("lazy-formatted", text);
         let value: Value = serde_json::from_str(text).unwrap();
-        let out = temp_dir("lazy-formatted").join("out.json");
+        let out_dir = temp_dir("lazy-formatted-out");
+        let out = out_dir.join("out.json");
         let (commands, events) = start_worker();
         for options in [
             reformat::Options::default(),
@@ -1634,6 +1713,248 @@ mod tests {
             Event::CopyReady(text) => assert_eq!(text, "3"),
             _ => panic!("expected the copied text"),
         }
+    }
+
+    // ---- the limits on files the user set -----------------------------------
+
+    /// The default limits with these set.
+    fn limits_with(set: &[(Limit, u64)]) -> FileLimits {
+        let mut limits = FileLimits::default();
+        for (limit, bytes) in set {
+            limits.set(*limit, *bytes);
+        }
+        limits
+    }
+
+    /// What opening `bytes` bytes of JSON in a file makes of it, by this worker.
+    fn open_file_in(commands: &Sender<Command>, events: &Receiver<Event>, bytes: usize) -> bool {
+        let dir = temp_dir(&format!("open-by-limits-{bytes}"));
+        let mut text = b"[1, 2, 3]".to_vec();
+        text.resize(bytes, b' ');
+        let path = dir.join(format!("{bytes}.json"));
+        std::fs::write(&path, text).unwrap();
+        commands.send(Command::OpenFile(path)).unwrap();
+        loop {
+            match events.recv_timeout(WAIT).unwrap() {
+                Event::Loading => {}
+                Event::Loaded(doc) => return doc.is_lazy(),
+                Event::LoadError(e) => panic!("{e}"),
+                _ => panic!("expected the file to load"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_file_is_opened_by_the_limit_the_worker_started_with() {
+        let (commands, events) = start_worker();
+        assert!(!open_file_in(&commands, &events, 5000), "parsed by default");
+
+        let (commands, events) = start_worker_with(limits_with(&[(Limit::KeepOnDisk, 4096)]));
+        assert!(
+            open_file_in(&commands, &events, 5000),
+            "kept on disk from 4 KB"
+        );
+        assert!(!open_file_in(&commands, &events, 4095), "and not under it");
+    }
+
+    #[test]
+    fn new_limits_are_what_the_commands_after_them_go_by() {
+        let (commands, events) = start_worker();
+        assert!(!open_file_in(&commands, &events, 5000));
+        commands
+            .send(Command::UseLimits(limits_with(&[(
+                Limit::KeepOnDisk,
+                4096,
+            )])))
+            .unwrap();
+        assert!(open_file_in(&commands, &events, 5000));
+        commands
+            .send(Command::UseLimits(FileLimits::default()))
+            .unwrap();
+        assert!(!open_file_in(&commands, &events, 5000), "put back");
+    }
+
+    #[test]
+    fn the_limit_on_a_copy_is_the_one_the_worker_was_given() {
+        let doc = lazy_document("lazy-copy-limit", USERS);
+        let copy = |commands: &Sender<Command>, events: &Receiver<Event>, path| {
+            commands
+                .send(Command::CopyNode {
+                    target: CopyTarget::Source {
+                        doc: doc.clone(),
+                        node_path: path,
+                    },
+                    format: OutputFormat::Json,
+                })
+                .unwrap();
+            match events.recv_timeout(WAIT).unwrap() {
+                Event::CopyReady(text) => Ok(text),
+                Event::CopyError(message) => Err(message),
+                _ => panic!("expected the copy's answer"),
+            }
+        };
+        // 8 bytes: the number 3 goes, the document does not.
+        let (commands, events) = start_worker_with(limits_with(&[(Limit::Copy, 8)]));
+        assert_eq!(
+            copy(&commands, &events, Some(vec![PathSegment::Key("n".into())])),
+            Ok("3".to_owned())
+        );
+        let refused = copy(&commands, &events, None).expect_err("over the limit");
+        assert!(
+            refused.contains("too big to copy") && refused.contains("Save"),
+            "{refused}"
+        );
+        // Raised, the same document goes.
+        commands
+            .send(Command::UseLimits(FileLimits::default()))
+            .unwrap();
+        assert!(copy(&commands, &events, None).unwrap().contains("\"Alan\""));
+    }
+
+    #[test]
+    fn a_query_on_a_document_kept_as_its_file_holds_itself_to_the_limits() {
+        let doc = lazy_document("lazy-query-limits", USERS);
+        let run = |limits: FileLimits| {
+            let (commands, events) = start_worker_with(limits);
+            commands
+                .send(Command::Query {
+                    doc: doc.clone(),
+                    text: ".users".to_owned(),
+                    engine: jsonquery_query::Kind::Jq,
+                    gen: 1,
+                    cancel: Arc::new(AtomicBool::new(false)),
+                })
+                .unwrap();
+            match events.recv_timeout(WAIT).unwrap() {
+                Event::QueryItem { value, .. } => Ok(value),
+                Event::QueryItemError { error, .. } | Event::QueryError { error, .. } => Err(error),
+                Event::QueryDone { .. } => panic!("it made nothing"),
+                _ => panic!("expected the query's events"),
+            }
+        };
+        let users = run(FileLimits::default()).expect("a list of 100 bytes is fine");
+        assert_eq!(users.as_array().map(Vec::len), Some(3));
+
+        // A list of more than 16 bytes is too big to be parsed whole, and a result
+        // of more than 16 is more than this one may make.
+        let refused = run(limits_with(&[
+            (Limit::QueryParse, 16),
+            (Limit::QueryResult, 16),
+        ]))
+        .expect_err("too big");
+        assert!(
+            refused.contains("too big to show") && refused.contains("16 B"),
+            "{refused}"
+        );
+    }
+
+    #[test]
+    fn a_download_is_held_to_the_limit_on_what_one_may_hand_over() {
+        let url = serve(padded(5000));
+        let dir = temp_dir("download-limit");
+        let refused = download(&url, &dir, &limits_with(&[(Limit::Download, 2048)]))
+            .err()
+            .expect("over the limit");
+        let message = format!("{refused:#}");
+        assert!(
+            message.contains("is more than 2.0 KB") && message.contains("Settings"),
+            "{message}"
+        );
+        assert_eq!(files_in(&dir), 0, "and no file is left");
+
+        // One byte under the size of the body, it does not go either…
+        let url = serve(padded(5000));
+        let refused = download(&url, &dir, &limits_with(&[(Limit::Download, 4999)]))
+            .err()
+            .expect("one byte over");
+        assert!(
+            format!("{refused:#}").contains("is more than"),
+            "{refused:#}"
+        );
+
+        // …at the size of the body, it does.
+        let url = serve(padded(5000));
+        let doc = download(&url, &dir, &limits_with(&[(Limit::Download, 5000)])).unwrap();
+        assert_eq!(doc.byte_len, 5000);
+    }
+
+    #[test]
+    fn a_download_is_kept_on_disk_from_the_size_the_user_chose() {
+        // 5000 bytes: parsed where files are kept on disk from 8 KB…
+        let url = serve(padded(5000));
+        let doc = download(
+            &url,
+            &temp_dir("download-from-8k"),
+            &limits_with(&[(Limit::KeepOnDisk, 8192)]),
+        )
+        .unwrap();
+        assert!(!doc.is_lazy());
+        // …and kept on disk where they are from 4 KB.
+        let url = serve(padded(5000));
+        let doc = download(
+            &url,
+            &temp_dir("download-from-4k"),
+            &limits_with(&[(Limit::KeepOnDisk, 4096)]),
+        )
+        .unwrap();
+        assert!(doc.is_lazy());
+    }
+
+    #[test]
+    fn a_merge_takes_what_the_user_lets_the_tools_take_even_from_the_size_files_are_kept_on_disk_from(
+    ) {
+        let dir = temp_dir("merge-limits");
+        let a = write(&dir, "a.json", &format!("[1{}]", " ".repeat(5000)));
+        let b = write(&dir, "b.json", "[2]");
+        let cancel = AtomicBool::new(false);
+
+        // Over what the tools take: refused before a file is read.
+        let small = limits_with(&[(Limit::Tools, 4096)]);
+        let refused = merge_files(&[a.clone(), b.clone()], "add", &cancel, &small)
+            .err()
+            .expect("over the limit");
+        let message = format!("{refused:#}");
+        assert!(
+            message.contains("add up to") && message.contains("over the 4.0 KB"),
+            "{message}"
+        );
+
+        // Under it, though files are kept on disk from a lower size than that,
+        // it is parsed and merged.
+        let wide = limits_with(&[(Limit::Tools, 64 * 1024), (Limit::KeepOnDisk, 1024)]);
+        let merged = merge_files(&[a, b], "add", &cancel, &wide).unwrap();
+        assert_eq!(merged.doc.tree(), Some(&serde_json::json!([1, 2])));
+    }
+
+    #[test]
+    fn a_tool_job_takes_what_the_user_lets_the_tools_take() {
+        let (commands, events) = start_worker_with(limits_with(&[(Limit::Tools, 1024)]));
+        let job = |text: &str| Job::Format {
+            input: crate::tools::jobs::Input::Text(text.to_owned()),
+            options: jsonquery_query::reformat::Options::default(),
+        };
+        let run = |commands: &Sender<Command>, text: &str| {
+            commands
+                .send(Command::Tool {
+                    tool: Tool::Format,
+                    job: job(text),
+                    gen: 1,
+                    cancel: Arc::new(AtomicBool::new(false)),
+                })
+                .unwrap();
+            match events.recv_timeout(WAIT).unwrap() {
+                Event::ToolDone { result, .. } => result.map(|_| ()),
+                _ => panic!("expected the job's answer"),
+            }
+        };
+        let long = format!("[1{}]", " ".repeat(2000));
+        let refused = run(&commands, &long).expect_err("over 1 KB");
+        assert!(refused.contains("over the 1.0 KB"), "{refused}");
+        run(&commands, "[1]").unwrap();
+        commands
+            .send(Command::UseLimits(FileLimits::default()))
+            .unwrap();
+        run(&commands, &long).unwrap();
     }
 
     #[test]
@@ -1724,7 +2045,7 @@ mod tests {
     fn a_cancelled_merge_stops_before_reading() {
         let dir = temp_dir("cancel");
         let a = write(&dir, "a.json", "[1]");
-        let err = merge_files(&[a], "add", &AtomicBool::new(true))
+        let err = merge_files(&[a], "add", &AtomicBool::new(true), &FileLimits::default())
             .err()
             .expect("cancelled");
         assert_eq!(format!("{err:#}"), "cancelled");

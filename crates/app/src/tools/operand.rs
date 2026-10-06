@@ -14,14 +14,15 @@ use std::sync::Arc;
 use eframe::egui::{self, Align, Layout, RichText};
 use jsonquery_core::{Document, DocumentSource};
 
-use super::jobs::{Input, MAX_TOOL_BYTES};
+use super::jobs::Input;
+use super::shared::Env;
 use super::widgets::{file_name, header, note_box, text_box, ERROR, STACK_GAP};
 use crate::app::human_bytes;
 
 /// The most text the box takes. egui lays out a whole text box at once, so a
 /// megabyte is about as much as it can edit without stalling; a bigger file is
-/// kept as a path instead (up to what the tools can handle — see
-/// `jobs::MAX_TOOL_BYTES`).
+/// kept as a path instead (up to what the tools can handle — the user's limit,
+/// `Env::tool_bytes`).
 pub(super) const TEXT_LIMIT: u64 = 1024 * 1024;
 
 enum Content {
@@ -187,15 +188,27 @@ impl Operand {
     }
 
     /// Use the document open in the main window. One that the tools would only
-    /// refuse (see [`MAX_TOOL_BYTES`]) is not taken — the box says so and stays
-    /// as it was — rather than keep a huge document alive for nothing.
-    pub fn use_document(&mut self, doc: Arc<Document>) {
+    /// refuse (it is over `tool_bytes`, what they take, or it is kept on disk and
+    /// this page cannot work on that) is not taken — the box says so and stays as
+    /// it was — rather than keep a huge document alive for nothing.
+    pub fn use_document(&mut self, doc: Arc<Document>, tool_bytes: u64) {
         let kept_on_disk = self.takes_documents_on_disk && doc.is_lazy();
-        if doc.byte_len > MAX_TOOL_BYTES && !kept_on_disk {
+        if doc.byte_len > tool_bytes && !kept_on_disk {
             self.problem = Some(format!(
                 "The open document is {}, more than the {} these tools take",
                 human_bytes(doc.byte_len),
-                human_bytes(MAX_TOOL_BYTES)
+                human_bytes(tool_bytes)
+            ));
+            return;
+        }
+        // Not over what the tools take, but not in memory either: the user keeps
+        // files on disk from a lower size than that (Settings).
+        if doc.is_lazy() && !self.takes_documents_on_disk {
+            self.problem = Some(format!(
+                "The open document is {}, kept on disk, which this tool can't work on: it \
+                 needs the whole document in memory (see \"Keep a file on disk from\" in \
+                 Settings)",
+                human_bytes(doc.byte_len),
             ));
             return;
         }
@@ -221,13 +234,8 @@ impl Operand {
     /// Draw the header and the box, which fill the height there is. True when
     /// what the box holds changed. `drop_target` says a dragged file would land
     /// here, which the box shows.
-    pub fn ui(
-        &mut self,
-        ui: &mut egui::Ui,
-        open_doc: Option<&Arc<Document>>,
-        drop_target: bool,
-    ) -> bool {
-        let mut changed = self.title_row(ui, open_doc);
+    pub fn ui(&mut self, ui: &mut egui::Ui, env: &Env, drop_target: bool) -> bool {
+        let mut changed = self.title_row(ui, env);
 
         let dragging = ui.ctx().input(|i| !i.raw.hovered_files.is_empty());
         let accent = dragging && drop_target;
@@ -267,7 +275,7 @@ impl Operand {
 
     /// The header: the title, what the box holds (or why a file could not be
     /// used), and the buttons to fill or empty it.
-    fn title_row(&mut self, ui: &mut egui::Ui, open_doc: Option<&Arc<Document>>) -> bool {
+    fn title_row(&mut self, ui: &mut egui::Ui, env: &Env) -> bool {
         let mut changed = false;
         header(
             ui,
@@ -284,12 +292,12 @@ impl Operand {
                     changed = true;
                 }
                 let open = ui
-                    .add_enabled(open_doc.is_some(), egui::Button::new("Open document"))
+                    .add_enabled(env.open_doc.is_some(), egui::Button::new("Open document"))
                     .on_hover_text("Use the document open in the main window")
                     .on_disabled_hover_text("No document is open in the main window");
                 if open.clicked() {
-                    if let Some(doc) = open_doc {
-                        self.use_document(doc.clone());
+                    if let Some(doc) = env.open_doc {
+                        self.use_document(doc.clone(), env.tool_bytes);
                         changed = true;
                     }
                 }
@@ -334,7 +342,7 @@ fn short_source(doc: &Document) -> String {
 /// either changed.
 pub(super) fn stacked(
     ui: &mut egui::Ui,
-    open_doc: Option<&Arc<Document>>,
+    env: &Env,
     first: &mut Operand,
     second: &mut Operand,
 ) -> bool {
@@ -345,11 +353,11 @@ pub(super) fn stacked(
     let size = egui::vec2(ui.available_width(), height);
     let mut changed = false;
     ui.allocate_ui(size, |ui| {
-        changed |= first.ui(ui, open_doc, target == 0);
+        changed |= first.ui(ui, env, target == 0);
     });
     ui.add_space(STACK_GAP);
     ui.allocate_ui(size, |ui| {
-        changed |= second.ui(ui, open_doc, target == 1);
+        changed |= second.ui(ui, env, target == 1);
     });
     changed
 }
@@ -395,12 +403,13 @@ pub(super) fn deliver(boxes: &mut [&mut Operand], paths: Vec<PathBuf>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scratch_dir::ScratchDir;
 
-    fn temp_dir(name: &str) -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("jsonquery-operand-{name}-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    /// What the tools take, unless the user has changed it.
+    const TOOL_BYTES: u64 = crate::settings::DEFAULT_TOOLS_BYTES;
+
+    fn temp_dir(name: &str) -> ScratchDir {
+        ScratchDir::new("operand", name)
     }
 
     fn operand() -> Operand {
@@ -410,12 +419,10 @@ mod tests {
     #[test]
     fn moved_text_that_fits_a_box_goes_in_it_and_bigger_text_is_held_unseen() {
         let mut o = operand();
-        o.load_file(&{
-            let dir = temp_dir("moved");
-            let path = dir.join("a.json");
-            std::fs::write(&path, "[1]").unwrap();
-            path
-        });
+        let dir = temp_dir("moved");
+        let path = dir.join("a.json");
+        std::fs::write(&path, "[1]").unwrap();
+        o.load_file(&path);
         assert_eq!(o.label(), Some("a.json"));
         o.set_moved(Arc::from("[2]"));
         assert_eq!(o.text(), "[2]");
@@ -501,7 +508,7 @@ mod tests {
     fn the_open_document_is_shared_not_copied() {
         let doc = Arc::new(jsonquery_core::load_text("[1]").unwrap());
         let mut o = operand();
-        o.use_document(doc.clone());
+        o.use_document(doc.clone(), TOOL_BYTES);
         assert!(!o.is_empty());
         assert!(matches!(o.input(), Some(Input::Document(d)) if Arc::ptr_eq(&d, &doc)));
         o.clear();
@@ -511,7 +518,10 @@ mod tests {
     #[test]
     fn only_a_file_gives_a_name_for_a_save() {
         let mut o = operand();
-        o.use_document(Arc::new(jsonquery_core::load_text("[1]").unwrap()));
+        o.use_document(
+            Arc::new(jsonquery_core::load_text("[1]").unwrap()),
+            TOOL_BYTES,
+        );
         assert_eq!(
             o.name.as_deref(),
             Some("(pasted JSON)"),
@@ -523,7 +533,7 @@ mod tests {
         let path = dir.join("orders.json");
         std::fs::write(&path, "[1]").unwrap();
         let doc = jsonquery_core::load(&path).unwrap();
-        o.use_document(Arc::new(doc));
+        o.use_document(Arc::new(doc), TOOL_BYTES);
         assert_eq!(o.source_file(), Some("orders.json"));
 
         // Typing over it makes it text again, which came from no file.
@@ -536,12 +546,12 @@ mod tests {
         let big = Arc::new(Document::from_value(
             serde_json::json!([1]),
             DocumentSource::Pasted,
-            MAX_TOOL_BYTES + 1,
+            TOOL_BYTES + 1,
             std::time::Duration::ZERO,
         ));
         let mut o = operand();
         o.set_text("[1]");
-        o.use_document(big);
+        o.use_document(big, TOOL_BYTES);
         assert_eq!(o.text(), "[1]", "the box is as it was");
         assert!(matches!(o.input(), Some(Input::Text(_))));
         assert!(
@@ -555,12 +565,62 @@ mod tests {
         let fits = Arc::new(Document::from_value(
             serde_json::json!([1]),
             DocumentSource::Pasted,
-            MAX_TOOL_BYTES,
+            TOOL_BYTES,
             std::time::Duration::ZERO,
         ));
-        o.use_document(fits);
+        o.use_document(fits, TOOL_BYTES);
         assert!(matches!(o.input(), Some(Input::Document(_))));
         assert!(o.problem.is_none());
+    }
+
+    #[test]
+    fn what_the_tools_take_is_what_the_user_set() {
+        let doc = |bytes| {
+            Arc::new(Document::from_value(
+                serde_json::json!([1]),
+                DocumentSource::Pasted,
+                bytes,
+                std::time::Duration::ZERO,
+            ))
+        };
+        let mut o = operand();
+        // Over a lower limit than the default…
+        o.use_document(doc(10 * 1024 * 1024), 5 * 1024 * 1024);
+        assert!(o.input().is_none());
+        let problem = o.problem.clone().expect("refused");
+        assert!(problem.contains("more than the 5.0 MB"), "{problem}");
+        // …and under a higher one than the default.
+        o.use_document(doc(TOOL_BYTES * 4), TOOL_BYTES * 8);
+        assert!(matches!(o.input(), Some(Input::Document(_))));
+        assert!(o.problem.is_none());
+    }
+
+    #[test]
+    fn a_document_kept_on_disk_is_refused_by_a_page_that_needs_it_in_memory_even_under_the_limit() {
+        // The user keeps files on disk from a lower size than the tools take: a
+        // document of 1 MB is kept on disk and under what the tools take.
+        let dir = temp_dir("on-disk-small");
+        let path = dir.join("small.json");
+        std::fs::write(&path, "[1, 2]").unwrap();
+        let file = std::fs::File::open(&path).unwrap();
+        let doc = jsonquery_core::load_open_file(&file, DocumentSource::File(path), 1).unwrap();
+        assert!(doc.is_lazy() && doc.byte_len < TOOL_BYTES);
+        let doc = Arc::new(doc);
+
+        let mut other = operand();
+        other.use_document(doc.clone(), TOOL_BYTES);
+        assert!(other.input().is_none(), "not held");
+        let problem = other.problem.clone().expect("said why");
+        assert!(
+            problem.contains("kept on disk") && problem.contains("Settings"),
+            "{problem}"
+        );
+
+        // Format writes it from the file, whatever its size.
+        let mut format = operand().and_documents_on_disk();
+        format.use_document(doc, TOOL_BYTES);
+        assert!(format.problem.is_none());
+        assert!(matches!(format.input(), Some(Input::Document(_))));
     }
 
     #[test]
@@ -573,15 +633,15 @@ mod tests {
         assert!(doc.is_lazy());
         // Said to be bigger than any tool takes.
         let mut big = doc;
-        big.byte_len = MAX_TOOL_BYTES * 10;
+        big.byte_len = TOOL_BYTES * 10;
         let big = Arc::new(big);
 
         let mut other = operand();
-        other.use_document(big.clone());
+        other.use_document(big.clone(), TOOL_BYTES);
         assert!(other.problem.is_some() && other.input().is_none());
 
         let mut format = operand().and_documents_on_disk();
-        format.use_document(big);
+        format.use_document(big, TOOL_BYTES);
         assert!(format.problem.is_none());
         assert!(matches!(format.input(), Some(Input::Document(_))));
     }

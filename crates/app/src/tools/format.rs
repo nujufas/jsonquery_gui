@@ -123,7 +123,7 @@ impl Format {
 
     fn input_pane(&mut self, ui: &mut egui::Ui, env: &Env) {
         ui.add_enabled_ui(!self.run.running(), |ui| {
-            if self.input.ui(ui, env.open_doc, true) {
+            if self.input.ui(ui, env, true) {
                 self.run.clear();
             }
         });
