@@ -82,6 +82,17 @@ Two things fall out of embedding jaq specifically:
   `limit(n; …)`, and slicing stop pulling as soon as they have enough rather
   than always running to completion.
 
+jaq is not jq, though, and a few things people paste from the jq manual are not
+in it. `crates/query/src/jq_ext.rs` adds them in the two forms jaq's own
+builtins take: definitions written in jq (`jq_ext/prelude.jq`: `IN`, `INDEX`,
+`JOIN`, `fromstream`, `truncate_stream`) and native Rust filters (`@csv`, `@tsv`
+and `tostream`, native for speed and for byte-level work). `run_query_with_vars`
+— the one place a jq program is compiled, and the Merge tool's too — chains them
+after jaq's own. They were checked against jq 1.8.1's output, and the cases are
+in the module's tests, so they hold on a machine without jq. Still missing:
+`$ENV`, `input`, `leaf_paths`, `toarray`, and assignments that create several
+missing levels at once (`{} | .a.b.c = 1`).
+
 ## 4. Concurrency model
 
 The UI thread never touches the file or the query engines directly — it
@@ -173,6 +184,17 @@ differently from the source tree:
 - **Full export bypasses the cap.** "Save results to file" re-runs the
   query in a streaming write mode straight to disk, so exporting a large
   matched set never requires materializing it all at once in RAM.
+- **The output format.** Results are JSON, and Copy to Clipboard, Save… and
+  the Text view write JSON, unless the query is a jq program whose last stage is
+  `@csv` or `@tsv`. Then each result is a row of text, and a quoted, escaped
+  JSON string of it (`"\"Ada\",36"`) is no use to anyone, so those three write
+  the rows as they are: Copy on a row copies the row, on the results root a line
+  per result; Save… writes a line per result, to a file named `.csv` or `.tsv`
+  by default; the Text view shows the same text. The format is read off the
+  query when it runs (`OutputFormat::detect` in `crates/query/src/output.rs`):
+  only the last stage counts, so `map(@csv) | length` is still JSON. The
+  Results header carries a `CSV`/`TSV` note while it applies, and the Tree view
+  stays the JSON tree.
 
 The same worker-offload discipline extends to single-row actions on either
 tree: right-click **Copy to Clipboard** or **Save…** resolves and serializes

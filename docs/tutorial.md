@@ -100,7 +100,10 @@ Lesson::new(
 `cargo test -p jsonquery-query tutorial` then checks that every example
 **runs as declared** against the real engines, that every highlighted
 fragment occurs in its query in order, that all sample data is valid JSON,
-and that lesson titles are unique per dialect. To proof-read the prose
+and that lesson titles are unique per dialect. Tips are prose, so nothing runs
+them: when a tip states something about the engine that no example shows (the
+table and stream lessons do), pin it in a test, as
+`claims_made_in_the_table_and_stream_tips_hold` does. To proof-read the prose
 ("→ `37.5`", "four results") against what the engines actually return:
 
 ```sh
@@ -113,10 +116,15 @@ These were found by running candidate examples through the real engines, and
 are pinned by the `documented_gaps_are_still_real` test so the matching tips
 get removed when an upgrade fixes them:
 
-- **jq (jaq)** lacks `@csv`, `@tsv`, `IN`, `INDEX`, `$ENV`, `input`,
-  `tostream`, `leaf_paths` and `toarray`, and can't create several missing
-  path levels in one assignment (`{} | .a.b.c = 1`). The *jq here vs jq 1.7*
-  lesson lists them.
+- **jq (jaq)** lacks `$ENV`, `input`, `leaf_paths` and `toarray`, and can't
+  create several missing path levels in one assignment (`{} | .a.b.c = 1`). The
+  *jq here vs jq 1.7* lesson lists them. (jaq also lacks `@csv`, `@tsv`, `IN`,
+  `INDEX`, `JOIN`, `tostream`, `fromstream` and `truncate_stream`; jsonquery adds
+  those itself, in `crates/query/src/jq_ext.rs`. The *Tables & lookups* topic
+  (CSV & TSV, Records to a table, Quoting & escaping, Copy & save as CSV or
+  TSV, IN, INDEX & JOIN) and the *Event streams* topic (tostream, fromstream &
+  truncate_stream) teach them, and `every_filter_jsonquery_adds_has_a_lesson`
+  fails if one of them loses its page.)
 - **JMESPath decimal literals are broken.** `` `9.5` `` evaluates to
   `{"$serde_json::private::Number":"9.5"}`, so ``items[?price > `9.5`]``
   silently returns `[]`. Whole numbers, strings, booleans and `null` work. The

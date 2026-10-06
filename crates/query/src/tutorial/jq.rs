@@ -11,6 +11,29 @@ const UPDATE: &str = r#"{ "name": "Ada", "age": 36, "tmp": true }"#;
 const NESTED: &str = r#"{ "a": [1, [2, 3]], "b": { "c": "x" } }"#;
 const NUMBERS: &str = r#"["1", "two", "3"]"#;
 
+/// Values that CSV and TSV have to quote or escape: a comma, a double quote,
+/// a line break, a tab and a backslash.
+const AWKWARD: &str = r#"[
+  { "name": "Smith, Jo", "note": "said \"hi\"" },
+  { "name": "Ada", "note": "two\nlines" },
+  { "name": "Tab\tman", "note": "C:\\temp" }
+]"#;
+
+/// Two tables that point at each other, for `INDEX` and `JOIN`.
+const SHOP: &str = r#"{
+  "customers": [
+    { "code": "ADA", "name": "Ada", "city": "London" },
+    { "code": "LIN", "name": "Linus", "city": "Helsinki" },
+    { "code": "GRA", "name": "Grace", "city": "New York" }
+  ],
+  "orders": [
+    { "no": 101, "customer": "ADA", "item": "keyboard", "qty": 2 },
+    { "no": 102, "customer": "GRA", "item": "monitor", "qty": 1 },
+    { "no": 103, "customer": "ADA", "item": "mouse", "qty": 3 },
+    { "no": 104, "customer": "LIN", "item": "cable", "qty": 10 }
+  ]
+}"#;
+
 pub(super) static TOPICS: &[Topic] = &[
     Topic::new(
         "Getting started",
@@ -510,6 +533,245 @@ pub(super) static TOPICS: &[Topic] = &[
         ],
     ),
     Topic::new(
+        "Tables & lookups",
+        &[
+            Lesson::new(
+                "CSV & TSV",
+                "`@csv` and `@tsv` write an *array* as one row of text. Build the row with `[ … ]`, one row per result. A query that ends in one of them also makes the Results panel copy and save the rows as CSV or TSV: the page *Copy & save as CSV or TSV* has the details.",
+                &[
+                    Example::new(
+                        "One CSV row per member",
+                        TEAM,
+                        ".members[] | [.name, .age, .role] | @csv",
+                        &[
+                            (".members[]", "Each member in turn."),
+                            ("[.name, .age, .role]", "Build an array of the fields you want, in column order: one array is one row."),
+                            ("@csv", "Write the array as a line of CSV: strings in quotes, numbers bare, commas between the fields."),
+                        ],
+                    ),
+                    Example::new(
+                        "A header row first, tab-separated",
+                        TEAM,
+                        r#"["name", "age"], (.members[] | [.name, .age]) | @tsv"#,
+                        &[
+                            (r#"["name", "age"]"#, "The header: an array of column titles."),
+                            (", ", "The comma puts the header first and the member rows after it."),
+                            ("(.members[] | [.name, .age])", "One row array per member."),
+                            ("@tsv", "Applies to the header and every row: tabs between the fields, and any tab, newline or backslash inside a value written as `\\t`, `\\n` or `\\\\`."),
+                        ],
+                    ),
+                    Example::new(
+                        "Missing values are empty fields",
+                        TEAM,
+                        ".members[] | [.name, .email] | @csv",
+                        &[
+                            ("[.name, .email]", "Linus's e-mail is `null` and Grace has none at all: both come out as `null`…"),
+                            ("@csv", "…which is an empty field, not the word `null`."),
+                        ],
+                    ),
+                ],
+            )
+            .tips(&[
+                "Only strings, numbers, booleans and `null` fit in a row. An array or object among the fields is an error; flatten it first, for example `.skills | join(\";\")`.",
+                "`@csv` and `@tsv` are jq's own names for these formats, so a query written here also works in the `jq` command line (with `-r` to print the rows without quotes).",
+            ]),
+            Lesson::new(
+                "Records to a table",
+                "Most data is an array of objects. List the columns once, in a variable, and use that one list for the header and for every row: `.[$cols[]]` reads the listed fields in order.",
+                &[
+                    Example::new(
+                        "Header and rows from one list of columns",
+                        TEAM,
+                        r#"["name", "role", "age"] as $cols | $cols, (.members[] | [.[$cols[]]]) | @csv"#,
+                        &[
+                            (r#"["name", "role", "age"] as $cols"#, "The columns you want, in the order you want them, saved as `$cols`."),
+                            ("$cols", "The header row: the column names themselves."),
+                            ("(.members[] | [.[$cols[]]])", "One row per member. `.[$cols[]]` looks up each listed field in turn, and `[ … ]` collects the values into an array."),
+                            ("@csv", "Writes the header and every row as CSV."),
+                        ],
+                    ),
+                    Example::new(
+                        "A list in one cell",
+                        TEAM,
+                        r#".members[] | [.name, (.skills | join(";"))] | @csv"#,
+                        &[
+                            (".members[]", "Each member in turn."),
+                            (r#"(.skills | join(";"))"#, "A list can't sit in a cell as it is: `join(\";\")` glues its items into one string. An empty list becomes an empty string."),
+                            ("@csv", "Writes the row."),
+                        ],
+                    ),
+                    Example::new(
+                        "An object as two columns",
+                        TEAM,
+                        ".office | to_entries[] | [.key, .value] | @csv",
+                        &[
+                            (".office", "An object with two fields, `city` and `floor`."),
+                            ("to_entries[]", "One `{key, value}` entry per field."),
+                            ("[.key, .value]", "A two-cell row: the field's name, then its value."),
+                            ("@csv", "Writes each row."),
+                        ],
+                    ),
+                ],
+            )
+            .tips(&[
+                "`keys_unsorted` lists a record's keys in the order of the file, so `(.members[0] | keys_unsorted) as $cols | …` takes the columns from the first record. Every field must then be a string, number, boolean or `null`.",
+                "A field a record doesn't have reads as `null`, which is an empty cell.",
+            ]),
+            Lesson::new(
+                "Quoting & escaping",
+                "Values with commas, quotes or line breaks need care. `@csv` puts every string in double quotes and doubles any quote inside it; `@tsv` quotes nothing and writes tabs, line breaks and backslashes as escapes instead.",
+                &[
+                    Example::new(
+                        "CSV: quotes around strings, doubled quotes inside",
+                        AWKWARD,
+                        ".[] | [.name, .note] | @csv",
+                        &[
+                            (".[]", "Each record in turn."),
+                            ("[.name, .note]", "Two cells per row."),
+                            ("@csv", "Strings go in double quotes, and the `\"` in `said \"hi\"` becomes `\"\"`. A comma or a line break inside the quotes stays as it is: it can't be taken for the end of the cell."),
+                        ],
+                    ),
+                    Example::new(
+                        "TSV: no quotes, escapes instead",
+                        AWKWARD,
+                        ".[] | [.name, .note] | @tsv",
+                        &[
+                            (".[]", "Each record in turn."),
+                            ("[.name, .note]", "The same two cells."),
+                            ("@tsv", "Cells are joined with tabs and never quoted. A tab inside a value is written `\\t`, a line break `\\n` and a backslash `\\\\`, so a record always stays on one line."),
+                        ],
+                    ),
+                    Example::new(
+                        "Only an array makes a row",
+                        AWKWARD,
+                        "try (.[0] | @csv) catch .",
+                        &[
+                            ("try (", "Run what is inside the parentheses; if it fails…"),
+                            (".[0] | @csv", "…as it does here, because the first record is an object and `@csv` wants an array…"),
+                            ("catch .", "…hand back the error message instead (`.` is the message)."),
+                        ],
+                    ),
+                ],
+            )
+            .tips(&[
+                "In both formats a number or a boolean is written bare (`3`, `true`) and `null` is an empty cell.",
+                "A tool that reads TSV should turn `\\t`, `\\n`, `\\r` and `\\\\` back into the characters they stand for.",
+            ]),
+            Lesson::new(
+                "Copy & save as CSV or TSV",
+                "When the last step of a jq query is `@csv` or `@tsv`, every result is a row of text. The Results panel then says *CSV* or *TSV* beside Tree and Text, and Copy to Clipboard, Save… and the Text view write the rows as rows, not as JSON strings.",
+                &[
+                    Example::new(
+                        "Ends in @csv: copied and saved as CSV",
+                        TEAM,
+                        ".members[] | [.name, .age] | @csv",
+                        &[
+                            (".members[]", "One result per member…"),
+                            ("[.name, .age]", "…built as an array of its cells…"),
+                            ("@csv", "…and written as a row by the last step. Copy one row or all of them and paste straight into a spreadsheet."),
+                        ],
+                    ),
+                    Example::new(
+                        "Not the last step: still JSON",
+                        TEAM,
+                        "[.members[] | [.name, .age] | @csv]",
+                        &[
+                            ("[", "Collects everything inside into one array…"),
+                            (".members[] | [.name, .age] | @csv", "…the same rows as above, now strings in a list…"),
+                        ],
+                    ),
+                ],
+            )
+            .tips(&[
+                "In the second example the one result is a JSON array of strings, so it is copied and saved as JSON, and the Results panel shows no *CSV* label.",
+                "Copy to Clipboard on a row copies that row. On the *Results* line at the top it copies every row, one to a line. The Text view shows exactly those lines.",
+                "Save… writes the same lines to a file, and its dialog offers `results.csv` or `results.tsv` as the name. Saving a single result saves just that row.",
+                "The label and the CSV or TSV writing are for jq queries only: the other query languages have no `@csv`. The Source panel is always copied and saved as JSON.",
+            ]),
+            Lesson::new(
+                "IN",
+                "`IN(…)` asks whether its input is one of several values and answers `true` or `false`, so it belongs inside `select(…)`. `IN(source; values)` asks whether any value of `source` is among `values`.",
+                &[
+                    Example::new(
+                        "Members whose role is one of several",
+                        TEAM,
+                        r#".members[] | select(.role | IN("dev", "qa")) | .name"#,
+                        &[
+                            ("select(", "Keep a member only if the test inside is true."),
+                            (r#".role | IN("dev", "qa")"#, "True when the role equals any of the listed values."),
+                            (".name", "Then take the name."),
+                        ],
+                    ),
+                    Example::new(
+                        "Is any member in QA?",
+                        TEAM,
+                        r#"IN(.members[].role; "qa")"#,
+                        &[
+                            (".members[].role", "The stream of values to check: every member's role."),
+                            (r#""qa""#, "The values to look for. The answer is `true` if any of the first stream is among these."),
+                        ],
+                    ),
+                    Example::new(
+                        "Skills that are not on a list",
+                        TEAM,
+                        r#"[.members[].skills[] | select(IN("rust", "sql") | not)]"#,
+                        &[
+                            (".members[].skills[]", "Every skill of every member."),
+                            (r#"IN("rust", "sql")"#, "True for a skill on the list."),
+                            ("| not", "Turns it around: keep the skills that are *not* on the list."),
+                        ],
+                    ),
+                ],
+            )
+            .tips(&[
+                "`IN` compares with `==`: `1` and `1.0` are equal, `\"1\"` is not.",
+                "Without `select`, `IN` just gives the answer: `.members[] | .role | IN(\"dev\", \"qa\")` is a stream of `true` and `false`.",
+            ]),
+            Lesson::new(
+                "INDEX & JOIN",
+                "`INDEX(f)` turns an array into an object keyed by what `f` gives for each element: a lookup table. `INDEX(source; f)` does the same for any stream. `JOIN` matches each element of one table with its entry in another.",
+                &[
+                    Example::new(
+                        "A lookup table by code",
+                        SHOP,
+                        ".customers | INDEX(.code) | map_values(.city)",
+                        &[
+                            (".customers", "The array of customers."),
+                            ("INDEX(.code)", "Store each customer under the key `.code` gives, as one object."),
+                            ("map_values(.city)", "Keep just the city of each entry."),
+                        ],
+                    ),
+                    Example::new(
+                        "Look up the customer of every order",
+                        SHOP,
+                        "INDEX(.customers[]; .code) as $by_code | .orders[] | {order: .no, who: $by_code[.customer].name}",
+                        &[
+                            ("INDEX(.customers[]; .code)", "The table, built from a stream: every customer, keyed by code."),
+                            ("as $by_code", "Saved, to use in the steps that follow."),
+                            (".orders[]", "Each order in turn."),
+                            ("$by_code[.customer].name", "The order's customer code is the key into the table; then read the name."),
+                        ],
+                    ),
+                    Example::new(
+                        "JOIN does the matching",
+                        SHOP,
+                        "INDEX(.customers[]; .code) as $by_code | JOIN($by_code; .orders[]; .customer; {order: .[0].no, city: .[1].city})",
+                        &[
+                            ("INDEX(.customers[]; .code) as $by_code", "The same table."),
+                            ("JOIN($by_code; .orders[]; .customer;", "For each order, find the table entry under `.customer`, and make the pair `[order, customer]`."),
+                            ("{order: .[0].no, city: .[1].city}", "Shape each pair: `.[0]` is the order, `.[1]` its customer."),
+                        ],
+                    ),
+                ],
+            )
+            .tips(&[
+                "When two elements give the same key the later one wins. Keys are always strings, so a numeric id gives the keys `\"1\"`, `\"2\"`… and the lookup is `$table[.id | tostring]`.",
+                "A key with no entry in the table gives `null`: `JOIN` pairs the element with `null`.",
+                "`JOIN($table; f)` over an array gives every `[element, match]` pair as one array; with a stream and a fourth argument, as above, each pair is shaped by it.",
+            ]),
+        ],
+    ),
+    Topic::new(
         "Variables & functions",
         &[
             Lesson::new(
@@ -585,6 +847,94 @@ pub(super) static TOPICS: &[Topic] = &[
         ],
     ),
     Topic::new(
+        "Event streams",
+        &[
+            Lesson::new(
+                "tostream",
+                "`tostream` flattens any value into *events*: `[path, value]` for every leaf, and a one-element `[path]` event that closes each array or object. The path lists the keys and indexes that lead to the value.",
+                &[
+                    Example::new(
+                        "The events of a small value",
+                        NESTED,
+                        ".a | tostream",
+                        &[
+                            (".a", "The array `[1, [2, 3]]`."),
+                            ("tostream", "One `[path, value]` event per number, and a closing `[path]` event after the last item of each array."),
+                        ],
+                    ),
+                    Example::new(
+                        "Every leaf as path = value",
+                        NESTED,
+                        r#"tostream | select(length == 2) | "\(.[0] | map(tostring) | join(".")) = \(.[1])""#,
+                        &[
+                            ("tostream", "Every event of the whole document."),
+                            ("select(length == 2)", "Keep the leaf events; the closing ones have only a path."),
+                            (r#".[0] | map(tostring) | join(".")"#, "The path as text: keys and indexes joined with dots."),
+                            ("\\(.[1])", "The leaf's value."),
+                        ],
+                    ),
+                    Example::new(
+                        "Where is a value?",
+                        NESTED,
+                        "tostream | select(.[1] == 3) | .[0]",
+                        &[
+                            ("tostream", "Every event of the document, however deep."),
+                            ("select(.[1] == 3)", "Keep the events whose value is 3. A closing event has no value, so for it `.[1]` is `null`."),
+                            ("| .[0]", "Read the path: key `a`, then index 1, then index 1 again."),
+                        ],
+                    ),
+                ],
+            )
+            .tips(&[
+                "An empty array or object is a leaf of its own, `[path, []]` or `[path, {}]`, and a lone scalar is `[[], value]`.",
+                "A closing event carries the path of its container's *last* child. In the first example `[[1,1]]` ends the inner array `[2, 3]` after its index 1, and `[[1]]` ends the outer array after its index 1.",
+            ]),
+            Lesson::new(
+                "fromstream & truncate_stream",
+                "`fromstream(events)` builds values back from events: it gives one value each time an event closes a top-level value. `1 | truncate_stream(events)` cuts the first key or index off every path, so each child of the top level becomes a value of its own.",
+                &[
+                    Example::new(
+                        "Events written by hand (the data isn't used)",
+                        SHOP,
+                        r#"fromstream([["a"], 1], [["b"], 2], [["b"]])"#,
+                        &[
+                            (r#"[["a"], 1]"#, "A leaf event: put 1 under the key `a`."),
+                            (r#"[["b"], 2]"#, "Another leaf: put 2 under `b`."),
+                            (r#"[["b"]]"#, "A closing event for the top-level object, so `fromstream` gives the value it has built."),
+                        ],
+                    ),
+                    Example::new(
+                        "Drop a field from every record",
+                        SHOP,
+                        r#".customers | fromstream(tostream | select(length == 1 or all(.[0][]; . != "city")))"#,
+                        &[
+                            (".customers | fromstream(", "Rebuild the customers from the events that pass the filter."),
+                            ("tostream", "Every event of the array."),
+                            ("select(length == 1 or ", "Keep the closing events, so every value still ends properly, and…"),
+                            (r#"all(.[0][]; . != "city")"#, "…every other event whose path doesn't mention `city`, however deep it is."),
+                        ],
+                    ),
+                    Example::new(
+                        "One result per order",
+                        SHOP,
+                        ".orders as $o | fromstream(1 | truncate_stream($o | tostream))",
+                        &[
+                            (".orders as $o", "Save the array: the events given to `truncate_stream` are computed from `null`, so they can't read `.orders` themselves."),
+                            ("fromstream(", "Builds values back…"),
+                            ("1 | truncate_stream(", "…from events whose paths lost their first step, the order's index…"),
+                            ("$o | tostream", "…the events of the whole array. Each order is now a top-level value of its own."),
+                        ],
+                    ),
+                ],
+            )
+            .tips(&[
+                "`fromstream(tostream)` gives the input back, whatever it is.",
+                "Leave a leaf event out, as the second example does, and its key is simply absent from the rebuilt value.",
+                "`truncate_stream` drops the events whose path is not longer than the cut, so scalars directly in the array vanish: only the objects and arrays inside it come out as values.",
+            ]),
+        ],
+    ),
+    Topic::new(
         "Errors",
         &[Lesson::new(
             "try, catch & ?",
@@ -633,7 +983,11 @@ pub(super) static TOPICS: &[Topic] = &[
                     (".members | sort_by(.age)", "sort"),
                     (".members | group_by(.role)", "group"),
                     (".members | map(.skills) | flatten | unique", "flatten and de-duplicate"),
+                    (".members[] | [.name, .age] | @csv", "one CSV row per member (`@tsv` for tabs)"),
+                    (".members | INDEX(.name)", "a lookup table keyed by name"),
+                    (r#".members[] | select(.role | IN("dev", "qa"))"#, "keep when the value is one of several"),
                     (".office | keys", "an object's keys"),
+                    (".office | tostream", "the value as `[path, value]` events"),
                     ("[.. | numbers]", "every number anywhere in the document"),
                     (r#""\(.team) HQ""#, "string interpolation"),
                 ],
@@ -644,7 +998,8 @@ pub(super) static TOPICS: &[Topic] = &[
                 &[],
             )
             .tips(&[
-                "Not available: `@csv`, `@tsv`, `IN`, `INDEX`, `$ENV` (use `env`), `input`, `tostream`, `leaf_paths` and `toarray`.",
+                "jaq lacks `@csv`, `@tsv`, `IN`, `INDEX`, `JOIN`, `tostream`, `fromstream` and `truncate_stream`; jsonquery adds them, and they work as in jq.",
+                "Not available: `$ENV` (use `env`), `input`, `leaf_paths` and `toarray`.",
                 "Assignment can't create several missing levels at once: `{} | .a.b.c = 1` is an error here.",
                 "Available and handy: `@base64`, `@uri`, `@html`, `@sh`, `@json`, regex (`test`, `capture`, `sub`, `gsub`), `reduce`, `foreach`, `limit`, `first`, `walk`, `paths`, `getpath`, `to_entries`, `with_entries`, `group_by`, `unique_by`, `min_by` and `max_by`.",
             ]),

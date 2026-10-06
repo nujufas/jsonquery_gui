@@ -174,6 +174,15 @@ pub fn suggest(
         out.extend(pointer_escapes(cursor));
     }
 
+    // After a jq `@` the word is a format name. (JMESPath and JSONPath use `@`
+    // for the current node, which no name follows.)
+    if scope.contains(&Kind::Jq)
+        && before[..word_start].ends_with('@')
+        && !inside_string_literal(before)
+    {
+        out.extend(format_candidates(word, word_start..cursor));
+    }
+
     if keywords_wanted(before, word, word_start, !out.is_empty()) {
         let after_operand = operand_ended_before(&before[..word_start]);
         let mut kw = keyword_candidates(&scope, word, word_start..cursor, after_operand);
@@ -182,6 +191,19 @@ pub fn suggest(
     }
 
     out
+}
+
+/// The `@format` names that start with `word` (what follows the `@`).
+fn format_candidates(word: &str, replace: Range<usize>) -> impl Iterator<Item = Suggestion> + '_ {
+    JQ_FORMATS
+        .iter()
+        .filter(move |(name, _)| name.starts_with(word))
+        .map(move |(name, detail)| Suggestion {
+            replace: replace.clone(),
+            insert: (*name).to_string(),
+            label: format!("@{name}"),
+            detail: (*detail).to_string(),
+        })
 }
 
 /// jq keywords that are followed by an expression (or, for `def`, a name being
@@ -324,8 +346,8 @@ fn keyword_candidates(
     let tag_engines = scope.len() > 1;
     let word_lower = word.to_lowercase();
 
-    // (match score, needs a pipe, candidate)
-    let mut matches: Vec<(u8, bool, &Candidate)> = Vec::new();
+    // (match score, needs a pipe, lower-cased text, candidate)
+    let mut matches: Vec<(u8, bool, String, &Candidate)> = Vec::new();
     for kind in scope {
         for cand in builtins(*kind) {
             let piped = after_operand && !continues_operand(cand);
@@ -341,20 +363,23 @@ fn keyword_candidates(
                 None
             };
             if let Some(score) = score {
-                matches.push((score, piped, cand));
+                matches.push((score, piped, text_lower, cand));
             }
         }
     }
+    // Alphabetical regardless of case, so `IN` and `INDEX` sit with `in` and
+    // `index` rather than ahead of everything starting with a lower-case letter.
     matches.sort_by(|a, b| {
         (a.0, a.1)
             .cmp(&(b.0, b.1))
-            .then_with(|| a.2.text.cmp(b.2.text))
+            .then_with(|| a.2.cmp(&b.2))
+            .then_with(|| a.3.text.cmp(b.3.text))
     });
-    matches.dedup_by(|a, b| a.2.text == b.2.text && a.2.detail == b.2.detail);
+    matches.dedup_by(|a, b| a.3.text == b.3.text && a.3.detail == b.3.detail);
 
     matches
         .into_iter()
-        .map(|(_, piped, cand)| Suggestion {
+        .map(|(_, piped, _, cand)| Suggestion {
             replace: replace.clone(),
             insert: if piped {
                 format!("| {}", cand.text)
@@ -1212,6 +1237,9 @@ const JQ_BUILTINS: &[Candidate] = &[
     c(Kind::Jq, "getpath", "getpath([\"a\",0])"),
     c(Kind::Jq, "setpath", "setpath([\"a\",0]; value)"),
     c(Kind::Jq, "delpaths", "delpaths([[\"a\",0]])"),
+    c(Kind::Jq, "tostream", "events [path, leaf] and closing [path] of a value"),
+    c(Kind::Jq, "fromstream", "fromstream(events)  — rebuild values from events"),
+    c(Kind::Jq, "truncate_stream", "depth | truncate_stream(events)  — drop leading path levels"),
     c(Kind::Jq, "map", "map(f)  — [.[] | f]"),
     c(Kind::Jq, "map_values", "map_values(f)  — .[] |= f"),
     c(Kind::Jq, "walk", "walk(f)  — apply f bottom-up, recursively"),
@@ -1238,6 +1266,9 @@ const JQ_BUILTINS: &[Candidate] = &[
     c(Kind::Jq, "index", "index(x)  — first index of x"),
     c(Kind::Jq, "rindex", "rindex(x)  — last index of x"),
     c(Kind::Jq, "bsearch", "binary search a sorted array"),
+    c(Kind::Jq, "IN", "IN(a, b, …) or IN(src; set)  — is the input (or any src) among the values?"),
+    c(Kind::Jq, "INDEX", "INDEX(f) or INDEX(stream; f)  — object keyed by f"),
+    c(Kind::Jq, "JOIN", "JOIN($index; f)  — pair each element with its match in $index"),
     c(Kind::Jq, "flatten", "flatten or flatten(depth)"),
     c(Kind::Jq, "transpose", "transpose an array of arrays"),
     c(Kind::Jq, "add", "sum/concatenate all items"),
@@ -1303,6 +1334,23 @@ const JQ_BUILTINS: &[Candidate] = &[
     c(Kind::Jq, "stderr", "print the input to stderr, unchanged"),
     c(Kind::Jq, "halt", "stop processing immediately"),
     c(Kind::Jq, "halt_error", "halt_error or halt_error(code)"),
+];
+
+/// jq's `@format` names, offered after an `@` in jq. They are all in jaq's
+/// definitions except `@csv` and `@tsv`, which `jq_ext` adds.
+#[rustfmt::skip]
+const JQ_FORMATS: &[(&str, &str)] = &[
+    ("csv", "array -> one row of CSV"),
+    ("tsv", "array -> one row of TSV"),
+    ("json", "the value as JSON text"),
+    ("text", "the value as a string"),
+    ("html", "escape & < > ' \" for HTML"),
+    ("htmld", "undo @html"),
+    ("uri", "percent-encode for a URL"),
+    ("urid", "undo @uri"),
+    ("sh", "quote for a POSIX shell"),
+    ("base64", "encode as base64"),
+    ("base64d", "decode base64"),
 ];
 
 // jsonpath-rust's parser (RFC 9535 filter-expression functions), plus the
@@ -1552,6 +1600,75 @@ mod tests {
         assert!(!items.is_empty());
         assert!(items.iter().all(|s| !s.label.contains('[')));
         assert!(items.iter().any(|s| s.label == "sort"));
+    }
+
+    #[test]
+    fn jq_offers_the_builtins_jaq_lacks() {
+        for (typed, wanted) in [
+            ("tost", "tostream"),
+            ("fromst", "fromstream"),
+            ("truncate_", "truncate_stream"),
+            ("INDE", "INDEX"),
+            ("JOI", "JOIN"),
+            ("IN", "IN"),
+        ] {
+            let items = suggest(typed, typed.len(), Some(Kind::Jq), None);
+            assert!(
+                labels(&items).contains(&wanted),
+                "{typed:?} offers {:?}",
+                labels(&items)
+            );
+        }
+    }
+
+    #[test]
+    fn names_are_ordered_alphabetically_whatever_their_case() {
+        // `IN` and `INDEX` sit with `in` and `index`, not ahead of `abs`.
+        let items = suggest(".a | in", 7, Some(Kind::Jq), None);
+        assert_eq!(
+            labels(&items)[..5],
+            ["IN", "in", "INDEX", "index", "indices"]
+        );
+        let items = suggest(".a | ", 5, Some(Kind::Jq), None);
+        assert_eq!(labels(&items)[0], "abs");
+    }
+
+    #[test]
+    fn after_an_at_sign_jq_offers_its_format_names() {
+        let items = suggest("@c", 2, Some(Kind::Jq), None);
+        assert_eq!(labels(&items), ["@csv"]);
+        assert_eq!(accept("@c", &items[0]), "@csv");
+
+        // Typed mid-pipeline, in place, with text after the cursor.
+        let none = json!(null);
+        assert_eq!(
+            accepting(".[] | [.a] | @t‸ | length", Some(Kind::Jq), &none, "@tsv"),
+            ".[] | [.a] | @tsv | length"
+        );
+        // A bare `@` lists them all; a longer prefix narrows them down.
+        let all = suggest(".a | @", 6, Some(Kind::Jq), None);
+        assert_eq!(all.len(), JQ_FORMATS.len());
+        assert_eq!(
+            labels(&suggest(".a | @base", 10, Some(Kind::Jq), None)),
+            ["@base64", "@base64d"]
+        );
+        assert!(suggest(".a | @zzz", 9, Some(Kind::Jq), None).is_empty());
+    }
+
+    #[test]
+    fn format_names_are_offered_in_auto_mode_whenever_jq_is_possible() {
+        // Not yet told apart from JMESPath, but only jq has `@name`.
+        assert_eq!(labels(&suggest("@cs", 3, None, None)), ["@csv"]);
+        assert_eq!(labels(&suggest(".a | @cs", 8, None, None)), ["@csv"]);
+    }
+
+    #[test]
+    fn at_is_still_the_current_node_elsewhere() {
+        // JMESPath and JSONPath: `@` is the current node, no name follows it.
+        assert!(suggest("a[?@", 4, Some(Kind::JmesPath), None).is_empty());
+        assert!(suggest("$[?(@", 5, Some(Kind::JsonPath), None).is_empty());
+        // In a string it is only a character.
+        assert!(suggest(r#""mail me @c"#, 11, Some(Kind::Jq), None).is_empty());
     }
 
     // ---- helpers ---------------------------------------------------------

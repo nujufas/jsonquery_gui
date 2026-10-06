@@ -12,7 +12,7 @@ use anyhow::Context;
 use crossbeam_channel::{Receiver, Sender};
 use jsonquery_core::engine::QueryEvent;
 use jsonquery_core::{Document, DocumentSource, NodePath, SourceMatches};
-use jsonquery_query::merge;
+use jsonquery_query::{merge, output, OutputFormat};
 use serde_json::Value;
 
 use crate::app::human_bytes;
@@ -101,13 +101,20 @@ pub enum Command {
     SaveResults {
         results: serde_json::Value,
         path: PathBuf,
+        /// How to write them: as JSON, or — when the query ends in `@csv` or
+        /// `@tsv` — as the rows of text it made, one to a line.
+        format: OutputFormat,
     },
     /// "Copy to Clipboard" over one row's context menu — serializes
-    /// `target` to pretty-printed JSON text; the UI thread decides whether
-    /// it's small enough to copy straight away or worth asking about first
+    /// `target` to pretty-printed JSON text (or, for `format`, the rows of
+    /// CSV or TSV a results row holds); the UI thread decides whether it's
+    /// small enough to copy straight away or worth asking about first
     /// (`Event::CopyReady` carries the text either way).
     CopyNode {
         target: CopyTarget,
+        /// The format of the results a `CopyTarget::Value` comes from (the
+        /// source document is always JSON).
+        format: OutputFormat,
     },
     /// Work out where a results row came from in `doc`, for the results
     /// panel's "Find in Source" row action: `target` is the row's value, and
@@ -136,6 +143,9 @@ pub enum Command {
         target: TextTarget,
         node_budget: usize,
         gen: u64,
+        /// What the results are written as (the source is always JSON); for
+        /// CSV and TSV the "nodes" the budget counts are rows.
+        format: OutputFormat,
     },
     /// The Tools window's "Merge JSON": read `paths` (in this order) and run
     /// the jq `filter` over them (`jsonquery_query::merge`). `cancel` stops it.
@@ -289,14 +299,22 @@ pub fn spawn(cmd_rx: Receiver<Command>, evt_tx: Sender<Event>, wake: impl Fn() +
                         Err(e) => send(&evt_tx, Event::SaveError(format!("{e:#}")), &wake),
                     }
                 }
-                Command::SaveResults { results, path } => {
-                    let result = save_json(&results, &path);
+                Command::SaveResults {
+                    results,
+                    path,
+                    format,
+                } => {
+                    let result = if format.is_tabular() {
+                        save_rows(&results, &path)
+                    } else {
+                        save_json(&results, &path)
+                    };
                     match result {
                         Ok(()) => send(&evt_tx, Event::Saved(path), &wake),
                         Err(e) => send(&evt_tx, Event::SaveError(format!("{e:#}")), &wake),
                     }
                 }
-                Command::CopyNode { target } => {
+                Command::CopyNode { target, format } => {
                     let result = match &target {
                         CopyTarget::Source { doc, node_path } => match node_path {
                             Some(np) => match jsonquery_core::resolve(&doc.root, np) {
@@ -309,6 +327,7 @@ pub fn spawn(cmd_rx: Receiver<Command>, evt_tx: Sender<Event>, wake: impl Fn() +
                             None => serde_json::to_string_pretty(&doc.root)
                                 .context("serializing the document"),
                         },
+                        CopyTarget::Value(v) if format.is_tabular() => Ok(output::rows_text(v)),
                         CopyTarget::Value(v) => {
                             serde_json::to_string_pretty(v).context("serializing that value")
                         }
@@ -354,14 +373,18 @@ pub fn spawn(cmd_rx: Receiver<Command>, evt_tx: Sender<Event>, wake: impl Fn() +
                     target,
                     node_budget,
                     gen,
+                    format,
                 } => {
                     let kind = target.kind();
                     let value = match &target {
                         TextTarget::Source(doc) => &doc.root,
                         TextTarget::Results(v) => v,
                     };
-                    let (text, truncated) =
-                        jsonquery_core::pretty_print_bounded(value, node_budget);
+                    let (text, truncated) = if format.is_tabular() {
+                        output::rows_bounded(value, node_budget)
+                    } else {
+                        jsonquery_core::pretty_print_bounded(value, node_budget)
+                    };
                     send(
                         &evt_tx,
                         Event::TextRendered {
@@ -550,6 +573,17 @@ fn save_json(value: &serde_json::Value, path: &Path) -> anyhow::Result<()> {
     let file =
         std::fs::File::create(path).with_context(|| format!("creating {}", path.display()))?;
     serde_json::to_writer_pretty(std::io::BufWriter::new(file), value)
+        .with_context(|| format!("writing {}", path.display()))
+}
+
+/// Write results as the rows of text a query ending in `@csv` or `@tsv` made,
+/// one to a line — what "Save…" writes in place of JSON for those queries.
+fn save_rows(value: &serde_json::Value, path: &Path) -> anyhow::Result<()> {
+    let file =
+        std::fs::File::create(path).with_context(|| format!("creating {}", path.display()))?;
+    let mut out = std::io::BufWriter::new(file);
+    output::write_rows(value, &mut out)
+        .and_then(|()| std::io::Write::flush(&mut out))
         .with_context(|| format!("writing {}", path.display()))
 }
 
@@ -742,6 +776,181 @@ mod tests {
             }
             _ => panic!("expected an error"),
         }
+    }
+
+    fn save_results_as(results: Value, file_name: &str, format: OutputFormat) -> (Event, PathBuf) {
+        let path = temp_dir("save-results").join(file_name);
+        let (commands, events) = start_worker();
+        commands
+            .send(Command::SaveResults {
+                results,
+                path: path.clone(),
+                format,
+            })
+            .unwrap();
+        (events.recv_timeout(WAIT).unwrap(), path)
+    }
+
+    #[test]
+    fn json_results_are_saved_as_pretty_json() {
+        let (event, path) = save_results_as(
+            serde_json::json!(["a,b", 1]),
+            "results.json",
+            OutputFormat::Json,
+        );
+        assert!(matches!(event, Event::Saved(ref saved) if *saved == path));
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "[\n  \"a,b\",\n  1\n]"
+        );
+    }
+
+    #[test]
+    fn csv_results_are_saved_as_csv_rows_not_as_json() {
+        let (event, path) = save_results_as(
+            serde_json::json!(["\"Ada\",36", "\"Linus, L.\",28"]),
+            "results.csv",
+            OutputFormat::Csv,
+        );
+        assert!(matches!(event, Event::Saved(ref saved) if *saved == path));
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "\"Ada\",36\n\"Linus, L.\",28\n"
+        );
+    }
+
+    #[test]
+    fn tsv_results_are_saved_as_tsv_rows() {
+        let (event, path) = save_results_as(
+            serde_json::json!(["name\tage", "Ada\t36", "a\\tb\tc"]),
+            "results.tsv",
+            OutputFormat::Tsv,
+        );
+        assert!(matches!(event, Event::Saved(_)));
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "name\tage\nAda\t36\na\\tb\tc\n"
+        );
+    }
+
+    #[test]
+    fn one_saved_row_is_one_line() {
+        // What "Save…" on a single results row sends: the row itself.
+        let (event, path) = save_results_as(
+            serde_json::json!("\"Ada\",36"),
+            "item_0.csv",
+            OutputFormat::Csv,
+        );
+        assert!(matches!(event, Event::Saved(_)));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "\"Ada\",36\n");
+    }
+
+    #[test]
+    fn rows_that_cannot_be_saved_are_an_error_naming_the_file() {
+        let path = temp_dir("save-rows-missing")
+            .join("no-such-folder")
+            .join("out.csv");
+        let (commands, events) = start_worker();
+        commands
+            .send(Command::SaveResults {
+                results: serde_json::json!(["a"]),
+                path: path.clone(),
+                format: OutputFormat::Csv,
+            })
+            .unwrap();
+        match events.recv_timeout(WAIT).unwrap() {
+            Event::SaveError(message) => {
+                assert!(message.contains(&path.display().to_string()), "{message}");
+            }
+            _ => panic!("expected an error"),
+        }
+    }
+
+    fn copy_text(value: Value, format: OutputFormat) -> String {
+        let (commands, events) = start_worker();
+        commands
+            .send(Command::CopyNode {
+                target: CopyTarget::Value(value),
+                format,
+            })
+            .unwrap();
+        match events.recv_timeout(WAIT).unwrap() {
+            Event::CopyReady(text) => text,
+            _ => panic!("expected the text to copy"),
+        }
+    }
+
+    #[test]
+    fn a_csv_row_is_copied_as_the_row() {
+        let row = serde_json::json!("\"Ada\",36,\"say \"\"hi\"\"\"");
+        assert_eq!(
+            copy_text(row.clone(), OutputFormat::Csv),
+            "\"Ada\",36,\"say \"\"hi\"\"\""
+        );
+        // The same string from a JSON query is copied as the JSON it is.
+        assert_eq!(
+            copy_text(row, OutputFormat::Json),
+            "\"\\\"Ada\\\",36,\\\"say \\\"\\\"hi\\\"\\\"\\\"\""
+        );
+    }
+
+    #[test]
+    fn a_tsv_row_is_copied_as_the_row() {
+        assert_eq!(
+            copy_text(serde_json::json!("Ada\t36\ta\\nb"), OutputFormat::Tsv),
+            "Ada\t36\ta\\nb"
+        );
+    }
+
+    #[test]
+    fn all_the_rows_are_copied_a_line_each() {
+        let rows = serde_json::json!(["\"Ada\",36", "\"Linus\",28"]);
+        assert_eq!(
+            copy_text(rows.clone(), OutputFormat::Csv),
+            "\"Ada\",36\n\"Linus\",28"
+        );
+        assert_eq!(
+            copy_text(rows, OutputFormat::Json),
+            "[\n  \"\\\"Ada\\\",36\",\n  \"\\\"Linus\\\",28\"\n]"
+        );
+    }
+
+    #[test]
+    fn the_text_view_shows_rows_as_rows_and_counts_them_against_its_budget() {
+        let render = |format, node_budget| {
+            let (commands, events) = start_worker();
+            commands
+                .send(Command::RenderText {
+                    target: TextTarget::Results(serde_json::json!(["a,b", "\"c\"", "d"])),
+                    node_budget,
+                    gen: 3,
+                    format,
+                })
+                .unwrap();
+            match events.recv_timeout(WAIT).unwrap() {
+                Event::TextRendered {
+                    target,
+                    gen,
+                    text,
+                    truncated,
+                } => {
+                    assert!(target == TextTargetKind::Results && gen == 3);
+                    (text, truncated)
+                }
+                _ => panic!("expected the rendered text"),
+            }
+        };
+        assert_eq!(
+            render(OutputFormat::Csv, 100),
+            ("a,b\n\"c\"\nd".to_owned(), false)
+        );
+        assert_eq!(
+            render(OutputFormat::Tsv, 2),
+            ("a,b\n\"c\"".to_owned(), true)
+        );
+        let (json, _) = render(OutputFormat::Json, 100);
+        assert!(json.starts_with("[\n"), "{json}");
+        assert!(json.contains("\"a,b\""), "{json}");
     }
 
     #[test]

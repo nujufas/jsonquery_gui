@@ -821,12 +821,20 @@ fn a_window_whose_pane_is_docked_gets_out_of_the_way_if_the_main_window_never_dr
 // The icon in each pane header's top right corner.
 
 /// Load `json` as the source document (the worker thread does it, so the frames
-/// that drain its answer are run until it is in).
+/// that drain its answer are run until it is in). When a document is already
+/// shown, that one stays until the worker's answer replaces it, so "a document
+/// is shown" is not the signal: waiting for it to be a different one is.
 fn load(h: &mut Harness, json: &str) {
+    let before = h.app.doc.clone();
     h.app.open_text(json.to_owned());
     for _ in 0..300 {
         h.frame();
-        if h.app.doc.is_some() {
+        let replaced = match (&before, &h.app.doc) {
+            (_, None) => false,
+            (None, Some(_)) => true,
+            (Some(was), Some(now)) => !Arc::ptr_eq(was, now),
+        };
+        if replaced {
             break;
         }
         std::thread::sleep(Duration::from_millis(10));
@@ -3313,4 +3321,181 @@ fn a_patched_document_leaves_room_in_the_toolbar() {
     h.app.dock.pop_out(Pane::Query, None, None);
     h.settle();
     assert_toolbar_does_not_overlap(&h, "patched, a pane out");
+}
+
+// Results that are rows of CSV or TSV: a query ending in `@csv` or `@tsv`.
+
+const PEOPLE: &str = r#"[{"name":"Ada","age":36},{"name":"Linus, L.","age":28}]"#;
+const CSV_QUERY: &str = ".[] | [.name, .age] | @csv";
+const TSV_QUERY: &str = ".[] | [.name, .age] | @tsv";
+
+/// Run `query` in the query box and wait for its results.
+fn run_and_wait(h: &mut Harness, query: &str) {
+    h.app.query_text = query.to_owned();
+    h.app.run_query();
+    wait_for(h, "the query to finish", |h| !h.app.query_running);
+}
+
+/// What `copy` puts on the clipboard, once the worker has made the text.
+fn copied_after(h: &mut Harness, copy: impl FnOnce(&mut App)) -> String {
+    let before = h.copied.len();
+    copy(&mut h.app);
+    wait_for(h, "something on the clipboard", |h| h.copied.len() > before);
+    h.copied.last().cloned().expect("something was copied")
+}
+
+fn copy_row(h: &mut Harness, row: usize) -> String {
+    copied_after(h, |app| {
+        app.copy_results_node(vec![PathSegment::Index(row)])
+    })
+}
+
+fn copy_all(h: &mut Harness) -> String {
+    copied_after(h, |app| app.copy_results_node(Vec::new()))
+}
+
+#[test]
+fn csv_rows_are_copied_as_csv() {
+    let mut h = Harness::new();
+    load(&mut h, PEOPLE);
+    run_and_wait(&mut h, CSV_QUERY);
+    assert_eq!(h.app.results_format, OutputFormat::Csv);
+    // A row is copied as the row, not as a quoted, escaped JSON string…
+    assert_eq!(copy_row(&mut h, 0), "\"Ada\",36");
+    assert_eq!(copy_row(&mut h, 1), "\"Linus, L.\",28");
+    // …and the results root, which is all of them, as a line each.
+    assert_eq!(copy_all(&mut h), "\"Ada\",36\n\"Linus, L.\",28");
+}
+
+#[test]
+fn tsv_rows_are_copied_as_tsv() {
+    let mut h = Harness::new();
+    load(&mut h, PEOPLE);
+    run_and_wait(&mut h, TSV_QUERY);
+    assert_eq!(h.app.results_format, OutputFormat::Tsv);
+    assert_eq!(copy_row(&mut h, 1), "Linus, L.\t28");
+    assert_eq!(copy_all(&mut h), "Ada\t36\nLinus, L.\t28");
+}
+
+#[test]
+fn results_of_any_other_query_are_still_copied_as_json() {
+    let mut h = Harness::new();
+    load(&mut h, PEOPLE);
+    run_and_wait(&mut h, ".[] | .name");
+    assert_eq!(h.app.results_format, OutputFormat::Json);
+    assert_eq!(copy_row(&mut h, 0), "\"Ada\"");
+    assert_eq!(copy_all(&mut h), "[\n  \"Ada\",\n  \"Linus, L.\"\n]");
+    // Using `@csv` on the way to something else is not asking for CSV.
+    run_and_wait(&mut h, "[.[] | [.name] | @csv] | length");
+    assert_eq!(h.app.results_format, OutputFormat::Json);
+    assert_eq!(copy_row(&mut h, 0), "2");
+}
+
+#[test]
+fn the_format_follows_the_latest_query_and_a_new_document_starts_over() {
+    let mut h = Harness::new();
+    load(&mut h, PEOPLE);
+    run_and_wait(&mut h, CSV_QUERY);
+    assert_eq!(h.app.results_format, OutputFormat::Csv);
+    run_and_wait(&mut h, TSV_QUERY);
+    assert_eq!(h.app.results_format, OutputFormat::Tsv);
+    run_and_wait(&mut h, ".[0]");
+    assert_eq!(h.app.results_format, OutputFormat::Json);
+    run_and_wait(&mut h, CSV_QUERY);
+    load(&mut h, "[1]");
+    assert_eq!(h.app.results_format, OutputFormat::Json);
+    // A JSON Pointer or JSONPath query has no `@csv`, whatever it says.
+    h.app.query_engine = Some(jsonquery_query::Kind::JsonPath);
+    run_and_wait(&mut h, "$[0] | @csv");
+    assert_eq!(h.app.results_format, OutputFormat::Json);
+}
+
+#[test]
+fn the_text_view_shows_the_rows_as_they_will_be_copied() {
+    let mut h = Harness::new();
+    load(&mut h, PEOPLE);
+    run_and_wait(&mut h, CSV_QUERY);
+    h.app.results_view = ViewMode::Text;
+    wait_for(&mut h, "the text view", |h| {
+        !h.app.results_text_pending && !h.app.results_text_dirty
+    });
+    assert_eq!(h.app.results_text_cache, "\"Ada\",36\n\"Linus, L.\",28");
+    assert!(!h.app.results_text_truncated);
+
+    // The same view over JSON results is JSON.
+    run_and_wait(&mut h, ".[] | .name");
+    wait_for(&mut h, "the text view", |h| {
+        !h.app.results_text_pending && !h.app.results_text_dirty
+    });
+    assert_eq!(
+        h.app.results_text_cache,
+        "[\n  \"Ada\",\n  \"Linus, L.\"\n]"
+    );
+}
+
+#[test]
+fn the_results_header_says_when_the_results_are_csv_or_tsv() {
+    let mut h = Harness::new();
+    load(&mut h, PEOPLE);
+    run_and_wait(&mut h, ".[] | .name");
+    assert!(
+        !is_drawn(&h, "CSV") && !is_drawn(&h, "TSV"),
+        "{:?}",
+        h.texts()
+    );
+    run_and_wait(&mut h, CSV_QUERY);
+    assert!(is_drawn(&h, "CSV"), "{:?}", h.texts());
+    assert!(!is_drawn(&h, "TSV"));
+    run_and_wait(&mut h, TSV_QUERY);
+    assert!(is_drawn(&h, "TSV"), "{:?}", h.texts());
+    assert!(!is_drawn(&h, "CSV"));
+}
+
+#[test]
+fn the_default_results_header_is_not_changed_by_any_of_this() {
+    // Where the header texts of both panes are, to the pixel.
+    fn header(h: &Harness) -> Vec<(String, i32, i32)> {
+        let mut found: Vec<_> = h
+            .texts()
+            .into_iter()
+            .filter(|(t, _)| matches!(t.as_str(), "Results" | "Tree" | "Text" | "Save…"))
+            .map(|(t, at)| (t, at.x.round() as i32, at.y.round() as i32))
+            .collect();
+        found.sort();
+        found
+    }
+    let mut h = Harness::new();
+    load(&mut h, PEOPLE);
+    run_and_wait(&mut h, ".[]");
+    let json = header(&h);
+    assert_eq!(json.len(), 7, "{json:?}"); // Source: Tree, Text, Save…; Results: all four
+    run_and_wait(&mut h, CSV_QUERY);
+    // The note goes after the Tree and Text buttons and before the right edge;
+    // nothing that was there moves.
+    assert_eq!(header(&h), json);
+}
+
+#[test]
+fn saving_after_expanding_writes_the_rows_in_the_queries_format() {
+    // "Save…" over capped results re-runs the query without the cap and saves
+    // when that finishes; the file must be rows, not a JSON array of strings.
+    let dir = std::env::temp_dir().join(format!("jsonquery-save-rows-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    for (query, name, expected) in [
+        (CSV_QUERY, "rows.csv", "\"Ada\",36\n\"Linus, L.\",28\n"),
+        (TSV_QUERY, "rows.tsv", "Ada\t36\nLinus, L.\t28\n"),
+    ] {
+        let mut h = Harness::new();
+        load(&mut h, PEOPLE);
+        run_and_wait(&mut h, query);
+        let path = dir.join(name);
+        h.app.expand_results();
+        h.app.pending_save_results = Some(path.clone());
+        wait_for(&mut h, "the file to be saved", |h| {
+            h.app.last_saved.is_some()
+        });
+        assert_eq!(h.app.last_saved.as_deref(), Some(path.as_path()));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), expected);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
 }

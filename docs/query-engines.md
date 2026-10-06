@@ -11,7 +11,7 @@ might be worth adding next.
 - **JSON Pointer** (`crates/query/src/json_pointer.rs`, `JsonPointerEngine`) — RFC 6901 via `serde_json::Value::pointer`.
 - **JSONPath** (`crates/query/src/jsonpath.rs`, `JsonPathEngine`) — RFC 9535 via [jsonpath-rust](https://crates.io/crates/jsonpath-rust).
 - **JMESPath** (`crates/query/src/jmespath_engine.rs`, `JmesPathEngine`) — via the [jmespath](https://crates.io/crates/jmespath) crate.
-- **jq** (`crates/query/src/jq.rs`, `JaqEngine`) — via the embedded [jaq](https://github.com/01mf02/jaq).
+- **jq** (`crates/query/src/jq.rs`, `JaqEngine`) — via the embedded [jaq](https://github.com/01mf02/jaq), plus the builtins jaq lacks (`@csv`, `@tsv`, `IN`, `INDEX`, `JOIN`, `tostream`, `fromstream`, `truncate_stream`: `crates/query/src/jq_ext.rs`).
 
 A `jsonquery_query::Kind` enum (`crates/query/src/lib.rs`) ties each
 dialect's id to its engine and adds `Kind::detect(query_text)` —
@@ -61,9 +61,12 @@ implementation, and a full embedded scripting engine, respectively.
 ## Out of scope: format conversion
 
 `xml2js`-style "JSON to XML" is a format converter, not a query language,
-and unrelated to `QueryEngine`. A CSV/NDJSON/XML export option would be
-another output format, not a new dialect — `quick-xml` or `serde-xml-rs`
-would be the Rust tool for XML specifically, if it's ever wanted.
+and unrelated to `QueryEngine`. CSV and TSV *are* there, as jq's own `@csv` and
+`@tsv` filters: a query ending in either has its results copied and saved as rows
+of CSV or TSV ([Architecture §6](architecture.md#6-results-handling)). An
+NDJSON/XML export option would likewise be another output format, not a new
+dialect — `quick-xml` or `serde-xml-rs` would be the Rust tool for XML
+specifically, if it's ever wanted.
 
 ---
 

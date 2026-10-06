@@ -72,7 +72,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            xvfb fluxbox xdotool wmctrl xclip tesseract-ocr gnome-screenshot \
+            xvfb fluxbox xdotool wmctrl xclip tesseract-ocr gnome-screenshot dbus-daemon \
             python3-venv python3-pip python3-tk python3-dev \
             libxkbcommon-x11-0 libxcb-xkb1 libgl1-mesa-dri libegl1 mesa-vulkan-drivers libvulkan1
 

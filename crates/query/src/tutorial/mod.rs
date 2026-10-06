@@ -18,7 +18,7 @@ use std::sync::atomic::AtomicBool;
 use jsonquery_core::engine::QueryEvent;
 use serde_json::Value;
 
-use crate::Kind;
+use crate::{Kind, OutputFormat};
 
 mod jmespath;
 mod jq;
@@ -254,6 +254,16 @@ pub fn format_value(value: &Value) -> String {
             format!("[\n{}\n]", lines.join(",\n"))
         }
         _ => serde_json::to_string_pretty(value).unwrap_or(compact),
+    }
+}
+
+/// One result of the example `query` as display text: [`format_value`], except
+/// that a row of CSV or TSV is shown as the row, as the main window's Copy and
+/// Save… write it, not as a quoted JSON string.
+pub fn format_result(kind: Kind, query: &str, value: &Value) -> String {
+    match value {
+        Value::String(row) if OutputFormat::detect(kind, query).is_tabular() => row.clone(),
+        _ => format_value(value),
     }
 }
 
@@ -792,6 +802,140 @@ mod tests {
     }
 
     #[test]
+    fn csv_and_tsv_rows_are_shown_as_rows() {
+        let row = Value::String("\"Ada\",36".to_owned());
+        assert_eq!(
+            format_result(Kind::Jq, ".[] | [.name, .age] | @csv", &row),
+            "\"Ada\",36"
+        );
+        // Anything else is shown as the JSON it is.
+        assert_eq!(
+            format_result(Kind::Jq, ".[] | .name", &row),
+            "\"\\\"Ada\\\",36\""
+        );
+        assert_eq!(format_result(Kind::Jq, "@csv", &Value::Null), "null");
+        // The lessons on CSV and TSV show their rows that way.
+        let team = |query| run(Kind::Jq, TEAM, query);
+        let shown: Vec<String> = team(".members[] | [.name, .age, .role] | @csv")
+            .items
+            .iter()
+            .map(|v| format_result(Kind::Jq, ".members[] | [.name, .age, .role] | @csv", v))
+            .collect();
+        assert_eq!(shown[0], "\"Ada\",36,\"lead\"");
+        assert_eq!(shown.len(), 4);
+    }
+
+    /// jsonquery adds `@csv`, `@tsv`, `IN`, `INDEX`, `JOIN`, `tostream`,
+    /// `fromstream` and `truncate_stream` to jaq (see `jq_ext`). Each has a page
+    /// in the tutorial whose live examples really use it.
+    #[test]
+    fn every_filter_jsonquery_adds_has_a_lesson() {
+        let lessons: Vec<&Lesson> = topics(Kind::Jq)
+            .iter()
+            .flat_map(|topic| topic.lessons)
+            .collect();
+        for (name, title) in [
+            ("@csv", "CSV & TSV"),
+            ("@tsv", "CSV & TSV"),
+            ("IN(", "IN"),
+            ("INDEX(", "INDEX & JOIN"),
+            ("JOIN(", "INDEX & JOIN"),
+            ("tostream", "tostream"),
+            ("fromstream(", "fromstream & truncate_stream"),
+            ("truncate_stream(", "fromstream & truncate_stream"),
+        ] {
+            let lesson = lessons
+                .iter()
+                .find(|l| l.title == title)
+                .unwrap_or_else(|| panic!("no lesson called `{title}`"));
+            assert!(
+                lesson.examples.iter().any(|e| e.query.contains(name)),
+                "`{title}` has no example that uses `{name}`"
+            );
+        }
+    }
+
+    /// What the table and stream lessons say outside their live examples, in
+    /// tips and notes, is true of the engine: nothing else would notice if it
+    /// stopped being.
+    #[test]
+    fn claims_made_in_the_table_and_stream_tips_hold() {
+        use serde_json::json;
+        let jq = |data: &str, query: &str| {
+            let out = run(Kind::Jq, data, query);
+            assert!(
+                out.is_ok(),
+                "`{query}` failed: {:?} {:?}",
+                out.error,
+                out.item_errors
+            );
+            out.items
+        };
+
+        // `IN` compares with `==`, and without `select` it just answers.
+        assert_eq!(jq("1", "IN(1.0)"), vec![json!(true)]);
+        assert_eq!(jq(r#""1""#, "IN(1)"), vec![json!(false)]);
+        assert_eq!(
+            jq(TEAM, r#"[.members[] | .role | IN("dev", "qa")]"#),
+            vec![json!([false, true, true, true])]
+        );
+
+        // `INDEX` keys are strings, and the later element wins.
+        assert_eq!(
+            jq(r#"[{"id": 1}, {"id": 2}]"#, "INDEX(.id) | keys"),
+            vec![json!(["1", "2"])]
+        );
+        assert_eq!(
+            jq(
+                r#"[{"id": 1, "v": "a"}, {"id": 1, "v": "b"}]"#,
+                r#"INDEX(.id) | .["1"].v"#
+            ),
+            vec![json!("b")]
+        );
+
+        // `JOIN` pairs an element with `null` when the table has no entry.
+        assert_eq!(
+            jq(
+                r#"[{"k": "a"}]"#,
+                r#"INDEX(.[]; .k) as $t | [{"k": "zz"}] | JOIN($t; .k)"#
+            ),
+            vec![json!([[{"k": "zz"}, null]])]
+        );
+        assert_eq!(
+            jq(r#"[{"k": "a"}]"#, "INDEX(.[]; .k) as $t | JOIN($t; .k)"),
+            vec![json!([[{"k": "a"}, {"k": "a"}]])]
+        );
+
+        // Empty containers and lone scalars are events of their own, and
+        // `fromstream(tostream)` is the identity.
+        assert_eq!(jq("[]", "tostream"), vec![json!([[], []])]);
+        assert_eq!(jq("{}", "tostream"), vec![json!([[], {}])]);
+        assert_eq!(jq("5", "tostream"), vec![json!([[], 5])]);
+        assert_eq!(jq(TEAM, "[fromstream(tostream)] == [.]"), vec![json!(true)]);
+
+        // `truncate_stream` loses the scalars that sit directly in the array.
+        assert_eq!(
+            jq(
+                r#"[1, [2, 3], {"a": 4}]"#,
+                ". as $d | [fromstream(1 | truncate_stream($d | tostream))]"
+            ),
+            vec![json!([[2, 3], {"a": 4}])]
+        );
+
+        // `keys_unsorted` is the order of the file; a missing field is an
+        // empty cell; the error for an object says what is wanted.
+        assert_eq!(
+            jq(TEAM, ".members[0] | keys_unsorted"),
+            vec![json!(["name", "age", "role", "active", "email", "skills"])]
+        );
+        assert_eq!(jq(r#"{"a": 1}"#, "[.a, .b] | @csv"), vec![json!("1,")]);
+        let message = jq(r#"[{"a": 1}]"#, "try (.[0] | @csv) catch .");
+        assert!(message[0]
+            .as_str()
+            .is_some_and(|m| m.contains("cannot be csv-formatted, only an array can be")));
+    }
+
+    #[test]
     fn filter_matches_titles_queries_and_cheat_rows() {
         let lesson = topics(Kind::Jq)[0].lessons[0];
         assert!(lesson_matches(&lesson, ""));
@@ -806,12 +950,7 @@ mod tests {
     fn documented_gaps_are_still_real() {
         let team = |kind, query| run(kind, TEAM, query);
         for query in [
-            r#".members[] | [.name] | @csv"#,
-            r#".members[] | [.name] | @tsv"#,
-            r#".members[] | select(.role | IN("dev"))"#,
-            r#".members | INDEX(.name)"#,
             r#"$ENV | type"#,
-            r#"[.members[0] | tostream]"#,
             r#"[.members[0] | leaf_paths]"#,
             r#".members | toarray"#,
             r#"{} | .a.b.c = 1"#,

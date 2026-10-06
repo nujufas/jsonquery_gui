@@ -52,6 +52,14 @@ patches and validates documents too. Built in Rust with
 - **Tree or raw text views** — toggle either the source document or the
   query results between a virtualized, expand/collapse tree and
   plain, selectable/copyable pretty-printed text.
+- **CSV and TSV out** — end a jq query with `@csv` or `@tsv`, for example
+  `.[] | [.name, .age] | @csv`, and the results are rows of text:
+  **Copy to Clipboard**, **Save…** and the Text view write them as CSV or TSV,
+  a line per result, not as quoted JSON strings. A `CSV`/`TSV` note beside the
+  Tree and Text buttons says when that applies. (jaq has neither filter;
+  jsonquery adds them, with `IN`, `INDEX`, `JOIN`, `tostream`, `fromstream`
+  and `truncate_stream`.) The tutorial teaches them on the pages of its
+  *Tables & lookups* and *Event streams* topics.
 - **Search** — `Ctrl+F` opens a Notepad++-style Find dialog with the cursor
   already in its field: a case-insensitive substring or regex search across
   the source or the results tree. **Find** (or `Enter`) jumps to each match in
@@ -351,19 +359,23 @@ application on a virtual X display of its own (Xvfb with the fluxbox window
 manager, so it never touches your desktop), clicks and types into it the way a
 person would, and reads the screen back with Tesseract OCR, pixel checks and
 the clipboard — egui draws everything itself and has no accessibility tree to
-query. As of October 2026 it has 369 test cases in 18 suites, one directory
+query. As of October 2026 it has 578 test cases in 22 suites, one directory
 per area of the app (launch and window, opening sources, the toolbar and
 status bar, query engines, query highlighting, the query box, autocomplete,
 tree and text views, context menus, search, saving, keyboard shortcuts,
 pop-out panes, the Tools window, the tutorial and About windows, pane headers,
-drag and drop). Each area is specified by a document in the suite's `docs/`,
-and a traceability matrix gives every case's status with its reason.
+drag and drop, the jq functions the app adds, CSV and TSV output, the
+tutorial's pages for them, and whole workflows from a file to a saved file).
+The file dialogs are answered by a stand-in for the desktop's file-chooser
+portal, so the open and save cases run unattended too. Each area is specified
+by a document in the suite's `docs/`, and a traceability matrix gives every
+case's status with its reason.
 
 It needs Linux, Python 3.12, a Rust toolchain and a few system packages
-(`xvfb fluxbox xdotool wmctrl xclip tesseract-ocr gnome-screenshot python3-venv
-python3-tk python3-dev` on Debian/Ubuntu). Clone it beside this checkout and
-run it — `run.sh` builds the app, creates a Python virtual environment and
-starts the display itself:
+(`xvfb fluxbox xdotool wmctrl xclip tesseract-ocr gnome-screenshot dbus-daemon
+python3-venv python3-tk python3-dev` on Debian/Ubuntu). Clone it beside this
+checkout and run it — `run.sh` builds the app, creates a Python virtual
+environment and starts the display itself:
 
 ```sh
 git clone https://github.com/nujufas/jsonquery_test.git
@@ -372,6 +384,7 @@ cd jsonquery_test
 ./run.sh suites/query_engines/                               # one suite
 ./run.sh suites/tools/tools_diff.robot --test 'TC-DIF-007*'  # one case
 ./run.sh                                                     # every suite (over an hour on one display)
+./run_parallel.sh                                            # every suite, in lanes at once
 ```
 
 It finds this checkout as `../jsonquery_gui`, or wherever `JQ_APP_DIR` points.

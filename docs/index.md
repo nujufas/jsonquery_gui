@@ -41,9 +41,11 @@ scroll."* That's the gap this project fills.
 - Schema validation / linting.
 - Multiple files open at once, tabs, or session management.
 - Remote or cloud-hosted files, beyond a plain HTTP(S) URL load.
-- Other formats (YAML, CSV) — pure JSON in. NDJSON (one JSON value per line)
-  is treated as a shape of JSON input, not a separate format — see
-  [Architecture §2](architecture.md#2-file-ingest).
+- Other formats (YAML, CSV) as *input* — pure JSON in. NDJSON (one JSON value
+  per line) is treated as a shape of JSON input, not a separate format — see
+  [Architecture §2](architecture.md#2-file-ingest). CSV and TSV come *out*: a
+  jq query ending in `@csv` or `@tsv` is copied and saved as rows of CSV or
+  TSV — see [Architecture §6](architecture.md#6-results-handling).
 
 ## Guiding principles
 

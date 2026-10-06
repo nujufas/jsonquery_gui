@@ -8,6 +8,7 @@ use eframe::egui;
 use jsonquery_core::{
     path_string, resolve, Document, DocumentSource, NodePath, PathSegment, SourceMatches,
 };
+use jsonquery_query::OutputFormat;
 use serde_json::Value;
 
 use self::satellites::{Leaving, Satellite};
@@ -158,6 +159,10 @@ pub struct App {
     /// Always a `Value::Array` — the accumulated (possibly capped) results
     /// of the current query, in the shape the results tree renders directly.
     results: Value,
+    /// What `results` are written as by Copy to Clipboard, Save… and the Text
+    /// view: JSON, or CSV/TSV rows when the query that made them ends in
+    /// `@csv`/`@tsv` (`OutputFormat::detect`, decided when the query is run).
+    results_format: OutputFormat,
     results_item_errors: usize,
     last_item_error: Option<String>,
     results_count_so_far: usize,
@@ -406,6 +411,7 @@ impl App {
             raise_window: None,
             run_after_load: false,
             results: Value::Array(Vec::new()),
+            results_format: OutputFormat::Json,
             results_item_errors: 0,
             last_item_error: None,
             results_count_so_far: 0,
@@ -465,6 +471,7 @@ impl App {
         self.query_running = false;
         self.query_error = None;
         self.results = Value::Array(Vec::new());
+        self.results_format = OutputFormat::Json;
         self.results_item_errors = 0;
         self.last_item_error = None;
         self.results_count_so_far = 0;
@@ -678,6 +685,7 @@ impl App {
                             let _ = self.cmd_tx.send(Command::SaveResults {
                                 results: self.results.clone(),
                                 path,
+                                format: self.results_format,
                             });
                         }
                     }
@@ -753,7 +761,7 @@ impl App {
     /// "Save…") rather than the whole document.
     fn save_source_node(&mut self, node_path: NodePath) {
         let Some(doc) = self.doc.clone() else { return };
-        let default_name = default_filename_for_node(&node_path, "data.json");
+        let default_name = default_filename_for_node(&node_path, "data", "json");
         if let Some(path) = rfd::FileDialog::new()
             .set_file_name(&default_name)
             .add_filter("JSON", &["json"])
@@ -768,14 +776,16 @@ impl App {
     }
 
     /// Prompt for a destination and write the current results to it as
-    /// pretty-printed JSON. If the live preview is still capped, this first
-    /// re-runs the query unbounded (`expand_results`) and defers the actual
-    /// save until that completes, so the file gets the complete results, not
-    /// just the up-to-`LIVE_PREVIEW_CAP` preview.
+    /// pretty-printed JSON — or, for a query ending in `@csv` or `@tsv`, as the
+    /// CSV or TSV rows it made (`results_format`). If the live preview is still
+    /// capped, this first re-runs the query unbounded (`expand_results`) and
+    /// defers the actual save until that completes, so the file gets the
+    /// complete results, not just the up-to-`LIVE_PREVIEW_CAP` preview.
     fn save_results(&mut self) {
+        let format = self.results_format;
         if let Some(path) = rfd::FileDialog::new()
-            .set_file_name("results.json")
-            .add_filter("JSON", &["json"])
+            .set_file_name(format!("results.{}", format.extension()))
+            .add_filter(format.label(), &[format.extension()])
             .save_file()
         {
             if self.results_truncated {
@@ -785,6 +795,7 @@ impl App {
                 let _ = self.cmd_tx.send(Command::SaveResults {
                     results: self.results.clone(),
                     path,
+                    format,
                 });
             }
         }
@@ -796,15 +807,17 @@ impl App {
             return;
         };
         let value = value.clone();
-        let default_name = default_filename_for_node(&node_path, "results.json");
+        let format = self.results_format;
+        let default_name = default_filename_for_node(&node_path, "results", format.extension());
         if let Some(path) = rfd::FileDialog::new()
             .set_file_name(&default_name)
-            .add_filter("JSON", &["json"])
+            .add_filter(format.label(), &[format.extension()])
             .save_file()
         {
             let _ = self.cmd_tx.send(Command::SaveResults {
                 results: value,
                 path,
+                format,
             });
         }
     }
@@ -819,13 +832,16 @@ impl App {
                 doc,
                 node_path: Some(node_path),
             },
+            format: OutputFormat::Json,
         });
     }
 
     /// "Copy to Clipboard" over a row of the *results* tree — like
     /// `save_results_node`, resolves `node_path` here (cheap: results are
     /// already bounded by `LIVE_PREVIEW_CAP`) before handing the value off
-    /// to serialize.
+    /// to serialize. Rows of CSV or TSV (a query ending in `@csv`/`@tsv`) are
+    /// copied as the rows they are; the results root, all of them, as a
+    /// line each.
     fn copy_results_node(&mut self, node_path: NodePath) {
         let Some(value) = resolve(&self.results, &node_path) else {
             return;
@@ -833,6 +849,7 @@ impl App {
         let value = value.clone();
         let _ = self.cmd_tx.send(Command::CopyNode {
             target: CopyTarget::Value(value),
+            format: self.results_format,
         });
     }
 
@@ -1234,6 +1251,7 @@ impl App {
         self.invalidate_search();
 
         self.results = Value::Array(Vec::new());
+        self.results_format = OutputFormat::Json;
         self.results_item_errors = 0;
         self.last_item_error = None;
         self.results_count_so_far = 0;
@@ -1304,6 +1322,7 @@ impl App {
             .query_engine
             .unwrap_or_else(|| jsonquery_query::Kind::detect(&self.query_text));
         self.last_resolved_engine = Some(engine);
+        self.results_format = OutputFormat::detect(engine, &self.query_text);
 
         let _ = self.cmd_tx.send(Command::Query {
             doc,
@@ -2383,15 +2402,22 @@ impl App {
             pane_header::title(ui, "Results");
             ui.selectable_value(&mut self.results_view, ViewMode::Tree, "Tree");
             ui.selectable_value(&mut self.results_view, ViewMode::Text, "Text");
+            if self.results_format.is_tabular() {
+                format_note(ui, self.results_format);
+            }
 
             // Pinned to the right edge of the header, mirroring the Source
             // panel's "Save…" (and its pop-out icon in the corner).
             pane_header::pinned_right(ui, |ui| {
                 self.pop_button(ui, Pane::Results);
-                if ui
-                    .add_enabled(has_results, egui::Button::new("Save…"))
-                    .clicked()
-                {
+                let mut save = ui.add_enabled(has_results, egui::Button::new("Save…"));
+                if self.results_format.is_tabular() {
+                    save = save.on_hover_text(format!(
+                        "Save the results as {}: one row to a line.",
+                        self.results_format.label()
+                    ));
+                }
+                if save.clicked() {
                     self.save_results();
                 }
             });
@@ -2435,6 +2461,7 @@ impl App {
                 target: worker::TextTarget::Results(self.results.clone()),
                 node_budget,
                 gen: self.results_text_gen,
+                format: self.results_format,
             });
         }
 
@@ -2535,6 +2562,7 @@ impl App {
                     target: worker::TextTarget::Source(doc.clone()),
                     node_budget: TEXT_VIEW_NODE_BUDGET,
                     gen: self.source_text_gen,
+                    format: OutputFormat::Json,
                 });
             }
 
@@ -2562,6 +2590,20 @@ impl App {
                 });
         }
     }
+}
+
+/// A note in the Results header while the results are rows of CSV or TSV text,
+/// saying that Copy to Clipboard, Save… and the Text view write them that way
+/// rather than as JSON.
+fn format_note(ui: &mut egui::Ui, format: OutputFormat) {
+    let note =
+        egui::Label::new(egui::RichText::new(format.label()).weak()).sense(egui::Sense::hover());
+    ui.add(note).on_hover_text(format!(
+        "The query ends in @{ext}, so each result is a row of {label} text. Copy to \
+         Clipboard, Save… and the Text view write the rows as {label}, not as JSON.",
+        ext = format.extension(),
+        label = format.label()
+    ));
 }
 
 /// Reposition a `TextEdit`'s cursor from outside the widget itself (used
@@ -3242,13 +3284,14 @@ fn default_filename_for_source(source: &DocumentSource) -> String {
 
 /// Default save-dialog filename for a single tree row, derived from its own
 /// key/index — e.g. row `.users[3]` suggests `item_3.json`, `.address`
-/// suggests `address.json`. Just a suggestion the user can freely rename, so
-/// this doesn't need to sanitize exotic key characters.
-fn default_filename_for_node(node_path: &NodePath, fallback: &str) -> String {
+/// suggests `address.json`; the root, which has neither, `fallback` (with the
+/// extension too). Just a suggestion the user can freely rename, so this
+/// doesn't need to sanitize exotic key characters.
+fn default_filename_for_node(node_path: &NodePath, fallback: &str, extension: &str) -> String {
     match node_path.last() {
-        Some(PathSegment::Key(k)) => format!("{k}.json"),
-        Some(PathSegment::Index(i)) => format!("item_{i}.json"),
-        None => fallback.to_string(),
+        Some(PathSegment::Key(k)) => format!("{k}.{extension}"),
+        Some(PathSegment::Index(i)) => format!("item_{i}.{extension}"),
+        None => format!("{fallback}.{extension}"),
     }
 }
 

@@ -461,7 +461,7 @@ impl Tutorial {
                 }
 
                 ui.add_space(6.0);
-                result_box(ui, example, &outcome);
+                result_box(ui, kind, example, &outcome);
 
                 ui.add_space(6.0);
                 egui::CollapsingHeader::new(RichText::new("Explanation").strong())
@@ -610,7 +610,7 @@ fn data_box(
 }
 
 /// The live result of running the example, or the error it produced.
-fn result_box(ui: &mut egui::Ui, example: &Example, outcome: &Outcome) {
+fn result_box(ui: &mut egui::Ui, kind: Kind, example: &Example, outcome: &Outcome) {
     let heading = match (&outcome.error, outcome.items.len()) {
         (Some(_), _) if example.fails => "Result — an error, on purpose".to_owned(),
         (Some(_), _) => "Result — error".to_owned(),
@@ -629,8 +629,10 @@ fn result_box(ui: &mut egui::Ui, example: &Example, outcome: &Outcome) {
         }
         for value in &outcome.items {
             ui.add(
-                egui::Label::new(RichText::new(content::format_value(value)).monospace())
-                    .wrap_mode(TextWrapMode::Wrap),
+                egui::Label::new(
+                    RichText::new(content::format_result(kind, example.query, value)).monospace(),
+                )
+                .wrap_mode(TextWrapMode::Wrap),
             );
         }
         for error in &outcome.item_errors {

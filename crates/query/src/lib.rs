@@ -24,9 +24,11 @@ pub mod diff;
 pub mod highlight;
 pub mod jmespath_engine;
 pub mod jq;
+mod jq_ext;
 pub mod json_pointer;
 pub mod jsonpath;
 pub mod merge;
+pub mod output;
 pub mod patch;
 pub mod reformat;
 pub mod schema;
@@ -39,6 +41,7 @@ pub use jmespath_engine::JmesPathEngine;
 pub use jq::JaqEngine;
 pub use json_pointer::JsonPointerEngine;
 pub use jsonpath::JsonPathEngine;
+pub use output::OutputFormat;
 pub use suggest::{engines_in_scope, suggest, Suggestion};
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -200,10 +203,12 @@ pub fn run_query_with_vars(
 
     let defs = jaq_core::defs()
         .chain(jaq_std::defs())
-        .chain(jaq_json::defs());
+        .chain(jaq_json::defs())
+        .chain(jq_ext::defs());
     let funs = jaq_core::funs()
         .chain(jaq_std::funs())
-        .chain(jaq_json::funs());
+        .chain(jaq_json::funs())
+        .chain(jq_ext::funs());
 
     let loader = Loader::new(defs);
     let arena = Arena::default();
@@ -233,10 +238,20 @@ pub fn run_query_with_vars(
         count += 1;
         match item {
             Ok(v) => on_event(QueryEvent::Item(from_val(&v))),
-            Err(e) => on_event(QueryEvent::ItemError(e.to_string())),
+            Err(e) => on_event(QueryEvent::ItemError(error_text(e))),
         }
     }
     Ok(count)
+}
+
+/// An error as the text a reader should see. jaq prints an error that carries
+/// a string — `error("boom")`, or the ones [`jq_ext`] raises — as a JSON
+/// string, quotes and escapes included; the text itself is what is wanted.
+fn error_text(error: jaq_json::Error) -> String {
+    match error.into_val() {
+        Val::TStr(text) => String::from_utf8_lossy(&text).into_owned(),
+        other => other.to_string(),
+    }
 }
 
 #[cfg(test)]
