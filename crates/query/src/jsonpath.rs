@@ -28,7 +28,7 @@ impl QueryEngine for JsonPathEngine {
     ) -> Result<usize, QueryError> {
         let matches = input
             .query(query_src)
-            .map_err(|e| QueryError::Parse(e.to_string()))?;
+            .map_err(|e| QueryError::Parse(crate::errors::jsonpath(query_src, &e.to_string())))?;
 
         let mut count = 0usize;
         for value in matches {

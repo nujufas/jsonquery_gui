@@ -468,7 +468,8 @@ pub(in crate::lazy) fn run_jmespath(
     cancelled: &AtomicBool,
     on_event: &mut dyn FnMut(QueryEvent),
 ) -> Result<usize, QueryError> {
-    let expression = jmespath::compile(src).map_err(|e| QueryError::Parse(e.to_string()))?;
+    let expression = jmespath::compile(src)
+        .map_err(|e| QueryError::Parse(crate::errors::jmespath(src, &e.to_string())))?;
     let plan = Plan {
         text: src.to_owned(),
         ast: expression.as_ast().clone(),

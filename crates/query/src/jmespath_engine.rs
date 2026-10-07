@@ -66,7 +66,8 @@ impl QueryEngine for JmesPathEngine {
         _cancelled: &AtomicBool,
         on_event: &mut dyn FnMut(QueryEvent),
     ) -> Result<usize, QueryError> {
-        let expr = jmespath::compile(query_src).map_err(|e| QueryError::Parse(e.to_string()))?;
+        let expr = jmespath::compile(query_src)
+            .map_err(|e| QueryError::Parse(crate::errors::jmespath(query_src, &e.to_string())))?;
         let data = RawVariable(Rcvar::new(value_to_variable(input)));
         let result = expr
             .search(data)

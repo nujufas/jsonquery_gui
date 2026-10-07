@@ -21,6 +21,7 @@
 
 mod convert;
 pub mod diff;
+mod errors;
 pub mod highlight;
 pub mod jmespath_engine;
 pub mod jq;
@@ -48,7 +49,7 @@ pub use suggest::{engines_in_scope, suggest, Suggestion};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use jaq_core::load::{Arena, File, Loader};
-use jaq_core::{data, unwrap_valr, Compiler, Ctx, Vars};
+use jaq_core::{data, Compiler, Ctx, Error, ValR, ValX, Vars};
 use serde_json::Value;
 
 #[derive(Debug, thiserror::Error)]
@@ -245,13 +246,13 @@ impl Program {
 
         let modules = loader
             .load(&arena, program)
-            .map_err(|e| QueryError::Parse(format!("{e:?}")))?;
+            .map_err(|e| QueryError::Parse(errors::syntax(query_src, &e)))?;
 
         let filter = Compiler::default()
             .with_funs(funs)
             .with_global_vars(globals.iter().copied())
             .compile(modules)
-            .map_err(|e| QueryError::Compile(format!("{e:?}")))?;
+            .map_err(|e| QueryError::Compile(errors::undefined(&e)))?;
         Ok(Self { filter })
     }
 
@@ -277,11 +278,45 @@ impl Program {
         globals: Vec<Val>,
     ) -> impl Iterator<Item = Result<Val, String>> + 'a {
         let ctx = Ctx::<data::JustLut<Val>>::new(&self.filter.lut, Vars::new(globals));
+        let mut halted = false;
         self.filter
             .id
             .run((ctx, input))
-            .map(unwrap_valr)
+            .map_while(move |item| {
+                if halted {
+                    return None;
+                }
+                let (item, halt) = unwrap_exception(item);
+                halted = halt;
+                Some(item)
+            })
             .map(|item| item.map_err(error_text))
+    }
+}
+
+/// What a main filter's outputs are made of, without `jaq_core::unwrap_valr`: that one ends the
+/// *process* when the program says `halt` (or `halt_error`), which is what `jq` does and
+/// nothing a query box should: typing `halt` would close the whole app. Here it is an error,
+/// the last output of the stream (`true` in the second place says it was a halt).
+fn unwrap_exception(item: ValX<'_, Val>) -> (ValR<Val>, bool) {
+    match item {
+        Ok(value) => (Ok(value), false),
+        Err(exception) => match exception.get_err() {
+            Ok(error) => (Err(error), false),
+            Err(other) => match other.get_halt() {
+                Ok(code) => (
+                    Err(Error::str(format!(
+                        "halt ({code}): jq's halt ends the program, which a query cannot do here"
+                    ))),
+                    true,
+                ),
+                // Neither of these leaves a main filter in jaq; say so rather than panic.
+                Err(_) => (
+                    Err(Error::str("the query ended in a way a query cannot")),
+                    true,
+                ),
+            },
+        },
     }
 }
 
@@ -309,6 +344,39 @@ mod tests {
             }
         })?;
         Ok(items)
+    }
+
+    /// `halt` ends a jq program, and the process with it, in jq and in jaq's own
+    /// `unwrap_valr`. Here it is an error, so a query box cannot close the app.
+    #[test]
+    fn halt_is_an_error_not_the_end_of_the_process() {
+        let input = json!({"a": 1});
+        for query in ["halt", "halt_error", "halt_error(3)", "\"x\" | halt_error"] {
+            let cancelled = AtomicBool::new(false);
+            let mut errors = Vec::new();
+            run_query(&input, query, &cancelled, |event| {
+                if let QueryEvent::ItemError(message) = event {
+                    errors.push(message);
+                }
+            })
+            .unwrap();
+            assert_eq!(errors.len(), 1, "{query}");
+            assert!(errors[0].starts_with("halt ("), "{query}: {}", errors[0]);
+        }
+        // what came before it is kept, and the stream ends at the halt
+        let mut items = Vec::new();
+        let mut errors = 0;
+        run_query(
+            &input,
+            "1, halt, 2",
+            &AtomicBool::new(false),
+            |event| match event {
+                QueryEvent::Item(v) => items.push(v),
+                QueryEvent::ItemError(_) => errors += 1,
+            },
+        )
+        .unwrap();
+        assert_eq!((items, errors), (vec![json!(1)], 1));
     }
 
     #[test]

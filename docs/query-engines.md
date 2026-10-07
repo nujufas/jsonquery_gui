@@ -36,6 +36,31 @@ dialect produced it.
 > `Serialize`. Worth checking for again if a future engine also bridges
 > through a generic `Serialize` impl rather than matching `Value` natively.
 
+## When a query has a mistake
+
+The three parsers report a mistake as data: jaq as what it expected and the text
+left at that point, the JSONPath crate as a pest "failed to parse rule" report, the
+JMESPath crate as a message with a caret excerpt and a position counted from zero.
+The status bar says it as a sentence instead: what was expected, what was found and
+where (the column, counted from one, and the line too when the query has more than
+one):
+
+```text
+.users[ | .name   the `[` at column 7 is never closed: add a `]`
+if . then 1       expected `else`, `elif` or `end`, found the end of the query at column 12
+foo(1)            `foo/1` is not defined (no function of that name takes 1 argument)
+$[                expected a selector: a name, an index, `*`, a slice or a filter, at column 3
+[?                Unexpected token (an expression was expected) -- found the end of the query, at column 3
+```
+
+An unclosed bracket or string is found by scanning the query (strings and comments
+skipped), so the message names the opener and not only the end of the text. jq's
+`input`, `inputs` and `$ENV` say why they are not there: a query runs over the one
+document that is open. A message in a shape the wording does not know is shown as
+the parser gave it. The wording and its tests are in `crates/query/src/errors.rs`;
+the prefixes (`query syntax error: `, `query error: `) are the error types' own and
+did not change.
+
 ## Very large files
 
 A file of 256 MiB or more (the size is a [setting](settings.md), as are the

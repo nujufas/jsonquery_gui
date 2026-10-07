@@ -365,7 +365,7 @@ pub(in crate::lazy) fn run_jsonpath(
     on_event: &mut dyn FnMut(QueryEvent),
 ) -> Result<usize, QueryError> {
     let query = jsonpath_rust::parser::parse_json_path(src)
-        .map_err(|e| QueryError::Parse(e.to_string()))?;
+        .map_err(|e| QueryError::Parse(crate::errors::jsonpath(src, &e.to_string())))?;
     let plan = Plan::new(query);
     // A filter that reads the document from its root is run on a part of it.
     if plan.has_filter()
