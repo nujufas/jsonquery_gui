@@ -39,8 +39,9 @@ use crate::reformat::{self, Options};
 /// is a few tens of megabytes at most.)
 pub const MAX_ROWS: usize = 200_000;
 /// The longest a line is kept: a longer one (a string of a megabyte) is cut and
-/// ends with `…`. The patch has the whole value.
-const MAX_LINE_CHARS: usize = 400;
+/// ends with `…`. The patch has the whole value. (A line that is cut is
+/// `MAX_LINE_CHARS + 1` characters, the last the `…`.)
+pub const MAX_LINE_CHARS: usize = 400;
 const INDENT: &str = "  ";
 
 /// What a row says about its two sides.
@@ -434,12 +435,12 @@ pub(super) fn blend(
     before: &Value,
     after: &Value,
     edit: Option<&Edit<'_>>,
-    take: Range<u32>,
+    take: &[Range<u32>],
     into: Side,
     cancel: &AtomicBool,
 ) -> Result<Value, Cancelled> {
     Blend {
-        take,
+        take: runs(take),
         into,
         met: 0,
         ticks: 0,
@@ -448,8 +449,24 @@ pub(super) fn blend(
     .pair(before, after, edit)
 }
 
+/// `ranges` as the fewest ranges that hold the same numbers, in order: the empty ones
+/// gone, and those that overlap or touch made one.
+fn runs(ranges: &[Range<u32>]) -> Vec<Range<u32>> {
+    let mut sorted: Vec<Range<u32>> = ranges.iter().filter(|r| r.start < r.end).cloned().collect();
+    sorted.sort_unstable_by_key(|r| r.start);
+    let mut merged: Vec<Range<u32>> = Vec::with_capacity(sorted.len());
+    for range in sorted {
+        match merged.last_mut() {
+            Some(last) if range.start <= last.end => last.end = last.end.max(range.end),
+            _ => merged.push(range),
+        }
+    }
+    merged
+}
+
 struct Blend<'c> {
-    take: Range<u32>,
+    /// The numbers of the differences to take, as [`runs`] makes them.
+    take: Vec<Range<u32>>,
     into: Side,
     /// How many differences have been met: the number of the next one.
     met: u32,
@@ -469,8 +486,10 @@ impl<'a> Blend<'_> {
 
     /// Meets a difference: whether it is one of those to take.
     fn meet(&mut self) -> bool {
+        let number = self.met;
         self.met += 1;
-        self.take.contains(&(self.met - 1))
+        let at = self.take.partition_point(|run| run.end <= number);
+        self.take.get(at).is_some_and(|run| run.start <= number)
     }
 
     /// Two versions of one value, as they are in the result. (The conditions are
@@ -720,6 +739,7 @@ fn clip(text: String) -> String {
 }
 
 #[cfg(test)]
+#[allow(clippy::single_range_in_vec_init)] // the tests name single ranges of numbers on purpose
 mod tests {
     use super::super::{compare, equal};
     use super::*;
@@ -1136,7 +1156,7 @@ mod tests {
 
     // Taking differences from one document into the other.
 
-    use super::super::{diff, take_changes};
+    use super::super::{diff, take_changes, take_selected};
 
     /// What `take` does to `before` (or `after`, when `into` is right), taken from
     /// the other.
@@ -1330,6 +1350,62 @@ mod tests {
     }
 
     #[test]
+    fn differences_that_are_not_one_run_are_taken_together_and_the_ones_between_stay() {
+        // Three changes that touch, so that the lines of one block are three differences;
+        // the second is not taken.
+        let (left, right) = (
+            parse(r#"{"a":1,"b":2,"c":3,"s":0}"#),
+            parse(r#"{"a":9,"b":8,"c":7,"s":0}"#),
+        );
+        let v = view(&left, &right);
+        assert_eq!(numbered(&v), [(0, 3)]);
+        let pick = |changes: &[Range<u32>], into| {
+            take_selected(&left, &right, changes, into, &AtomicBool::new(false)).unwrap()
+        };
+        assert_eq!(
+            pick(&[0..1, 2..3], Side::Left),
+            parse(r#"{"a":9,"b":2,"c":7,"s":0}"#)
+        );
+        assert_eq!(
+            pick(&[0..1, 2..3], Side::Right),
+            parse(r#"{"a":1,"b":8,"c":3,"s":0}"#)
+        );
+        // One line of the three, any of them.
+        assert_eq!(
+            pick(&[1..2], Side::Left),
+            parse(r#"{"a":1,"b":8,"c":3,"s":0}"#)
+        );
+        assert_eq!(
+            pick(&[2..3], Side::Right),
+            parse(r#"{"a":9,"b":8,"c":3,"s":0}"#)
+        );
+        // The order the ranges are given in, and ranges that overlap or touch, make no
+        // difference; nor does an empty one.
+        assert_eq!(
+            pick(&[2..3, 0..1], Side::Left),
+            pick(&[0..1, 2..3], Side::Left)
+        );
+        assert_eq!(pick(&[0..2, 1..3], Side::Left), right);
+        assert_eq!(pick(&[0..1, 1..2, 2..3, 7..7], Side::Left), right);
+        assert_eq!(pick(&[], Side::Left), left);
+        assert_eq!(pick(&[4..4], Side::Right), right);
+        // One run is what take_changes does.
+        assert_eq!(
+            pick(&[0..2], Side::Left),
+            taken(&left, &right, 0..2, Side::Left)
+        );
+    }
+
+    #[test]
+    fn ranges_of_numbers_are_made_into_the_fewest_runs() {
+        assert_eq!(runs(&[3..5, 0..2, 2..3, 4..9, 11..11]), [0..9]);
+        assert_eq!(runs(&[5..6, 1..2]), [1..2, 5..6]);
+        assert_eq!(runs(&[0..10, 2..3]), [0..10]);
+        assert_eq!(runs(&[3..3, 0..0]), Vec::<Range<u32>>::new());
+        assert_eq!(runs(&[]), Vec::<Range<u32>>::new());
+    }
+
+    #[test]
     fn a_move_can_be_cancelled() {
         let (left, right) = (json!([1, 2]), json!([1, 3]));
         assert!(take_changes(&left, &right, 0..1, Side::Left, &AtomicBool::new(true)).is_err());
@@ -1406,6 +1482,50 @@ mod tests {
                 _ => {}
             },
             other => *other = generate(rng, 1),
+        }
+    }
+
+    #[test]
+    fn any_selection_of_the_differences_moves_and_leaves_the_documents_closer() {
+        let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
+        let stop = AtomicBool::new(false);
+        for case in 0..3_000 {
+            let before = generate(&mut rng, 3);
+            let mut after = before.clone();
+            for _ in 0..1 + rng.below(4) {
+                mutate(&mut rng, &mut after);
+            }
+            let found = diff(&before, &after, &stop).unwrap();
+            let total = found.total() as u32;
+            if total == 0 {
+                continue;
+            }
+            let context = format!("case {case}\n  before {before}\n  after  {after}");
+            // A few selections of the numbers: each by a mask of which are taken.
+            for _ in 0..4 {
+                let mask = rng.below(1 << total.min(12)) as u32;
+                let runs: Vec<Range<u32>> = (0..total.min(12))
+                    .filter(|n| mask & (1 << n) != 0)
+                    .map(|n| n..n + 1)
+                    .collect();
+                for into in [Side::Left, Side::Right] {
+                    let moved = take_selected(&before, &after, &runs, into, &stop).unwrap();
+                    let (a, b) = match into {
+                        Side::Left => (&moved, &after),
+                        Side::Right => (&before, &moved),
+                    };
+                    let rest = diff(a, b, &stop).unwrap().total();
+                    if runs.is_empty() {
+                        assert!(equal(a, &before) && equal(b, &after), "{context}");
+                    } else {
+                        assert!(
+                            rest < found.total(),
+                            "{context}\n  taking {runs:?} into {into:?}: {moved} ({rest} left of {})",
+                            found.total()
+                        );
+                    }
+                }
+            }
         }
     }
 

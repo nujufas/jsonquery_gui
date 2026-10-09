@@ -6,12 +6,18 @@
 //!
 //! The command row has Compare and Swap, the four views as tabs, Previous and
 //! Next difference for the side-by-side view, Move to the left and Move to the
-//! right for the difference that is picked there (or one that is right-clicked),
-//! and — pinned at the right, in every view — Copy patch and Save patch….
-//! Documents is where the two documents
-//! are put in, next to each other; Compare opens the side-by-side view, which is
-//! two read-only columns (`side_by_side.rs`); Changes is the list; Patch the
-//! patch text.
+//! right for what is picked there (the lines that are, or else the difference
+//! that is), and — pinned at the right, in every view — Copy patch and Save patch….
+//! Documents is where the two documents are put in, next to each other. The
+//! three views of a comparison — Side by side, Changes and Patch — compare the two
+//! when they are asked for and nothing has been compared yet, so Compare need not be
+//! pressed; it does the same, and opens the side-by-side view, which is two
+//! columns (`side_by_side.rs`) with two arrows in the gutter for each difference to
+//! move it, a line of either column to double-click and type over (`line_edit.rs`), and a
+//! Save… over each column for a document that a move or an edit changed; Changes is
+//! the list; Patch the patch text.
+
+use std::path::{Path, PathBuf};
 
 use eframe::egui::{self, Align, Color32, Key, Layout, Modifiers, Rect, RichText};
 use jsonquery_query::diff::{Change, ChangeKind, Side, MAX_ROWS};
@@ -19,10 +25,10 @@ use jsonquery_query::diff::{Change, ChangeKind, Side, MAX_ROWS};
 use super::jobs::{Compared, Job, Take};
 use super::operand::{deliver, drop_target, dropped_files, Operand};
 use super::shared::{Env, Run};
-use super::side_by_side::Viewer;
+use super::side_by_side::{Doc, Move, Typed, Viewer};
 use super::widgets::{
     command_bar, halves, preview_box, result_area, row_background, run_button, tint, PathColumn,
-    Tint, RIGHT_MIN, ROW_HEIGHT,
+    Tint, ERROR, RIGHT_MIN, ROW_HEIGHT,
 };
 use super::{Request, Tool};
 use crate::pane_header;
@@ -53,15 +59,27 @@ pub(super) struct Diff {
     page: Page,
     run: Run<Compared>,
     viewer: Viewer,
-    /// What the two documents were called when they were compared (a file's
-    /// name, the open document), for the side-by-side view's headings.
-    names: [Option<String>; 2],
-    /// A move that is on the worker: which difference of the view it was (its
-    /// place in the list, which the one that follows it takes) and which
-    /// document it changes.
-    moving: Option<(usize, Side)>,
-    /// A move that has been made and not yet announced.
-    moved: Option<Side>,
+    /// A move that is on the worker: where in the view it was (the place in the
+    /// list that the difference that follows it takes), and into which document.
+    moving: Option<Move>,
+    /// A move that has been made and not yet announced: into which document, and
+    /// whether it was lines that were picked.
+    moved: Option<(Side, bool)>,
+    /// A line that was typed over, which is on the worker.
+    editing: Option<Editing>,
+    /// One that has been made and not yet announced.
+    edited: Option<Editing>,
+    /// A document that was asked to be saved, and where to: until the worker says it
+    /// is written.
+    saving: Option<(Side, PathBuf)>,
+}
+
+/// A line typed over: in which document, which line of it, and whether that took it out.
+#[derive(Clone, Copy)]
+struct Editing {
+    side: Side,
+    line: usize,
+    deleted: bool,
 }
 
 impl Default for Diff {
@@ -72,9 +90,11 @@ impl Default for Diff {
             page: Page::Documents,
             run: Run::default(),
             viewer: Viewer::default(),
-            names: [None, None],
             moving: None,
             moved: None,
+            editing: None,
+            edited: None,
+            saving: None,
         }
     }
 }
@@ -87,6 +107,13 @@ impl Diff {
             .find(|o| o.title() == title)
     }
 
+    fn operand_of(&mut self, side: Side) -> &mut Operand {
+        match side {
+            Side::Left => &mut self.left,
+            Side::Right => &mut self.right,
+        }
+    }
+
     /// The answer to a [`Request::Job`] for this page. A comparison that is
     /// answered (or fails) is shown at once, on the side-by-side view if the
     /// page was still on the documents — except one that was cancelled, which
@@ -97,28 +124,27 @@ impl Diff {
             return;
         }
         let moving = self.moving.take();
-        // A move has changed one of the documents: its box has the new text.
+        let editing = self.editing.take();
+        // A move, or a line that was typed over, has changed one of the documents: its box
+        // has the new text.
         if let Some(moved) = self.run.outcome().and_then(|c| c.moved.as_ref()) {
-            let text = moved.text.clone();
-            let (operand, name) = match moved.into {
-                Side::Left => (&mut self.left, &mut self.names[0]),
-                Side::Right => (&mut self.right, &mut self.names[1]),
-            };
-            operand.set_moved(text);
-            *name = None;
-            self.moved = Some(moved.into);
+            let (text, into) = (moved.text.clone(), moved.into);
+            self.operand_of(into).set_moved(text);
+            match editing {
+                Some(editing) => self.edited = Some(editing),
+                None => self.moved = Some((into, moving.as_ref().is_some_and(|m| m.picked))),
+            }
         }
-        self.viewer.reset();
+        // What was typed over, or moved, is looked at where it was: the view does not go on
+        // to the next difference by itself, nor pick it; the lines under it are where they
+        // were (higher by the lines the move took out).
+        if editing.is_some() || moving.is_some() {
+            self.viewer.reset_keeping_place();
+        } else {
+            self.viewer.reset();
+        }
         if self.page == Page::Documents && !cancelled {
             self.page = Page::SideBySide;
-        }
-        // On to the difference that has taken the place of the one that was
-        // moved (the last one, if that was the last).
-        let view = self.run.outcome().and_then(|c| c.view.as_ref().ok());
-        if let (Some((block, _)), Some(view)) = (moving, view) {
-            if !view.blocks.is_empty() {
-                self.viewer.pick(view, block.min(view.blocks.len() - 1));
-            }
         }
     }
 
@@ -127,6 +153,68 @@ impl Diff {
         self.run.clear();
         self.viewer.reset();
         self.page = Page::Documents;
+    }
+
+    /// The comparison is wanted, as the view being looked at needs it, and has not been
+    /// made (or was cancelled): both documents are there and nothing is working on it.
+    fn wants_comparing(&self) -> bool {
+        let made = match &self.run.result {
+            None => false,
+            Some(Err(error)) => error != "cancelled",
+            Some(Ok(_)) => true,
+        };
+        !made && !self.run.running() && !self.left.is_empty() && !self.right.is_empty()
+    }
+
+    /// What the buttons of the command row and the keys move into `into`: the lines
+    /// that are picked in the side-by-side view, or else the difference that is.
+    fn to_move(&self, into: Side) -> Option<Move> {
+        let view = self.run.outcome()?.view.as_ref().ok()?;
+        self.viewer.to_move(view, into)
+    }
+
+    /// A save of a document was written to `path`: it is that file now.
+    pub(super) fn saved(&mut self, path: &Path) {
+        if let Some((side, _)) = self.saving.take_if(|(_, saving)| saving == path) {
+            self.operand_of(side).saved_as(path);
+        }
+    }
+
+    /// A save failed: the document is as it was.
+    pub(super) fn save_failed(&mut self) {
+        self.saving = None;
+    }
+
+    /// The request to write a document to `path`, which is waited for.
+    fn save_to(&mut self, side: Side, path: PathBuf) -> Option<Request> {
+        let text = self.operand_of(side).text_to_save()?;
+        self.saving = Some((side, path.clone()));
+        Some(Request::SaveText { text, path })
+    }
+
+    /// Ask where a document should be written, and write it there: named as the file it
+    /// came from was, and in its folder.
+    fn save_document(&mut self, side: Side) -> Option<Request> {
+        let operand = self.operand_of(side);
+        let fallback = match side {
+            Side::Left => "left.json",
+            Side::Right => "right.json",
+        };
+        let path = ask_where(operand.save_folder(), &operand.save_name(fallback))?;
+        self.save_to(side, path)
+    }
+
+    /// What the view says over a document.
+    fn doc(&self, side: Side) -> Doc {
+        let operand = match side {
+            Side::Left => &self.left,
+            Side::Right => &self.right,
+        };
+        Doc {
+            name: operand.heading(),
+            changed: operand.changed(),
+            can_save: operand.can_save(),
+        }
     }
 
     pub(super) fn ui(&mut self, ui: &mut egui::Ui, env: &mut Env) -> Option<Request> {
@@ -148,9 +236,10 @@ impl Diff {
         let mut swap = false;
         let mut act = None;
         let mut step = None;
-        // A difference of the view to move, and to which side.
-        let mut take: Option<(usize, Side)> = None;
-        let picked = self.viewer.current();
+        // What to move, and into which document: from the buttons, the keys, the
+        // arrows and the menu of a line.
+        let mut take: Option<Move> = None;
+        let page_was = self.page;
         let patch = self.run.outcome().map(|c| c.patch.clone());
         // Whether Previous and Next have anywhere to go: none when the view is
         // not the one on show.
@@ -160,6 +249,8 @@ impl Diff {
             .and_then(|c| c.view.as_ref().ok())
             .filter(|_| self.page == Page::SideBySide)
             .map(|view| [false, true].map(|forward| self.viewer.can_step(view, forward)));
+        // Whether there is anything to move: lines are picked or a difference is.
+        let can_move = steps.is_some() && self.viewer.can_move() && !self.run.running();
         let count = self
             .run
             .outcome()
@@ -205,30 +296,29 @@ impl Diff {
                         }
                     }
                     ui.separator();
-                    let free = picked.filter(|_| !self.run.running());
                     for (label, into, tip) in [
                         (
                             "⏴",
                             Side::Left,
-                            "Move the difference to the left: Left takes what Right has there \
-                             (Alt+Left)",
+                            "Move to the left: Left takes what Right has there. The lines that \
+                             are picked, or else the difference that is (Alt+Left)",
                         ),
                         (
                             "⏵",
                             Side::Right,
-                            "Move the difference to the right: Right takes what Left has there \
-                             (Alt+Right)",
+                            "Move to the right: Right takes what Left has there. The lines that \
+                             are picked, or else the difference that is (Alt+Right)",
                         ),
                     ] {
                         let button = ui
-                            .add_enabled(free.is_some(), egui::Button::new(label))
+                            .add_enabled(can_move, egui::Button::new(label))
                             .on_hover_text(tip)
                             .on_disabled_hover_text(
-                                "Pick a difference to move first: click it, or use Previous and \
-                                 Next",
+                                "Pick lines or a difference to move first: click them, use \
+                                 Previous and Next, or press an arrow between the two documents",
                             );
                         if button.clicked() {
-                            take = free.map(|block| (block, into));
+                            take = self.to_move(into);
                         }
                     }
                 }
@@ -257,6 +347,17 @@ impl Diff {
             self.left.swap_with(&mut self.right);
             self.invalidate();
         }
+        // A view of the comparison that was asked for, and the documents have not been
+        // compared: it is made now, as the Compare button would. (Not while Compare has
+        // just been pressed: that one is asked for.)
+        if self.page != page_was
+            && self.page != Page::Documents
+            && request.is_none()
+            && !swap
+            && self.wants_comparing()
+        {
+            request = self.start();
+        }
         if steps.is_some() && !swap {
             if ui.input_mut(|i| i.consume_key(Modifiers::ALT, Key::ArrowDown)) {
                 step = Some(true);
@@ -264,12 +365,17 @@ impl Diff {
             if ui.input_mut(|i| i.consume_key(Modifiers::ALT, Key::ArrowUp)) {
                 step = Some(false);
             }
-            if let Some(block) = picked.filter(|_| !self.run.running()) {
+            // (not with something typed in a line and not yet taken: that is put in first)
+            if can_move && !self.viewer.has_typing() {
                 for (key, into) in [(Key::ArrowLeft, Side::Left), (Key::ArrowRight, Side::Right)] {
                     if ui.input_mut(|i| i.consume_key(Modifiers::ALT, key)) {
-                        take = Some((block, into));
+                        take = self.to_move(into);
                     }
                 }
+            }
+            // Escape lets go of the lines that are picked.
+            if self.viewer.has_selection() && ui.input(|i| i.key_pressed(Key::Escape)) {
+                self.viewer.clear_selection();
             }
             let view = self.run.outcome().and_then(|c| c.view.as_ref().ok());
             if let (Some(forward), Some(view)) = (step, view) {
@@ -277,13 +383,15 @@ impl Diff {
             }
         }
 
+        let mut save = None;
+        let mut typed = None;
         let copied_path = egui::CentralPanel::default()
             .show(ui, |ui| match self.page {
                 Page::Documents => {
                     self.documents(ui, env);
                     None
                 }
-                _ => self.result(ui, &mut take),
+                _ => self.result(ui, &mut take, &mut save, &mut typed),
             })
             .inner;
         if let Some(path) = copied_path {
@@ -297,22 +405,50 @@ impl Diff {
                 .say(Tool::Diff, format!("Copied the path to {shown}"), false);
         }
 
-        if let Some((block, into)) = take {
-            // (Not while Compare has just been pressed: that one is asked for.)
+        if let Some(typed) = typed {
+            // A line that was typed over is made before anything else: what else was pressed
+            // in the same frame is what made the caret leave it, and is pressed again.
+            take = None;
+            save = None;
             if request.is_none() {
-                request = self.start_move(block, into);
+                request = self.start_edit(typed);
             }
         }
-        if let Some(side) = self.moved.take() {
+        if let Some(mv) = take {
+            // (Not while Compare has just been pressed: that one is asked for.)
+            if request.is_none() {
+                request = self.start_move(mv);
+            }
+        }
+        if let Some(side) = save {
+            if request.is_none() {
+                request = self.save_document(side);
+            }
+        }
+        if let Some(editing) = self.edited.take() {
+            let to = match editing.side {
+                Side::Left => "left",
+                Side::Right => "right",
+            };
+            let said = if editing.deleted {
+                format!("Took line {} out of the {to} document", editing.line)
+            } else {
+                format!("Changed line {} of the {to} document", editing.line)
+            };
+            env.shared.say(Tool::Diff, said, false);
+        }
+        if let Some((side, picked)) = self.moved.take() {
             let to = match side {
                 Side::Left => "left",
                 Side::Right => "right",
             };
-            env.shared.say(
-                Tool::Diff,
-                format!("Moved the difference to the {to}"),
-                false,
-            );
+            let what = if picked {
+                "the picked lines"
+            } else {
+                "the difference"
+            };
+            env.shared
+                .say(Tool::Diff, format!("Moved {what} to the {to}"), false);
         }
 
         // Not `?`: with no patch yet, or nothing pressed, `request` (Compare,
@@ -361,62 +497,105 @@ impl Diff {
 
     fn start(&mut self) -> Option<Request> {
         let (left, right) = (self.left.input()?, self.right.input()?);
-        self.names = [
-            self.left.label().map(str::to_owned),
-            self.right.label().map(str::to_owned),
-        ];
         let (gen, cancel) = self.run.start();
+        self.moving = None;
+        self.editing = None;
         Some(Request::Job {
             tool: Tool::Diff,
             job: Job::Diff {
                 left,
                 right,
                 take: None,
+                edit: None,
             },
             gen,
             cancel,
         })
     }
 
-    /// Ask the worker to move the difference `block` of the view (counting
-    /// them from the top) to the left or the right: it makes the new document,
-    /// and compares again, and the answer puts the new text in the box.
-    fn start_move(&mut self, block: usize, into: Side) -> Option<Request> {
-        let view = self.run.outcome()?.view.as_ref().ok()?;
-        let changes = view.changes_of(view.blocks.get(block)?);
+    /// Ask the worker to type a line over: it changes the document, and compares again, and
+    /// the answer puts the new text in the box.
+    fn start_edit(&mut self, typed: Typed) -> Option<Request> {
         let (left, right) = (self.left.input()?, self.right.input()?);
         let (gen, cancel) = self.run.start();
-        self.moving = Some((block, into));
+        self.moving = None;
+        self.editing = Some(Editing {
+            side: typed.edit.into,
+            line: typed.line,
+            deleted: typed.edit.deletes(),
+        });
         Some(Request::Job {
             tool: Tool::Diff,
             job: Job::Diff {
                 left,
                 right,
-                take: Some(Take { changes, into }),
+                take: None,
+                edit: Some(typed.edit),
             },
             gen,
             cancel,
         })
     }
 
-    /// The answer, on the view the page is on. Gives the path of a difference
-    /// that was clicked, which the caller copies; `take` is set to a difference
-    /// that was asked to be moved, from its menu.
-    fn result(&mut self, ui: &mut egui::Ui, take: &mut Option<(usize, Side)>) -> Option<String> {
+    /// Ask the worker to move what `mv` says — differences of the view, or lines
+    /// picked out of them — into the left or the right document: it makes the new
+    /// document, and compares again, and the answer puts the new text in the box.
+    fn start_move(&mut self, mv: Move) -> Option<Request> {
+        let (left, right) = (self.left.input()?, self.right.input()?);
+        let (gen, cancel) = self.run.start();
+        let take = Take {
+            changes: mv.changes.clone(),
+            into: mv.into,
+        };
+        self.moving = Some(mv);
+        Some(Request::Job {
+            tool: Tool::Diff,
+            job: Job::Diff {
+                left,
+                right,
+                take: Some(take),
+                edit: None,
+            },
+            gen,
+            cancel,
+        })
+    }
+
+    /// The answer, on the view the page is on. Gives the path of a line whose menu
+    /// asked for it to be copied, which the caller copies; `take` is set to what was
+    /// asked to be moved, from an arrow or a menu, and `save` to a document whose
+    /// Save… was pressed.
+    fn result(
+        &mut self,
+        ui: &mut egui::Ui,
+        take: &mut Option<Move>,
+        save: &mut Option<Side>,
+        typed: &mut Option<Typed>,
+    ) -> Option<String> {
         let page = self.page;
-        let names = [self.names[0].as_deref(), self.names[1].as_deref()];
+        let docs = [self.doc(Side::Left), self.doc(Side::Right)];
         let mut copied_path = None;
         result_area(
             ui,
             "diff",
             &self.run,
-            "What differs appears here",
+            if self.left.is_empty() || self.right.is_empty() {
+                "Put a document in both boxes to see what differs"
+            } else {
+                "What differs appears here"
+            },
             |ui, compared| match (page, &compared.view) {
                 (Page::SideBySide, Ok(view)) => {
-                    let shown = self.viewer.show(ui, view, names);
-                    copied_path = shown.clicked;
+                    let shown = self.viewer.show(ui, view, docs);
+                    copied_path = shown.copy_path;
                     if shown.moved.is_some() {
                         *take = shown.moved;
+                    }
+                    if shown.save.is_some() {
+                        *save = shown.save;
+                    }
+                    if shown.typed.is_some() {
+                        *typed = shown.typed;
                     }
                 }
                 (Page::SideBySide, Err(_)) => {
@@ -442,28 +621,62 @@ impl Diff {
     }
 
     /// What the status bar says about the result: how many changes of each kind,
-    /// which difference the side-by-side view is on, and how long it took. False
-    /// when there is nothing to say.
+    /// which difference the side-by-side view is on and how many lines are picked,
+    /// and how long it took. False when there is nothing to say.
     pub(super) fn status_line(&self, ui: &mut egui::Ui) -> bool {
         let Some(compared) = self.run.outcome() else {
             return false;
         };
         ui.label(counts(compared));
         if self.page == Page::SideBySide {
-            if let Some(position) = compared
-                .view
-                .as_ref()
-                .ok()
-                .and_then(|view| self.viewer.position(view))
-            {
+            let view = compared.view.as_ref().ok();
+            if let Some(position) = view.and_then(|view| self.viewer.position(view)) {
                 ui.separator();
                 ui.label(position);
+            }
+            if let Some(picked) = self.viewer.selection_text() {
+                ui.separator();
+                ui.label(picked);
+            }
+            if let Some((text, error)) = self.viewer.editing_text() {
+                ui.separator();
+                if error {
+                    ui.colored_label(ERROR, text);
+                } else {
+                    ui.label(text);
+                }
             }
         }
         ui.separator();
         ui.weak(format!("Compared in {:.1?}", compared.elapsed));
         true
     }
+
+    /// Where the arrow of difference `block` pointing to `into` is, for the tests.
+    #[cfg(test)]
+    pub(super) fn arrow(&self, block: usize, into: Side) -> Option<egui::Pos2> {
+        self.viewer
+            .arrows
+            .iter()
+            .find(|(b, side, _)| *b == block && *side == into)
+            .map(|(_, _, rect)| rect.center())
+    }
+}
+
+/// Ask where to write a document: in `folder` and under `name` to begin with.
+fn ask_where(folder: Option<&Path>, name: &str) -> Option<PathBuf> {
+    #[cfg(test)]
+    if let Some(answer) = tests::ANSWER.with(|answer| answer.borrow().clone()) {
+        return answer;
+    }
+    let dialog = rfd::FileDialog::new()
+        .set_file_name(name)
+        .add_filter("JSON", &["json"]);
+    match folder {
+        Some(folder) => dialog.set_directory(folder),
+        None => dialog,
+    }
+    .save_file()
 }
 
 /// "2 added · 1 removed · 2 changed", leaving out what there is none of.
@@ -643,13 +856,27 @@ fn arrow(ui: &egui::Ui, center: egui::Pos2, color: Color32) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
+    use std::cell::RefCell;
     use std::sync::Arc;
     use std::time::Duration;
 
     use super::*;
-    use crate::tools::jobs::Preview;
+    use crate::tools::jobs::{Moved, Preview};
     use jsonquery_query::diff::SideBySide;
+
+    thread_local! {
+        /// What a test answers when a document's Save… asks where to write it: `None`
+        /// leaves the dialog to be asked (it must not be), `Some(None)` is a dialog that
+        /// was cancelled.
+        pub(in crate::tools) static ANSWER: RefCell<Option<Option<PathBuf>>> =
+            const { RefCell::new(None) };
+    }
+
+    /// Make the next dialogs of this thread answer with `path` (or be cancelled).
+    pub(in crate::tools) fn answer_save_dialogs_with(path: Option<PathBuf>) {
+        ANSWER.with(|answer| *answer.borrow_mut() = Some(path));
+    }
 
     fn compared(added: usize, removed: usize, changed: usize) -> Compared {
         Compared {
@@ -756,11 +983,130 @@ mod tests {
     }
 
     #[test]
-    fn the_names_of_the_documents_are_those_they_had_when_compared() {
+    fn a_view_that_needs_the_comparison_wants_it_made_only_when_it_is_not() {
         let mut diff = Diff::default();
+        assert!(!diff.wants_comparing(), "nothing in the boxes");
+        diff.left.set_text("[1]");
+        assert!(!diff.wants_comparing(), "one box is empty");
+        diff.right.set_text("[2]");
+        assert!(diff.wants_comparing(), "both documents are there");
+
+        let gen = match diff.start() {
+            Some(Request::Job { gen, .. }) => gen,
+            _ => panic!("should start"),
+        };
+        assert!(!diff.wants_comparing(), "it is being made");
+        diff.done(gen, Ok(compared(0, 0, 1)));
+        assert!(!diff.wants_comparing(), "it has been made");
+
+        // One that failed is not made again until a document is changed...
+        let mut failed = Diff::default();
+        let gen = started(&mut failed);
+        failed.done(gen, Err("Right: not JSON".to_owned()));
+        assert!(!failed.wants_comparing());
+        // ...but one that was cancelled is asked for again.
+        let mut cancelled = Diff::default();
+        let gen = started(&mut cancelled);
+        cancelled.done(gen, Err("cancelled".to_owned()));
+        assert!(cancelled.wants_comparing());
+        // And a change to a document drops the comparison, so that it is wanted.
+        diff.invalidate();
+        assert!(diff.wants_comparing());
+    }
+
+    /// A comparison of `[1]` and `[2]`, the left one read from /data/orders.json, whose
+    /// answer says a move changed the Left document.
+    fn moved_left(diff: &mut Diff) {
         diff.left.set_text("[1]");
         diff.right.set_text("[2]");
-        assert!(diff.start().is_some());
-        assert_eq!(diff.names, [None, None], "typed text has no name");
+        diff.left.pretend_read_from(Path::new("/data/orders.json"));
+        let gen = match diff.start() {
+            Some(Request::Job { gen, .. }) => gen,
+            _ => panic!("should start"),
+        };
+        let mut answer = compared(0, 0, 0);
+        answer.moved = Some(Moved {
+            into: Side::Left,
+            text: Arc::from("[\n  2\n]"),
+        });
+        diff.done(gen, Ok(answer));
+    }
+
+    #[test]
+    fn a_move_leaves_the_document_called_by_its_file_and_changed() {
+        let mut diff = Diff::default();
+        moved_left(&mut diff);
+        assert_eq!(diff.left.text(), "[\n  2\n]");
+        assert!(diff.left.changed());
+        assert_eq!(
+            diff.left.heading().as_deref(),
+            Some("orders.json (changed)")
+        );
+        assert!(!diff.right.changed(), "the other one is as it was");
+        assert_eq!(diff.right.heading(), None);
+        assert_eq!(
+            diff.doc(Side::Left).name.as_deref(),
+            Some("orders.json (changed)")
+        );
+        assert!(diff.doc(Side::Left).can_save && diff.doc(Side::Left).changed);
+        assert_eq!(diff.moved, Some((Side::Left, false)));
+    }
+
+    #[test]
+    fn a_document_is_saved_as_a_file_and_then_is_that_file_and_not_changed() {
+        let mut diff = Diff::default();
+        moved_left(&mut diff);
+        let Some(Request::SaveText { text, path }) =
+            diff.save_to(Side::Left, PathBuf::from("/data/orders.json"))
+        else {
+            panic!("a save was expected");
+        };
+        assert_eq!(&*text, "[\n  2\n]");
+        assert_eq!(path, PathBuf::from("/data/orders.json"));
+        // Until the worker says it is written, it is changed.
+        assert!(diff.left.changed());
+
+        // Someone else's save is none of its business.
+        diff.saved(Path::new("/data/other.json"));
+        assert!(diff.left.changed());
+        diff.saved(Path::new("/data/orders.json"));
+        assert!(!diff.left.changed());
+        assert_eq!(diff.left.heading().as_deref(), Some("orders.json"));
+        assert_eq!(diff.left.save_folder(), Some(Path::new("/data")));
+        assert!(diff.saving.is_none());
+
+        // A save that fails leaves it as it was.
+        moved_left(&mut diff);
+        diff.save_to(Side::Left, PathBuf::from("/data/orders.json"));
+        diff.save_failed();
+        assert!(diff.saving.is_none());
+        assert!(diff.left.changed());
+    }
+
+    #[test]
+    fn what_there_is_no_text_of_is_not_saved() {
+        let mut diff = Diff::default();
+        assert!(diff.save_to(Side::Left, PathBuf::from("/x.json")).is_none());
+        assert!(diff.saving.is_none());
+        diff.left.set_text("   ");
+        assert!(!diff.left.can_save(), "blanks are no document");
+    }
+
+    #[test]
+    fn the_save_dialog_is_asked_with_the_name_of_the_file_and_can_be_cancelled() {
+        let mut diff = Diff::default();
+        moved_left(&mut diff);
+        answer_save_dialogs_with(None);
+        assert!(diff.save_document(Side::Left).is_none(), "cancelled");
+        assert!(diff.saving.is_none());
+        answer_save_dialogs_with(Some(PathBuf::from("/tmp/chosen.json")));
+        let Some(Request::SaveText { path, .. }) = diff.save_document(Side::Left) else {
+            panic!("a save was expected");
+        };
+        assert_eq!(path, PathBuf::from("/tmp/chosen.json"));
+        assert_eq!(
+            diff.saving,
+            Some((Side::Left, PathBuf::from("/tmp/chosen.json")))
+        );
     }
 }

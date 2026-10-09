@@ -152,18 +152,27 @@ Compares a Left and a Right document the way a file-comparison tool does.
 red, what only Right has in green, what changed in amber with the differing
 characters picked out. The sides scroll together, the strip at the right edge
 has a tick for every difference, ▲/▼ (`Alt+Up`, `Alt+Down`) step through them,
-and **Differences only** folds what is the same. **Changes** lists each change
-with its JSON Pointer, and **Patch** is the RFC 6902 JSON Patch that turns Left
-into Right — **Copy patch** or **Save patch…** it. Key order is not a
+and **Differences only** folds what is the same. Its tab compares the two
+documents by itself — **Compare** is for comparing again. **Changes** lists each
+change with its JSON Pointer, and **Patch** is the RFC 6902 JSON Patch that turns
+Left into Right — **Copy patch** or **Save patch…** it. Key order is not a
 difference, numbers are compared by value with their exact digits, and arrays
 are aligned by content, so an inserted element is one change rather than a
-change to every element after it. Pick a difference and **⏴** or **⏵**
-(`Alt+Left`, `Alt+Right`) moves it into the other document, so that Left takes
-what Right has there or the other way round, as a file-comparison tool's "copy to
-left/right" does; the comparison runs again and goes on to the next difference.
-The right-click menu of a difference's lines does the same.
+change to every element after it.
 
-![Diff JSON: two versions of a configuration side by side, with the added, removed and changed lines marked, the second difference picked and its right-click menu offering to move it to the left or the right](docs/images/screenshot-tools-diff.png)
+Each difference has two arrows between the sides, one over the other, at its first
+line: press one and the document it points at takes what the other has there, as a
+file-comparison tool's "copy to left/right" does; the comparison runs again and the
+view stays where it was. Not the whole difference? Click a line to pick it
+(`Ctrl` adds one, `Shift` picks a run, a drag runs over several, `Esc` lets go):
+the arrows, **⏴** and **⏵** (`Alt+Left`, `Alt+Right`) and the right-click menu of a
+line then move only the lines picked. Either side can also be edited in place:
+double-click a line to put a caret in it — type, press `Enter`, and what you
+typed (a value, a member, nothing to take the line out, several to put them in) is
+in the document and compared again. A document that a move or an edit changed says
+so, and the **Save…** over its column writes it to a file — either, or both.
+
+![Diff JSON: two versions of a configuration side by side, with the added, removed and changed lines marked, two arrows one over the other between the sides at every difference, a line picked in the left document and, in the right one, the same line with a caret in it and a new value being typed over it](docs/images/screenshot-tools-diff.png)
 
 ### Patch JSON
 

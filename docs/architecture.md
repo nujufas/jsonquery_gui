@@ -100,11 +100,26 @@ the open document shared rather than copied; a patched document opens as
 
 Moving a difference in the side-by-side view to the other document is the same
 kind of job: every difference gets a number as the view lays it out (`Row::change`),
-and `diff::take_changes` walks the two documents again in the same order (the
-same `object_items` and `array_items`, so the numbers agree) and builds the one
-that changes with those differences taken from the other. The Diff job does that
-first and then compares again, and its answer carries the new text for the page
-to put back in the document's box.
+and `diff::take_selected` (`take_changes` is its one-run form) walks the two
+documents again in the same order (the same `object_items` and `array_items`, so
+the numbers agree) and builds the one that changes with those differences taken
+from the other — any set of them, as runs of numbers, so that an arrow can move a
+whole difference and a selection can move some of its lines. The Diff job does
+that first and then compares again, and its answer carries the new text for the
+page to put back in the document's box (which then keeps the name of the file it
+came from, says it is changed, and is written to a file by the Save… of its
+column through the same `SaveText` request as any other text).
+
+Typing over a line of either column is the same kind of job (`tools/line_edit.rs`).
+Where a line is in its document is read from the lines of its column — two spaces to
+a level, so the openers above it, a level up each, are what holds it, a member's line
+says its name and an element's place is how many elements come before it — and so
+it is a path of names and counts, which is the same in the right document, whose
+members the view shows in the left one's order. What is typed is parsed in the
+place it goes (a member, an element, the name of a line that opens something) in
+the page, so that a mistake is said at the line; the worker (`Job::Diff`'s `edit`)
+makes it in the document as it is parsed — members keep their order, numbers their
+spelling — and compares again, and the answer, like a move's, carries the new text.
 
 ## 3. Query engines
 

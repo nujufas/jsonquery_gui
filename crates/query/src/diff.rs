@@ -28,7 +28,7 @@ use crate::reformat::{self, Indent};
 
 mod view;
 
-pub use view::{Block, Mark, Row, SideBySide, TooLong, MAX_ROWS};
+pub use view::{Block, Mark, Row, SideBySide, TooLong, MAX_LINE_CHARS, MAX_ROWS};
 
 /// One of the two documents of a comparison.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -168,6 +168,19 @@ pub fn take_changes(
     before: &Value,
     after: &Value,
     changes: Range<u32>,
+    into: Side,
+    cancel: &AtomicBool,
+) -> Result<Value, Cancelled> {
+    take_selected(before, after, &[changes], into, cancel)
+}
+
+/// [`take_changes`] for differences that are not one run of numbers: those that are in
+/// any of `changes`, which may be in any order and may overlap. This is moving the
+/// lines that were picked out of a difference, and not all of it.
+pub fn take_selected(
+    before: &Value,
+    after: &Value,
+    changes: &[Range<u32>],
     into: Side,
     cancel: &AtomicBool,
 ) -> Result<Value, Cancelled> {

@@ -163,6 +163,22 @@ impl Harness {
         self.settle();
     }
 
+    /// A click with `modifiers` held down (Ctrl, Shift…).
+    fn click_with(&mut self, x: f32, y: f32, modifiers: egui::Modifiers) {
+        self.frame_with(vec![egui::Event::ModifiersChanged(modifiers)]);
+        self.pointer(x, y);
+        for pressed in [true, false] {
+            self.frame_with(vec![egui::Event::PointerButton {
+                pos: egui::pos2(x, y),
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers,
+            }]);
+        }
+        self.frame_with(vec![egui::Event::ModifiersChanged(egui::Modifiers::NONE)]);
+        self.settle();
+    }
+
     /// Let `seconds` go by, a frame at a time.
     fn pause(&mut self, seconds: f64) {
         for _ in 0..(seconds * 60.0) as usize {
@@ -193,6 +209,25 @@ impl Harness {
             self.button(x, y, true);
             self.button(x, y, false);
         }
+        self.settle();
+    }
+
+    /// A double click with `modifiers` held down (Ctrl, Shift…).
+    fn double_click_with(&mut self, x: f32, y: f32, modifiers: egui::Modifiers) {
+        self.pause(1.0);
+        self.frame_with(vec![egui::Event::ModifiersChanged(modifiers)]);
+        self.pointer(x, y);
+        for _ in 0..2 {
+            for pressed in [true, false] {
+                self.frame_with(vec![egui::Event::PointerButton {
+                    pos: egui::pos2(x, y),
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers,
+                }]);
+            }
+        }
+        self.frame_with(vec![egui::Event::ModifiersChanged(egui::Modifiers::NONE)]);
         self.settle();
     }
 
@@ -2368,6 +2403,7 @@ fn a_cancelled_merge_is_not_shown_as_an_error() {
 // The other tools of the Tools window: Format, Diff, Patch and Validate.
 
 use crate::tools::Tool;
+use jsonquery_query::diff::Side;
 
 fn open_tool(h: &mut Harness, tool: Tool) {
     let ctx = h.ctx.clone();
@@ -2597,13 +2633,23 @@ fn only_differences_folds_what_is_the_same_into_a_line_that_counts_it() {
 }
 
 #[test]
-fn clicking_a_difference_in_the_side_by_side_view_copies_its_path() {
+fn clicking_a_line_picks_it_and_the_menu_of_a_line_copies_its_path() {
     let mut h = compared_diff(
         r#"{"a/b": 1, "list": [1, 2]}"#,
         r#"{"a/b": 2, "list": [1, 2, 3]}"#,
         "Changes (2)",
     );
+    // A click picks the line (and says so); it takes nothing from the clipboard.
+    let copies = h.copied.len();
     press(&mut h, "  \"a/b\": 2,");
+    assert_eq!(h.copied.len(), copies, "{:?}", h.copied);
+    assert!(is_drawn(&h, "1 line picked"), "{:?}", h.texts());
+    assert!(is_drawn(&h, "Difference 1 of 2"), "{:?}", h.texts());
+
+    // Its menu has the path.
+    let line = center_of(&h, "  \"a/b\": 2,");
+    h.right_click(line.x, line.y);
+    press(&mut h, "Copy path");
     assert_eq!(h.copied.last().map(String::as_str), Some("/a~1b"));
     assert!(
         is_drawn_containing(&h, "Copied the path to /a~1b"),
@@ -2611,10 +2657,13 @@ fn clicking_a_difference_in_the_side_by_side_view_copies_its_path() {
         h.texts()
     );
 
-    // A line that is the same is not a difference, and copies nothing.
-    let copies = h.copied.len();
+    // A line that is the same is not a difference: clicking it lets go of what was
+    // picked, and it has no menu to move or copy.
     press(&mut h, "  \"list\": [");
-    assert_eq!(h.copied.len(), copies);
+    assert!(!is_drawn(&h, "1 line picked"), "{:?}", h.texts());
+    let same = center_of(&h, "  \"list\": [");
+    h.right_click(same.x, same.y);
+    assert!(!is_drawn(&h, "Copy path"), "{:?}", h.texts());
 }
 
 /// The command row's button drawn as `glyph` (⏷, ⏴…): the one beside Compare,
@@ -2690,10 +2739,10 @@ fn moving_a_difference_to_the_right_gives_the_right_document_what_the_left_has()
         "{:?}",
         h.texts()
     );
-    // The new document is what is shown, with c the one difference left, picked
-    // as the one that has taken the place of the moved one.
+    // The new document is what is shown, with c the one difference left: the view does
+    // not go on to it by itself.
     assert!(is_drawn(&h, "Changes (1)"), "{:?}", h.texts());
-    assert!(is_drawn(&h, "Difference 1 of 1"), "{:?}", h.texts());
+    assert!(!is_drawn_containing(&h, "Difference "), "{:?}", h.texts());
 }
 
 #[test]
@@ -2743,7 +2792,7 @@ fn moving_the_last_difference_makes_the_documents_the_same() {
 }
 
 #[test]
-fn after_a_move_the_next_difference_is_the_one_that_is_picked() {
+fn after_a_move_nothing_is_picked_and_the_view_stays_where_it_was() {
     let mut h = compared_diff(
         r#"{"a":1,"s":0,"b":2,"t":0,"c":3}"#,
         r#"{"a":9,"s":0,"b":8,"t":0,"c":7}"#,
@@ -2754,15 +2803,57 @@ fn after_a_move_the_next_difference_is_the_one_that_is_picked() {
     let next = command_button(&h, "⏷");
     h.click(next.x, next.y);
     assert!(is_drawn(&h, "Difference 2 of 3"), "{:?}", h.texts());
-    // Moving the second leaves two, and the third is now the second.
+    // Moving the second leaves two, and the view does not go on to the third by itself:
+    // nothing is picked, so the buttons have nothing to move until something is.
     let right = command_button(&h, "⏵");
     h.click(right.x, right.y);
     wait_for(&mut h, "the new comparison", |h| is_drawn(h, "Changes (2)"));
-    assert!(is_drawn(&h, "Difference 2 of 2"), "{:?}", h.texts());
+    assert!(!is_drawn_containing(&h, "Difference "), "{:?}", h.texts());
     assert_eq!(
         as_json(&h.app.tools.box_text(Tool::Diff, "Right")),
         serde_json::json!({"a": 9, "s": 0, "b": 2, "t": 0, "c": 7})
     );
+    // The next press of Next is the first difference from the top of the view.
+    let next = command_button(&h, "⏷");
+    h.click(next.x, next.y);
+    assert!(is_drawn(&h, "Difference 1 of 2"), "{:?}", h.texts());
+}
+
+#[test]
+fn after_a_move_the_text_is_where_it_was_scrolled_to_and_not_at_the_next_difference() {
+    // Two differences far apart, in a document of 160 lines.
+    let numbers = |first: i32, second: i32| {
+        let items: Vec<String> = (0..160)
+            .map(|n| match n {
+                100 => first.to_string(),
+                140 => second.to_string(),
+                _ => format!("{}", 1000 + n),
+            })
+            .collect();
+        format!("[{}]", items.join(","))
+    };
+    let mut h = compared_diff(&numbers(1, 3), &numbers(2, 4), "Changes (2)");
+    // Down to the first of them.
+    let next = command_button(&h, "⏷");
+    h.click(next.x, next.y);
+    assert!(is_drawn(&h, "Difference 1 of 2"), "{:?}", h.texts());
+    let above = |h: &Harness| {
+        h.texts()
+            .into_iter()
+            .find(|(t, _)| t == "  1099,")
+            .map(|(_, p)| p.y.round())
+    };
+    let before = above(&h).expect("the line above the difference is in view");
+    // Its arrow, into the right document.
+    let arrow = h.app.tools.diff_arrow(0, Side::Right).unwrap();
+    h.click(arrow.x, arrow.y);
+    wait_for(&mut h, "the new comparison", |h| is_drawn(h, "Changes (1)"));
+    h.settle();
+    // The same lines are in view, where they were, and the second difference (far below)
+    // is not.
+    assert_eq!(above(&h), Some(before), "{:?}", h.texts());
+    assert!(!is_drawn(&h, "  4,"), "{:?}", h.texts());
+    assert!(!is_drawn_containing(&h, "Difference "), "{:?}", h.texts());
 }
 
 #[test]
@@ -2796,7 +2887,7 @@ fn a_difference_has_a_menu_that_moves_it_to_either_side() {
 }
 
 #[test]
-fn a_box_that_held_a_file_holds_the_moved_text_and_is_no_longer_called_by_the_file() {
+fn a_box_that_held_a_file_holds_the_moved_text_and_says_it_is_changed() {
     let file = temp_json("moved-left.json", r#"{"a":1,"b":2}"#);
     let mut h = Harness::new();
     open_tool(&mut h, Tool::Diff);
@@ -2817,8 +2908,8 @@ fn a_box_that_held_a_file_holds_the_moved_text_and_is_no_longer_called_by_the_fi
     h.click(left.x, left.y);
     wait_for(&mut h, "the new comparison", |h| is_drawn(h, "same"));
     assert!(
-        !is_drawn_containing(&h, "moved-left.json"),
-        "the left document is not that file any more: {:?}",
+        is_drawn_containing(&h, "moved-left.json (changed)"),
+        "the left document is called by its file, and said to be changed: {:?}",
         h.texts()
     );
     assert_eq!(
@@ -2864,9 +2955,9 @@ fn a_move_that_makes_a_document_too_big_for_its_box_leaves_it_held_unseen() {
     let held = h.app.tools.box_text(Tool::Diff, "Left");
     assert!(held.len() as u64 > 1024 * 1024, "{} bytes", held.len());
     assert_eq!(as_json(&held), as_json(&right));
-    // It is not the file any more, and the file is as it was.
+    // It is said to be changed, and the file is as it was.
     assert!(
-        !is_drawn_containing(&h, "held-left.json"),
+        is_drawn_containing(&h, "held-left.json (changed)"),
         "{:?}",
         h.texts()
     );
@@ -2877,6 +2968,1120 @@ fn a_move_that_makes_a_document_too_big_for_its_box_leaves_it_held_unseen() {
         is_drawn_containing(h, "Compared in")
     });
     assert!(is_drawn(&h, "same"), "{:?}", h.texts());
+}
+
+// Comparing by itself, the arrows between the documents, picking lines, saving.
+
+/// Whether the status bar says that lines are picked ("1 line picked", "3 lines picked"; not
+/// the notice that picked lines were moved).
+fn lines_are_picked(h: &Harness) -> bool {
+    is_drawn_containing(h, "line picked") || is_drawn_containing(h, "lines picked")
+}
+
+/// The Diff page with both boxes filled and nothing compared.
+fn diff_with(left: &str, right: &str) -> Harness {
+    let mut h = Harness::new();
+    open_tool(&mut h, Tool::Diff);
+    h.app.tools.fill(Tool::Diff, "Left", left);
+    h.app.tools.fill(Tool::Diff, "Right", right);
+    h.settle();
+    h
+}
+
+#[test]
+fn a_view_of_the_comparison_compares_the_documents_by_itself() {
+    for (view, shown) in [
+        ("Side by side", "  \"b\": 3"),
+        ("Changes", "Changed"),
+        ("Patch", r#"{"op": "replace", "path": "/b", "value": 3}"#),
+    ] {
+        let mut h = diff_with(r#"{"a":1,"b":2}"#, r#"{"a":1,"b":3}"#);
+        // Compare is not pressed: the tab asks for the comparison.
+        press(&mut h, view);
+        wait_for(&mut h, "the comparison", |h| is_drawn(h, "Changes (1)"));
+        assert!(
+            is_drawn_containing(&h, shown),
+            "{view} shows its answer: {:?}",
+            h.texts()
+        );
+        assert!(is_drawn(&h, "1 changed"), "{view}: {:?}", h.texts());
+    }
+}
+
+#[test]
+fn a_view_does_not_compare_until_both_documents_are_there_and_does_once_they_are() {
+    let mut h = Harness::new();
+    open_tool(&mut h, Tool::Diff);
+    h.app.tools.fill(Tool::Diff, "Left", "[1]");
+    h.settle();
+    press(&mut h, "Side by side");
+    h.pause(0.5);
+    let hint = "Put a document in both boxes to see what differs";
+    assert!(is_drawn(&h, hint), "{:?}", h.texts());
+    assert!(!is_drawn_containing(&h, "Working"), "{:?}", h.texts());
+
+    press(&mut h, "Documents");
+    h.app.tools.fill(Tool::Diff, "Right", "[2]");
+    h.settle();
+    press(&mut h, "Side by side");
+    wait_for(&mut h, "the comparison", |h| is_drawn(h, "Changes (1)"));
+    assert!(!is_drawn(&h, hint));
+}
+
+#[test]
+fn a_comparison_that_was_made_is_not_made_again_by_going_to_a_view() {
+    let mut h = compared_diff("[1]", "[2]", "Changes (1)");
+    press(&mut h, "Patch");
+    press(&mut h, "Side by side");
+    h.pause(0.3);
+    assert!(
+        !is_drawn_containing(&h, "Working"),
+        "no new comparison: {:?}",
+        h.texts()
+    );
+    assert!(is_drawn(&h, "Changes (1)"));
+}
+
+#[test]
+fn an_arrow_between_the_documents_moves_the_difference_it_is_beside() {
+    // Two differences, with a line that is the same between them.
+    let mut h = compared_diff(
+        r#"{"a":1,"s":0,"b":2}"#,
+        r#"{"a":9,"s":0,"b":8}"#,
+        "Changes (2)",
+    );
+    for block in 0..2 {
+        for into in [Side::Left, Side::Right] {
+            assert!(
+                h.app.tools.diff_arrow(block, into).is_some(),
+                "difference {block} has an arrow to {into:?}"
+            );
+        }
+    }
+    // The one at the top points to the left document, the one under it to the right.
+    let (to_left, to_right) = (
+        h.app.tools.diff_arrow(1, Side::Left).unwrap(),
+        h.app.tools.diff_arrow(1, Side::Right).unwrap(),
+    );
+    assert!(
+        (to_left.x - to_right.x).abs() < 0.5 && (to_right.y - to_left.y - 17.0).abs() < 0.5,
+        "one over the other, a row apart: {to_left:?} {to_right:?}"
+    );
+    // Both lie between the two documents' text.
+    let (left_text, right_text) = (rect_of(&h, "  \"b\": 2"), rect_of(&h, "  \"b\": 8"));
+    assert!(left_text.max.x < to_left.x && to_right.x < right_text.min.x);
+
+    // The second difference into the right document: Right takes what Left has.
+    h.click(to_right.x, to_right.y);
+    wait_for(&mut h, "the new comparison", |h| is_drawn(h, "Changes (1)"));
+    assert_eq!(
+        as_json(&h.app.tools.box_text(Tool::Diff, "Right")),
+        serde_json::json!({"a": 9, "s": 0, "b": 2})
+    );
+    assert_eq!(
+        h.app.tools.box_text(Tool::Diff, "Left"),
+        r#"{"a":1,"s":0,"b":2}"#
+    );
+    assert!(
+        is_drawn(&h, "Moved the difference to the right"),
+        "{:?}",
+        h.texts()
+    );
+
+    // The one that is left, into the left document.
+    let arrow = h.app.tools.diff_arrow(0, Side::Left).unwrap();
+    h.click(arrow.x, arrow.y);
+    wait_for(&mut h, "the new comparison", |h| is_drawn(h, "same"));
+    assert_eq!(
+        as_json(&h.app.tools.box_text(Tool::Diff, "Left")),
+        serde_json::json!({"a": 9, "s": 0, "b": 2})
+    );
+    assert!(
+        is_drawn(&h, "Moved the difference to the left"),
+        "{:?}",
+        h.texts()
+    );
+    // Nothing is left to have arrows.
+    assert!(h.app.tools.diff_arrow(0, Side::Left).is_none());
+}
+
+/// Three changes in a row, which are one difference of the view, and a fourth.
+fn four_in_a_row() -> Harness {
+    compared_diff(
+        r#"{"a":1,"b":2,"c":3,"d":4}"#,
+        r#"{"a":9,"b":8,"c":7,"d":6}"#,
+        "Changes (4)",
+    )
+}
+
+#[test]
+fn a_line_that_is_picked_is_moved_by_its_arrow_and_the_rest_of_the_difference_stays() {
+    let mut h = four_in_a_row();
+    // Nothing is picked: the arrow is for the whole difference.
+    let right = h.app.tools.diff_arrow(0, Side::Right).unwrap();
+    // Pick b, and say so.
+    press(&mut h, "  \"b\": 2,");
+    assert!(is_drawn(&h, "1 line picked"), "{:?}", h.texts());
+    // The arrow moves that line only.
+    h.click(right.x, right.y);
+    wait_for(&mut h, "the new comparison", |h| is_drawn(h, "Changes (3)"));
+    assert_eq!(
+        as_json(&h.app.tools.box_text(Tool::Diff, "Right")),
+        serde_json::json!({"a": 9, "b": 2, "c": 7, "d": 6})
+    );
+    assert_eq!(
+        h.app.tools.box_text(Tool::Diff, "Left"),
+        r#"{"a":1,"b":2,"c":3,"d":4}"#
+    );
+    assert!(
+        is_drawn(&h, "Moved the picked lines to the right"),
+        "{:?}",
+        h.texts()
+    );
+    // Nothing is picked in what is shown now.
+    assert!(!lines_are_picked(&h), "{:?}", h.texts());
+}
+
+#[test]
+fn an_arrow_with_nothing_picked_moves_the_whole_difference() {
+    let mut h = four_in_a_row();
+    let left = h.app.tools.diff_arrow(0, Side::Left).unwrap();
+    h.click(left.x, left.y);
+    wait_for(&mut h, "the new comparison", |h| is_drawn(h, "same"));
+    assert_eq!(
+        as_json(&h.app.tools.box_text(Tool::Diff, "Left")),
+        serde_json::json!({"a": 9, "b": 8, "c": 7, "d": 6})
+    );
+    assert!(is_drawn(&h, "Moved the difference to the left"));
+}
+
+#[test]
+fn lines_are_picked_with_ctrl_and_shift_and_by_dragging_and_let_go_of_with_escape() {
+    let mut h = four_in_a_row();
+    let at = |h: &Harness, name: &str, value: u32| center_of(h, &format!("  \"{name}\": {value},"));
+    let a = at(&h, "a", 1);
+    let b = at(&h, "b", 2);
+    let c = at(&h, "c", 3);
+    let command = egui::Modifiers::COMMAND;
+    let shift = egui::Modifiers::SHIFT;
+
+    h.click(a.x, a.y);
+    assert!(is_drawn(&h, "1 line picked"), "{:?}", h.texts());
+    // A plain click on another line picks that one instead.
+    h.click(b.x, b.y);
+    assert!(is_drawn(&h, "1 line picked"), "{:?}", h.texts());
+    h.click(a.x, a.y);
+    // Ctrl adds a line, and takes one away that is picked.
+    h.click_with(c.x, c.y, command);
+    assert!(is_drawn(&h, "2 lines picked"), "{:?}", h.texts());
+    h.click_with(a.x, a.y, command);
+    assert!(is_drawn(&h, "1 line picked"), "{:?}", h.texts());
+    // Shift picks from the line that was clicked last, to this one.
+    let d = center_of(&h, "  \"d\": 4");
+    h.click_with(d.x, d.y, shift);
+    assert!(is_drawn(&h, "4 lines picked"), "{:?}", h.texts());
+    // Escape lets go of them all.
+    h.key(egui::Key::Escape, egui::Modifiers::NONE);
+    h.settle();
+    assert!(!lines_are_picked(&h), "{:?}", h.texts());
+
+    // Dragging over lines picks them: b to d.
+    let d = center_of(&h, "  \"d\": 4");
+    h.drag_y(b.x, b.y, d.y);
+    assert!(is_drawn(&h, "3 lines picked"), "{:?}", h.texts());
+    // A click on a line that is the same lets go (there is none here: the line
+    // above them all is the opening bracket).
+    let bracket = center_of(&h, "{");
+    h.click(bracket.x, bracket.y);
+    assert!(!lines_are_picked(&h), "{:?}", h.texts());
+}
+
+#[test]
+fn the_buttons_and_the_keys_of_the_command_row_move_the_lines_that_are_picked() {
+    let mut h = four_in_a_row();
+    let b = center_of(&h, "  \"b\": 2,");
+    let c = center_of(&h, "  \"c\": 3,");
+    h.click(b.x, b.y);
+    h.click_with(c.x, c.y, egui::Modifiers::COMMAND);
+    assert!(is_drawn(&h, "2 lines picked"), "{:?}", h.texts());
+
+    // ⏴: Left takes b and c from Right.
+    let left = command_button(&h, "⏴");
+    h.click(left.x, left.y);
+    wait_for(&mut h, "the new comparison", |h| is_drawn(h, "Changes (2)"));
+    assert_eq!(
+        as_json(&h.app.tools.box_text(Tool::Diff, "Left")),
+        serde_json::json!({"a": 1, "b": 8, "c": 7, "d": 4})
+    );
+    assert!(
+        is_drawn(&h, "Moved the picked lines to the left"),
+        "{:?}",
+        h.texts()
+    );
+
+    // And the keys do the same for what is picked now.
+    let a = center_of(&h, "  \"a\": 1,");
+    h.click(a.x, a.y);
+    h.key(egui::Key::ArrowRight, egui::Modifiers::ALT);
+    wait_for(&mut h, "the new comparison", |h| is_drawn(h, "Changes (1)"));
+    assert_eq!(
+        as_json(&h.app.tools.box_text(Tool::Diff, "Right")),
+        serde_json::json!({"a": 1, "b": 8, "c": 7, "d": 6})
+    );
+}
+
+#[test]
+fn a_picked_line_beats_a_difference_that_was_stepped_to_for_the_buttons() {
+    // The buttons act on the lines that are picked, and, with none, on the difference that
+    // Next went to.
+    let mut h = compared_diff(
+        r#"{"a":1,"s":0,"b":2,"t":0,"c":3}"#,
+        r#"{"a":9,"s":0,"b":8,"t":0,"c":7}"#,
+        "Changes (3)",
+    );
+    let next = command_button(&h, "⏷");
+    h.click(next.x, next.y);
+    assert!(is_drawn(&h, "Difference 1 of 3"));
+    // b is picked, and is what ⏵ moves, and not a, which Next went to.
+    let b = center_of(&h, "  \"b\": 2,");
+    h.click(b.x, b.y);
+    assert!(is_drawn(&h, "Difference 2 of 3"), "{:?}", h.texts());
+    let right = command_button(&h, "⏵");
+    h.click(right.x, right.y);
+    wait_for(&mut h, "the new comparison", |h| is_drawn(h, "Changes (2)"));
+    assert_eq!(
+        as_json(&h.app.tools.box_text(Tool::Diff, "Right")),
+        serde_json::json!({"a": 9, "s": 0, "b": 2, "t": 0, "c": 7})
+    );
+    // Stepping lets go of what was picked: what the buttons move is the difference that
+    // was stepped to.
+    let a = center_of(&h, "  \"a\": 1,");
+    h.click(a.x, a.y);
+    assert!(is_drawn(&h, "1 line picked"), "{:?}", h.texts());
+    let next = command_button(&h, "⏷");
+    h.click(next.x, next.y);
+    assert!(!lines_are_picked(&h), "{:?}", h.texts());
+    assert!(is_drawn(&h, "Difference 2 of 2"), "{:?}", h.texts());
+}
+
+#[test]
+fn a_line_of_a_value_that_has_several_is_picked_with_all_of_them_and_moved_whole() {
+    // x is only in Right, and has four lines: picking one of them picks the value, as half
+    // an object is no JSON.
+    let mut h = compared_diff(r#"{"a":1}"#, r#"{"a":1,"x":{"p":1,"q":2}}"#, "Changes (1)");
+    press(&mut h, "    \"p\": 1,");
+    assert!(is_drawn(&h, "4 lines picked"), "{:?}", h.texts());
+    // Into the left document: Left takes the whole of x.
+    let arrow = h.app.tools.diff_arrow(0, Side::Left).unwrap();
+    h.click(arrow.x, arrow.y);
+    wait_for(&mut h, "the new comparison", |h| is_drawn(h, "same"));
+    assert_eq!(
+        as_json(&h.app.tools.box_text(Tool::Diff, "Left")),
+        serde_json::json!({"a": 1, "x": {"p": 1, "q": 2}})
+    );
+}
+
+#[test]
+fn the_menu_of_a_picked_line_moves_all_that_is_picked() {
+    let mut h = four_in_a_row();
+    let a = center_of(&h, "  \"a\": 1,");
+    let d = center_of(&h, "  \"d\": 4");
+    h.click(a.x, a.y);
+    h.click_with(d.x, d.y, egui::Modifiers::COMMAND);
+    // The menu of a line that is picked is for all of them.
+    h.right_click(d.x, d.y);
+    assert!(is_drawn(&h, "2 lines picked"), "{:?}", h.texts());
+    press(&mut h, "Move to the right");
+    wait_for(&mut h, "the new comparison", |h| is_drawn(h, "Changes (2)"));
+    assert_eq!(
+        as_json(&h.app.tools.box_text(Tool::Diff, "Right")),
+        serde_json::json!({"a": 1, "b": 8, "c": 7, "d": 4})
+    );
+
+    // The menu of a line that is not picked picks it, and is for it alone.
+    let b = center_of(&h, "  \"b\": 2,");
+    h.right_click(b.x, b.y);
+    assert!(is_drawn(&h, "1 line picked"), "{:?}", h.texts());
+}
+
+#[test]
+fn the_menu_of_a_picked_line_moves_the_lines_picked_in_every_difference() {
+    let mut h = compared_diff(
+        r#"{"a":1,"s":0,"b":2}"#,
+        r#"{"a":9,"s":0,"b":8}"#,
+        "Changes (2)",
+    );
+    let a = center_of(&h, "  \"a\": 1,");
+    let b = center_of(&h, "  \"b\": 2");
+    h.click(a.x, a.y);
+    h.click_with(b.x, b.y, egui::Modifiers::COMMAND);
+    assert!(is_drawn(&h, "2 lines picked"), "{:?}", h.texts());
+    h.right_click(b.x, b.y);
+    press(&mut h, "Move to the right");
+    // Both were moved, though they are two differences of the view.
+    wait_for(&mut h, "the new comparison", |h| is_drawn(h, "same"));
+    assert_eq!(
+        as_json(&h.app.tools.box_text(Tool::Diff, "Right")),
+        serde_json::json!({"a": 1, "s": 0, "b": 2})
+    );
+}
+
+#[test]
+fn each_document_has_a_save_that_writes_what_a_move_made_where_the_file_was() {
+    // Left is a file, Right is typed.
+    let file = temp_json("saved-left.json", r#"{"a":1,"b":2}"#);
+    let mut h = Harness::new();
+    open_tool(&mut h, Tool::Diff);
+    h.app.tools.fill_file(Tool::Diff, "Left", &file);
+    h.app.tools.fill(Tool::Diff, "Right", r#"{"a":1,"b":3}"#);
+    h.settle();
+    press(&mut h, "Compare");
+    wait_for(&mut h, "the changes", |h| is_drawn(h, "Changes (1)"));
+    // A Save… over each column, at the right end of its half.
+    let saves = h.pop_buttons("Save…");
+    let (left_save, right_save) = (
+        *saves.iter().find(|p| p.x < 450.0).expect("Left's Save…"),
+        *saves.iter().find(|p| p.x >= 450.0).expect("Right's Save…"),
+    );
+
+    // The file in a box was read, not changed: nothing to be said of it. Move the
+    // difference into Left.
+    let arrow = h.app.tools.diff_arrow(0, Side::Left).unwrap();
+    h.click(arrow.x, arrow.y);
+    wait_for(&mut h, "the new comparison", |h| is_drawn(h, "same"));
+    assert!(
+        is_drawn_containing(&h, "saved-left.json (changed)"),
+        "{:?}",
+        h.texts()
+    );
+
+    // Save… asks where, proposing the file's folder and name (the dialog is
+    // answered by the test), and writes what is in the box.
+    let target = file.parent().unwrap().join("moved.json");
+    h.app.tools.answer_save_dialogs_with(Some(target.clone()));
+    h.click(left_save.x, left_save.y);
+    wait_for(&mut h, "the save", |h| is_drawn_containing(h, "Saved to"));
+    assert_eq!(
+        as_json(&std::fs::read_to_string(&target).unwrap()),
+        serde_json::json!({"a": 1, "b": 3})
+    );
+    // The original file is as it was; the document is the file it was saved as, and is
+    // no longer said to be changed.
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), r#"{"a":1,"b":2}"#);
+    assert!(is_drawn_containing(&h, "moved.json · "), "{:?}", h.texts());
+    assert!(!is_drawn_containing(&h, "(changed)"), "{:?}", h.texts());
+
+    // A dialog that is cancelled writes nothing.
+    h.app.tools.answer_save_dialogs_with(None);
+    let saved_at = std::fs::metadata(&target).unwrap().modified().unwrap();
+    h.click(right_save.x, right_save.y);
+    h.pause(0.3);
+    assert_eq!(
+        std::fs::metadata(&target).unwrap().modified().unwrap(),
+        saved_at
+    );
+}
+
+#[test]
+fn a_file_that_was_not_read_into_its_box_has_nothing_to_save_from_here() {
+    // Too big for a text box (over a megabyte), so that it is read when the tool runs, and
+    // short enough to be laid out side by side.
+    let strings: Vec<String> = (0..4_000)
+        .map(|n| format!("\"{n:04}{}\"", "x".repeat(300)))
+        .collect();
+    let big = format!("[{}]", strings.join(","));
+    assert!(big.len() as u64 > 1024 * 1024);
+    let file = temp_json("big-left.json", &big);
+    let mut h = Harness::new();
+    open_tool(&mut h, Tool::Diff);
+    h.app.tools.fill_file(Tool::Diff, "Left", &file);
+    h.app.tools.fill(Tool::Diff, "Right", "[1]");
+    h.settle();
+    press(&mut h, "Compare");
+    wait_for(&mut h, "the comparison", |h| {
+        is_drawn_containing(h, "Compared in")
+    });
+    // Its Save… is dim: pressing it asks for nothing.
+    h.app
+        .tools
+        .answer_save_dialogs_with(Some(file.parent().unwrap().join("x.json")));
+    let saves = h.pop_buttons("Save…");
+    let left_save = *saves.iter().find(|p| p.x < 450.0).expect("Left's Save…");
+    h.click(left_save.x, left_save.y);
+    h.pause(0.3);
+    assert!(!file.parent().unwrap().join("x.json").exists());
+}
+
+// Typing over a line of either column.
+
+/// Double-click the text drawn as `line`, take what is in the line all, and type `typed` over it.
+fn type_over(h: &mut Harness, line: &str, typed: &str) {
+    let at = center_of(h, line);
+    h.double_click(at.x, at.y);
+    h.key(egui::Key::A, egui::Modifiers::COMMAND);
+    h.type_text(typed);
+}
+
+fn enter(h: &mut Harness) {
+    h.key(egui::Key::Enter, egui::Modifiers::NONE);
+}
+
+/// The Diff page's side-by-side view of `left` and `right`, which differ in `b`.
+fn two_with_b() -> Harness {
+    compared_diff(r#"{"a":1,"b":2}"#, r#"{"a":1,"b":3}"#, "Changes (1)")
+}
+
+#[test]
+fn a_double_click_puts_a_caret_in_a_line_and_what_is_typed_takes_its_place_on_enter() {
+    let mut h = two_with_b();
+    type_over(&mut h, "  \"b\": 2", "\"b\": 3");
+    assert!(
+        is_drawn(
+            &h,
+            "Editing line 3 of Left: Enter puts it in, Esc puts it back"
+        ),
+        "{:?}",
+        h.texts()
+    );
+    // Nothing is done until Enter.
+    assert_eq!(h.app.tools.box_text(Tool::Diff, "Left"), r#"{"a":1,"b":2}"#);
+    enter(&mut h);
+    wait_for(&mut h, "the new comparison", |h| is_drawn(h, "same"));
+    assert_eq!(
+        as_json(&h.app.tools.box_text(Tool::Diff, "Left")),
+        serde_json::json!({"a": 1, "b": 3})
+    );
+    assert!(
+        is_drawn(&h, "Changed line 3 of the left document"),
+        "{:?}",
+        h.texts()
+    );
+    assert!(is_drawn_containing(&h, "(changed)"), "{:?}", h.texts());
+    // The other document is as it was, and nothing has a caret.
+    assert_eq!(
+        h.app.tools.box_text(Tool::Diff, "Right"),
+        r#"{"a":1,"b":3}"#
+    );
+    assert!(!is_drawn_containing(&h, "Editing line"), "{:?}", h.texts());
+}
+
+#[test]
+fn the_right_column_is_typed_over_as_well() {
+    let mut h = two_with_b();
+    type_over(&mut h, "  \"b\": 3", "\"b\": 2");
+    assert!(
+        is_drawn_containing(&h, "Editing line 3 of Right"),
+        "{:?}",
+        h.texts()
+    );
+    enter(&mut h);
+    wait_for(&mut h, "the new comparison", |h| is_drawn(h, "same"));
+    assert_eq!(
+        as_json(&h.app.tools.box_text(Tool::Diff, "Right")),
+        serde_json::json!({"a": 1, "b": 2})
+    );
+    assert!(
+        is_drawn(&h, "Changed line 3 of the right document"),
+        "{:?}",
+        h.texts()
+    );
+    assert_eq!(h.app.tools.box_text(Tool::Diff, "Left"), r#"{"a":1,"b":2}"#);
+}
+
+#[test]
+fn a_line_that_is_the_same_on_both_sides_is_typed_over_too() {
+    let mut h = two_with_b();
+    // `"a": 1,` is drawn on both sides: the first is the left one.
+    type_over(&mut h, "  \"a\": 1,", "\"a\": 10,");
+    enter(&mut h);
+    wait_for(&mut h, "the new comparison", |h| is_drawn(h, "2 changed"));
+    assert_eq!(
+        as_json(&h.app.tools.box_text(Tool::Diff, "Left")),
+        serde_json::json!({"a": 10, "b": 2})
+    );
+}
+
+#[test]
+fn escape_puts_the_line_back_and_nothing_is_changed() {
+    let mut h = two_with_b();
+    type_over(&mut h, "  \"b\": 2", "\"b\": 99");
+    h.key(egui::Key::Escape, egui::Modifiers::NONE);
+    h.settle();
+    assert!(!is_drawn_containing(&h, "Editing line"), "{:?}", h.texts());
+    assert!(
+        is_drawn(&h, "  \"b\": 2"),
+        "the line is as it was: {:?}",
+        h.texts()
+    );
+    h.pause(0.3);
+    assert!(!is_drawn_containing(&h, "Working"), "{:?}", h.texts());
+    assert_eq!(h.app.tools.box_text(Tool::Diff, "Left"), r#"{"a":1,"b":2}"#);
+    assert!(!is_drawn_containing(&h, "(changed)"), "{:?}", h.texts());
+}
+
+#[test]
+fn a_line_that_was_not_typed_in_makes_no_change_whatever_leaves_it() {
+    let mut h = two_with_b();
+    let at = center_of(&h, "  \"b\": 2");
+    h.double_click(at.x, at.y);
+    assert!(
+        is_drawn_containing(&h, "Editing line 3 of Left"),
+        "{:?}",
+        h.texts()
+    );
+    enter(&mut h);
+    h.pause(0.3);
+    assert!(!is_drawn_containing(&h, "Working"), "{:?}", h.texts());
+    assert!(!is_drawn_containing(&h, "(changed)"), "{:?}", h.texts());
+    assert_eq!(h.app.tools.box_text(Tool::Diff, "Left"), r#"{"a":1,"b":2}"#);
+}
+
+#[test]
+fn what_is_not_json_where_it_is_stays_to_be_put_right_and_changes_nothing() {
+    let mut h = two_with_b();
+    type_over(&mut h, "  \"b\": 2", "\"b\": ");
+    enter(&mut h);
+    h.pause(0.3);
+    // It says what is wrong, in the status bar, and the line still has the caret.
+    assert!(
+        is_drawn_containing(&h, "Not valid JSON: "),
+        "{:?}",
+        h.texts()
+    );
+    assert!(!is_drawn_containing(&h, "Working"), "{:?}", h.texts());
+    assert_eq!(h.app.tools.box_text(Tool::Diff, "Left"), r#"{"a":1,"b":2}"#);
+    // Put right, it is taken.
+    h.type_text("7");
+    h.frame();
+    assert!(
+        !is_drawn_containing(&h, "Not valid JSON"),
+        "{:?}",
+        h.texts()
+    );
+    enter(&mut h);
+    wait_for(&mut h, "the new comparison", |h| is_drawn(h, "Changes (1)"));
+    assert_eq!(
+        as_json(&h.app.tools.box_text(Tool::Diff, "Left")),
+        serde_json::json!({"a": 1, "b": 7})
+    );
+}
+
+#[test]
+fn a_click_elsewhere_takes_what_was_typed_and_is_not_a_click_on_what_it_lands_on() {
+    let mut h = two_with_b();
+    type_over(&mut h, "  \"b\": 2", "\"b\": 5");
+    // A click on the other side's line: the change is made, and the line that was clicked is
+    // not picked (the view is the new one by then).
+    let other = center_of(&h, "  \"b\": 3");
+    h.click(other.x, other.y);
+    wait_for(&mut h, "the new comparison", |h| is_drawn(h, "Changes (1)"));
+    assert_eq!(
+        as_json(&h.app.tools.box_text(Tool::Diff, "Left")),
+        serde_json::json!({"a": 1, "b": 5})
+    );
+    assert!(!lines_are_picked(&h), "{:?}", h.texts());
+    assert!(!is_drawn_containing(&h, "Editing line"), "{:?}", h.texts());
+}
+
+#[test]
+fn a_line_can_be_taken_out_and_several_put_in_where_one_was() {
+    let mut h = two_with_b();
+    // Taken out: nothing is typed.
+    let at = center_of(&h, "  \"a\": 1,");
+    h.double_click(at.x, at.y);
+    h.key(egui::Key::A, egui::Modifiers::COMMAND);
+    h.key(egui::Key::Backspace, egui::Modifiers::NONE);
+    enter(&mut h);
+    wait_for(&mut h, "the new comparison", |h| {
+        is_drawn(h, "Took line 2 out of the left document")
+    });
+    assert_eq!(
+        as_json(&h.app.tools.box_text(Tool::Diff, "Left")),
+        serde_json::json!({"b": 2})
+    );
+
+    // Two in the place of one, with a comma between them.
+    type_over(&mut h, "  \"b\": 2", "\"b\": 3, \"c\": 4");
+    enter(&mut h);
+    wait_for(&mut h, "the new comparison", |h| {
+        is_drawn(h, "Changed line 2 of the left document")
+    });
+    assert_eq!(
+        as_json(&h.app.tools.box_text(Tool::Diff, "Left")),
+        serde_json::json!({"b": 3, "c": 4})
+    );
+}
+
+#[test]
+fn the_name_of_a_line_that_opens_an_object_is_changed_and_what_is_in_it_stays() {
+    let mut h = compared_diff(
+        r#"{"home":{"city":"London"}}"#,
+        r#"{"home":{"city":"Paris"}}"#,
+        "Changes (1)",
+    );
+    type_over(&mut h, "  \"home\": {", "\"address\": {");
+    enter(&mut h);
+    wait_for(&mut h, "the new comparison", |h| is_drawn(h, "Changes (2)"));
+    assert_eq!(
+        as_json(&h.app.tools.box_text(Tool::Diff, "Left")),
+        serde_json::json!({"address": {"city": "London"}})
+    );
+}
+
+#[test]
+fn a_name_that_another_member_has_is_not_taken() {
+    let mut h = compared_diff(r#"{"a":1,"b":2}"#, r#"{"a":1,"b":3}"#, "Changes (1)");
+    type_over(&mut h, "  \"b\": 2", "\"a\": 2");
+    enter(&mut h);
+    h.pause(0.3);
+    assert!(
+        is_drawn(&h, "There already is a member called \"a\" here"),
+        "{:?}",
+        h.texts()
+    );
+    assert_eq!(h.app.tools.box_text(Tool::Diff, "Left"), r#"{"a":1,"b":2}"#);
+}
+
+#[test]
+fn the_members_of_the_right_document_keep_their_order_when_a_line_of_it_is_typed_over() {
+    // The right column shows the members in the left one's order; the document is not
+    // put in it.
+    let mut h = compared_diff(r#"{"a":1,"b":2}"#, r#"{"b":3,"a":1}"#, "Changes (1)");
+    type_over(&mut h, "  \"b\": 3", "\"b\": 2");
+    enter(&mut h);
+    wait_for(&mut h, "the new comparison", |h| is_drawn(h, "same"));
+    let text = h.app.tools.box_text(Tool::Diff, "Right");
+    assert!(
+        text.find("\"b\"").unwrap() < text.find("\"a\"").unwrap(),
+        "b stays before a: {text}"
+    );
+}
+
+#[test]
+fn lines_that_close_something_or_are_too_long_have_no_caret_and_the_long_one_says_so() {
+    let long = "x".repeat(500);
+    let mut h = compared_diff(
+        &format!(r#"{{"s":"{long}","n":1}}"#),
+        &format!(r#"{{"s":"{long}","n":2}}"#),
+        "Changes (1)",
+    );
+    // The bracket that closes the document, and the one that opens it.
+    let closing = center_of(&h, "}");
+    h.double_click(closing.x, closing.y);
+    assert!(!is_drawn_containing(&h, "Editing line"), "{:?}", h.texts());
+    assert!(!is_drawn_containing(&h, "too long"), "{:?}", h.texts());
+    // The line that was cut short: what is shown is not all of it.
+    let cut = h
+        .texts()
+        .into_iter()
+        .find(|(t, _)| t.starts_with("  \"s\": \"xxx") && t.ends_with('…'))
+        .map(|(_, p)| p)
+        .expect("the long line is shown cut");
+    h.double_click(cut.x + 40.0, cut.y + 6.0);
+    assert!(!is_drawn_containing(&h, "Editing line"), "{:?}", h.texts());
+    assert!(
+        is_drawn_containing(&h, "too long to edit here"),
+        "{:?}",
+        h.texts()
+    );
+    // A click on another line takes the message away.
+    let closing = center_of(&h, "}");
+    h.click(closing.x, closing.y);
+    assert!(!is_drawn_containing(&h, "too long"), "{:?}", h.texts());
+}
+
+#[test]
+fn escape_after_a_double_click_lets_go_of_the_pick_as_it_did_and_a_pick_with_ctrl_has_no_caret() {
+    let mut h = two_with_b();
+    let b = center_of(&h, "  \"b\": 2");
+    h.double_click(b.x, b.y);
+    assert!(is_drawn(&h, "1 line picked"), "{:?}", h.texts());
+    assert!(
+        is_drawn_containing(&h, "Editing line 3 of Left"),
+        "{:?}",
+        h.texts()
+    );
+    h.key(egui::Key::Escape, egui::Modifiers::NONE);
+    h.settle();
+    assert!(!lines_are_picked(&h), "{:?}", h.texts());
+    assert!(!is_drawn_containing(&h, "Editing line"), "{:?}", h.texts());
+    // Ctrl picks, and puts no caret.
+    h.click_with(b.x, b.y, egui::Modifiers::COMMAND);
+    assert!(is_drawn(&h, "1 line picked"), "{:?}", h.texts());
+    assert!(!is_drawn_containing(&h, "Editing line"), "{:?}", h.texts());
+}
+
+#[test]
+fn a_single_click_only_picks_so_that_more_lines_can_be_picked_by_clicks_and_by_a_drag() {
+    let mut h = compared_diff(
+        r#"{"a":1,"s":0,"b":2,"t":0,"c":3}"#,
+        r#"{"a":9,"s":0,"b":8,"t":0,"c":7}"#,
+        "Changes (3)",
+    );
+    let a = center_of(&h, "  \"a\": 1,");
+    let b = center_of(&h, "  \"b\": 2,");
+    let c = center_of(&h, "  \"c\": 3");
+    h.click(a.x, a.y);
+    assert!(is_drawn(&h, "1 line picked"), "{:?}", h.texts());
+    assert!(!is_drawn_containing(&h, "Editing line"), "{:?}", h.texts());
+    // Ctrl adds the others, one by one.
+    h.click_with(b.x, b.y, egui::Modifiers::COMMAND);
+    h.click_with(c.x, c.y, egui::Modifiers::COMMAND);
+    assert!(is_drawn(&h, "3 lines picked"), "{:?}", h.texts());
+    assert!(!is_drawn_containing(&h, "Editing line"), "{:?}", h.texts());
+    // A drag over lines picks them, in the place of those picked before, after a click too.
+    h.click(a.x, a.y);
+    h.drag_y(b.x, b.y, c.y);
+    assert!(is_drawn(&h, "2 lines picked"), "{:?}", h.texts());
+    assert!(!is_drawn_containing(&h, "Editing line"), "{:?}", h.texts());
+    // ...and all the lines picked are moved, in one press.
+    let right = command_button(&h, "⏵");
+    h.click(right.x, right.y);
+    wait_for(&mut h, "the new comparison", |h| is_drawn(h, "Changes (1)"));
+    assert_eq!(
+        as_json(&h.app.tools.box_text(Tool::Diff, "Right")),
+        serde_json::json!({"a": 9, "s": 0, "b": 2, "t": 0, "c": 3})
+    );
+}
+
+#[test]
+fn a_double_click_with_ctrl_is_two_picks_and_puts_no_caret() {
+    let mut h = two_with_b();
+    let b = center_of(&h, "  \"b\": 2");
+    h.double_click_with(b.x, b.y, egui::Modifiers::COMMAND);
+    assert!(!is_drawn_containing(&h, "Editing line"), "{:?}", h.texts());
+    // Added, and taken away again, as by two clicks.
+    assert!(!lines_are_picked(&h), "{:?}", h.texts());
+}
+
+#[test]
+fn a_double_click_on_a_line_that_is_picked_keeps_it_picked_and_puts_a_caret_in_it() {
+    let mut h = two_with_b();
+    let b = center_of(&h, "  \"b\": 2");
+    h.click(b.x, b.y);
+    assert!(is_drawn(&h, "1 line picked"), "{:?}", h.texts());
+    h.double_click(b.x, b.y);
+    assert!(is_drawn(&h, "1 line picked"), "{:?}", h.texts());
+    assert!(
+        is_drawn_containing(&h, "Editing line 3 of Left"),
+        "{:?}",
+        h.texts()
+    );
+}
+
+#[test]
+fn a_difference_is_moved_by_its_arrow_after_a_double_click_that_put_a_caret_in_it() {
+    let mut h = two_with_b();
+    let b = center_of(&h, "  \"b\": 2");
+    h.double_click(b.x, b.y);
+    // The caret is in b of the left document; nothing was typed, so the arrow is not held up.
+    let arrow = h.app.tools.diff_arrow(0, Side::Left).unwrap();
+    h.click(arrow.x, arrow.y);
+    wait_for(&mut h, "the new comparison", |h| is_drawn(h, "same"));
+    assert_eq!(
+        as_json(&h.app.tools.box_text(Tool::Diff, "Left")),
+        serde_json::json!({"a": 1, "b": 3})
+    );
+}
+
+#[test]
+fn an_arrow_pressed_with_something_typed_takes_that_first_and_the_move_is_pressed_again() {
+    let mut h = two_with_b();
+    type_over(&mut h, "  \"b\": 2", "\"b\": 5");
+    let arrow = h.app.tools.diff_arrow(0, Side::Right).unwrap();
+    h.click(arrow.x, arrow.y);
+    wait_for(&mut h, "the new comparison", |h| is_drawn(h, "Changes (1)"));
+    // Left has what was typed, and Right was not moved into.
+    assert_eq!(
+        as_json(&h.app.tools.box_text(Tool::Diff, "Left")),
+        serde_json::json!({"a": 1, "b": 5})
+    );
+    assert_eq!(
+        h.app.tools.box_text(Tool::Diff, "Right"),
+        r#"{"a":1,"b":3}"#
+    );
+}
+
+#[test]
+fn the_view_stays_where_it_was_scrolled_to_when_a_line_far_down_is_typed_over() {
+    let numbers = |changed: i32| {
+        let items: Vec<String> = (0..120)
+            .map(|n| {
+                if n == 100 {
+                    changed.to_string()
+                } else {
+                    format!("{}", 1000 + n)
+                }
+            })
+            .collect();
+        format!("[{}]", items.join(","))
+    };
+    let mut h = compared_diff(&numbers(1), &numbers(2), "Changes (1)");
+    // Down to where line 100 is: Next goes to the one difference.
+    let next = command_button(&h, "⏷");
+    h.click(next.x, next.y);
+    assert!(is_drawn(&h, "Difference 1 of 1"), "{:?}", h.texts());
+    assert!(is_drawn(&h, "  1,"), "{:?}", h.texts());
+    let before = h.texts().into_iter().find(|(t, _)| t == "  1,").unwrap().1;
+    type_over(&mut h, "  1,", "9,");
+    enter(&mut h);
+    wait_for(&mut h, "the new comparison", |h| is_drawn(h, "Changes (1)"));
+    // The same lines are in view, the changed one where it was.
+    let after = h
+        .texts()
+        .into_iter()
+        .find(|(t, _)| t == "  9,")
+        .map(|(_, p)| p);
+    assert_eq!(
+        after.map(|p| p.y.round()),
+        Some(before.y.round()),
+        "{:?}",
+        h.texts()
+    );
+}
+
+#[test]
+fn nothing_is_moved_while_a_line_has_something_typed_in_it_that_was_not_put_in() {
+    // By an arrow while it is not JSON (the line keeps its caret to be put right)...
+    let mut h = two_with_b();
+    type_over(&mut h, "  \"b\": 2", "\"b\": ");
+    enter(&mut h);
+    h.pause(0.2);
+    assert!(is_drawn_containing(&h, "Not valid JSON"), "{:?}", h.texts());
+    let arrow = h.app.tools.diff_arrow(0, Side::Right).unwrap();
+    h.click(arrow.x, arrow.y);
+    h.pause(0.3);
+    assert_eq!(
+        h.app.tools.box_text(Tool::Diff, "Right"),
+        r#"{"a":1,"b":3}"#
+    );
+    assert!(is_drawn_containing(&h, "Not valid JSON"), "{:?}", h.texts());
+
+    // ...and by a key, while it is typed and not put in.
+    let mut h = two_with_b();
+    type_over(&mut h, "  \"b\": 2", "\"b\": 9");
+    h.key(egui::Key::ArrowRight, egui::Modifiers::ALT);
+    h.pause(0.3);
+    assert_eq!(
+        h.app.tools.box_text(Tool::Diff, "Right"),
+        r#"{"a":1,"b":3}"#
+    );
+    assert_eq!(h.app.tools.box_text(Tool::Diff, "Left"), r#"{"a":1,"b":2}"#);
+    assert!(
+        is_drawn_containing(&h, "Editing line 3 of Left"),
+        "{:?}",
+        h.texts()
+    );
+    // Put in, it is what is moved by the key afterwards: b is 9 in Left now.
+    enter(&mut h);
+    wait_for(&mut h, "the new comparison", |h| {
+        is_drawn_containing(h, "Changed line 3")
+    });
+    assert_eq!(
+        as_json(&h.app.tools.box_text(Tool::Diff, "Left")),
+        serde_json::json!({"a": 1, "b": 9})
+    );
+}
+
+#[test]
+fn the_caret_goes_where_the_double_click_was() {
+    let mut h = two_with_b();
+    let line = rect_of(&h, "  \"b\": 2");
+    let glyph = line.width() / "  \"b\": 2".chars().count() as f32;
+    // Just before the 2 (the seventh character): what is typed goes in front of it.
+    h.double_click(line.min.x + 7.0 * glyph + 1.0, line.center().y);
+    h.type_text("1");
+    enter(&mut h);
+    wait_for(&mut h, "the new comparison", |h| {
+        is_drawn_containing(h, "Changed line 3")
+    });
+    assert_eq!(
+        as_json(&h.app.tools.box_text(Tool::Diff, "Left")),
+        serde_json::json!({"a": 1, "b": 12})
+    );
+    // Past the end of the line: at the end.
+    let line = rect_of(&h, "  \"b\": 12");
+    h.double_click(line.max.x + 40.0, line.center().y);
+    h.type_text("3");
+    enter(&mut h);
+    wait_for(&mut h, "the new comparison", |h| {
+        is_drawn_containing(h, "Changed line 3")
+    });
+    assert_eq!(
+        as_json(&h.app.tools.box_text(Tool::Diff, "Left")),
+        serde_json::json!({"a": 1, "b": 123})
+    );
+}
+
+#[test]
+fn a_line_that_is_scrolled_out_of_view_takes_what_was_typed_in_it() {
+    let numbers = |last: i32| {
+        let items: Vec<String> = (0..150)
+            .map(|n| {
+                if n == 149 {
+                    last.to_string()
+                } else {
+                    format!("{}", 1000 + n)
+                }
+            })
+            .collect();
+        format!("[{}]", items.join(","))
+    };
+    let mut h = compared_diff(&numbers(1), &numbers(2), "Changes (1)");
+    // Down to the last difference, and a caret in it with a number typed.
+    let next = command_button(&h, "⏷");
+    h.click(next.x, next.y);
+    type_over(&mut h, "  1", "7");
+    assert!(
+        is_drawn_containing(&h, "Editing line 151 of Left"),
+        "{:?}",
+        h.texts()
+    );
+    // The wheel takes the text far away from it: it is put in, as a click elsewhere would.
+    let header = rect_of(&h, "Left").center();
+    h.pointer(header.x + 200.0, header.y + 120.0);
+    h.frame_with(vec![egui::Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Point,
+        delta: egui::vec2(0.0, 6000.0),
+        phase: egui::TouchPhase::Move,
+        modifiers: egui::Modifiers::NONE,
+    }]);
+    h.settle();
+    wait_for(&mut h, "the new comparison", |h| {
+        is_drawn_containing(h, "Changed line 151")
+    });
+    let text = h.app.tools.box_text(Tool::Diff, "Left");
+    assert!(
+        as_json(&text).as_array().unwrap().last() == Some(&serde_json::json!(7)),
+        "{text}"
+    );
+}
+
+#[test]
+fn the_text_stays_scrolled_sideways_when_a_line_is_typed_over() {
+    let (x, y, z) = ("x".repeat(150), "y".repeat(150), "z".repeat(150));
+    let mut h = compared_diff(
+        &format!(r#"{{"a":"{x}","b":"{y}"}}"#),
+        &format!(r#"{{"a":"{x}","b":"{z}"}}"#),
+        "Changes (1)",
+    );
+    let line_a = format!("  \"a\": \"{x}\",");
+    let before = rect_of(&h, &line_a).min.x;
+    // The wheel, sideways, over the rows.
+    h.pointer(300.0, 200.0);
+    h.frame_with(vec![egui::Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Point,
+        delta: egui::vec2(-120.0, 0.0),
+        phase: egui::TouchPhase::Move,
+        modifiers: egui::Modifiers::NONE,
+    }]);
+    h.settle();
+    let scrolled = rect_of(&h, &line_a).min.x;
+    assert!(scrolled < before - 50.0, "scrolled: {before} to {scrolled}");
+
+    // Type over b (the end of its line is in view), as Right has it.
+    let line_b = format!("  \"b\": \"{y}\"");
+    let at = rect_of(&h, &line_b);
+    h.double_click(at.min.x + 250.0, at.center().y);
+    h.key(egui::Key::A, egui::Modifiers::COMMAND);
+    h.type_text(&format!("\"b\": \"{z}\""));
+    h.settle();
+    // (the text follows the caret to the end of what was typed)
+    let typing = rect_of(&h, &line_a).min.x;
+    assert!(
+        typing < scrolled,
+        "the caret is kept in sight: {scrolled} to {typing}"
+    );
+    enter(&mut h);
+    wait_for(&mut h, "the new comparison", |h| is_drawn(h, "same"));
+    let after = rect_of(&h, &line_a).min.x;
+    assert!(
+        (after - typing).abs() < 1.0,
+        "it is where it was scrolled to: {typing}, and now {after} (not {before})"
+    );
+}
+
+#[test]
+fn the_caret_goes_where_the_double_click_was_when_the_text_is_scrolled_sideways() {
+    let (x, y, z) = ("x".repeat(150), "y".repeat(150), "z".repeat(150));
+    let mut h = compared_diff(
+        &format!(r#"{{"a":"{x}","b":"{y}"}}"#),
+        &format!(r#"{{"a":"{x}","b":"{z}"}}"#),
+        "Changes (1)",
+    );
+    h.pointer(300.0, 200.0);
+    h.frame_with(vec![egui::Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Point,
+        delta: egui::vec2(-120.0, 0.0),
+        phase: egui::TouchPhase::Move,
+        modifiers: egui::Modifiers::NONE,
+    }]);
+    // (the wheel is eased in over some frames: let it come to rest)
+    h.pause(1.0);
+    let line_a = format!("  \"a\": \"{x}\",");
+    let line = rect_of(&h, &line_a);
+    assert!(line.min.x < 0.0, "the text is scrolled: {line:?}");
+    let glyph = line.width() / line_a.chars().count() as f32;
+    // Twenty characters into the line, which is twelve into the string.
+    h.double_click(line.min.x + 20.0 * glyph + 1.0, line.center().y);
+    h.type_text("1");
+    enter(&mut h);
+    wait_for(&mut h, "the new comparison", |h| {
+        is_drawn_containing(h, "Changed line 2")
+    });
+    let left = as_json(&h.app.tools.box_text(Tool::Diff, "Left"));
+    assert_eq!(
+        left["a"].as_str(),
+        Some(format!("{}1{}", "x".repeat(12), "x".repeat(138)).as_str())
+    );
+}
+
+#[test]
+fn the_text_stays_scrolled_sideways_when_a_difference_is_moved() {
+    let (x, y, z) = ("x".repeat(150), "y".repeat(150), "z".repeat(150));
+    let mut h = compared_diff(
+        &format!(r#"{{"a":"{x}","b":"{y}"}}"#),
+        &format!(r#"{{"a":"{x}","b":"{z}"}}"#),
+        "Changes (1)",
+    );
+    let line_a = format!("  \"a\": \"{x}\",");
+    let before = rect_of(&h, &line_a).min.x;
+    h.pointer(300.0, 200.0);
+    h.frame_with(vec![egui::Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Point,
+        delta: egui::vec2(-120.0, 0.0),
+        phase: egui::TouchPhase::Move,
+        modifiers: egui::Modifiers::NONE,
+    }]);
+    // (the wheel is eased in over some frames: let it come to rest)
+    h.pause(1.0);
+    let scrolled = rect_of(&h, &line_a).min.x;
+    assert!(scrolled < before - 50.0, "scrolled: {before} to {scrolled}");
+
+    let arrow = h.app.tools.diff_arrow(0, Side::Left).unwrap();
+    h.click(arrow.x, arrow.y);
+    wait_for(&mut h, "the new comparison", |h| is_drawn(h, "same"));
+    let after = rect_of(&h, &line_a).min.x;
+    assert!(
+        (after - scrolled).abs() < 1.0,
+        "it is where it was scrolled to: {scrolled}, and now {after} (not {before})"
+    );
+}
+
+#[test]
+fn the_two_arrows_of_a_difference_on_the_only_line_are_both_there_and_both_work() {
+    let mut h = compared_diff("5", "6", "Changes (1)");
+    let (up, down) = (
+        h.app.tools.diff_arrow(0, Side::Left).unwrap(),
+        h.app.tools.diff_arrow(0, Side::Right).unwrap(),
+    );
+    assert!((down.y - up.y - 17.0).abs() < 0.5, "{up:?} {down:?}");
+    h.click(down.x, down.y);
+    wait_for(&mut h, "the new comparison", |h| is_drawn(h, "same"));
+    assert_eq!(
+        as_json(&h.app.tools.box_text(Tool::Diff, "Right")),
+        serde_json::json!(5)
+    );
 }
 
 #[test]
@@ -3343,7 +4548,10 @@ fn a_problem_is_shown_in_the_main_window_only_for_the_document_that_is_open() {
 fn a_cancelled_job_is_not_shown_as_an_error_on_any_page() {
     for (tool, hint) in [
         (Tool::Format, "The formatted document appears here"),
-        (Tool::Diff, "What differs appears here"),
+        (
+            Tool::Diff,
+            "Put a document in both boxes to see what differs",
+        ),
         (Tool::Patch, "The patched document appears here"),
         (Tool::Validate, "What does not fit the schema appears here"),
     ] {

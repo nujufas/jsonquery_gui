@@ -2,9 +2,12 @@
 //! the window; "Open file…"; or "Open document", the document open in the main
 //! window. A file that fits is read into the box, where it can be edited; one too
 //! big for a text box (see [`TEXT_LIMIT`]) is not shown but read when the tool
-//! runs, and the open document is shared rather than copied. The text a move in
-//! the Diff page's side-by-side view makes, if too big for a text box too, is
-//! held without being shown ([`Operand::set_moved`]).
+//! runs, and the open document is shared rather than copied. The text a move, or a
+//! line typed over, in the Diff page's side-by-side view makes, if too big for a text
+//! box too, is held without being shown ([`Operand::set_moved`]). A document that one
+//! of those has changed remembers the file it came from, to be saved under its name
+//! and in its folder ([`Operand::save_name`]), and says that it is changed until it is
+//! saved.
 //!
 //! Format uses one box; Diff, Patch and Validate use two.
 
@@ -52,6 +55,10 @@ pub(super) struct Operand {
     /// The file that was read, if one was (and not an open document that has no
     /// file): what a save of the result is named after.
     file: Option<String>,
+    /// Where that file is, for the folder a save is offered in.
+    path: Option<PathBuf>,
+    /// A move or an edit changed the text and it has not been saved since.
+    changed: bool,
     /// Why the last file could not be used.
     problem: Option<String>,
     /// Whether the page can work on a document that is kept as its file, whatever
@@ -70,6 +77,8 @@ impl Operand {
             content: Content::Text,
             name: None,
             file: None,
+            path: None,
+            changed: false,
             problem: None,
             takes_documents_on_disk: false,
         }
@@ -105,6 +114,7 @@ impl Operand {
 
     /// What the box holds, in a few words ("orders.json", "(pasted JSON)"), when
     /// it holds a file or the open document and not text that was typed.
+    #[cfg(test)]
     pub fn label(&self) -> Option<&str> {
         self.name.as_deref()
     }
@@ -114,18 +124,87 @@ impl Operand {
         self.content = Content::Text;
         self.name = None;
         self.file = None;
+        self.path = None;
+        self.changed = false;
         self.problem = None;
     }
 
-    /// Put in the text a move made. One that is too big for a text box to edit
-    /// (see [`TEXT_LIMIT`]) is kept without being shown, and the box says so.
+    /// Put in the text a move, or a line typed over, made. One that is too big for a text box to edit
+    /// (see [`TEXT_LIMIT`]) is kept without being shown, and the box says so. The
+    /// document is still the one that came from its file — said to be changed, and
+    /// saved under that name — until the text is edited or put in anew.
     pub fn set_moved(&mut self, text: Arc<str>) {
+        let (name, file, path) = (self.name.take(), self.file.take(), self.path.take());
         if text.len() as u64 <= TEXT_LIMIT {
             self.set_text(&*text);
         } else {
             self.set_text(String::new());
             self.content = Content::Held(text);
         }
+        (self.name, self.file, self.path) = (name, file, path);
+        self.changed = true;
+    }
+
+    /// A move or an edit changed the document and it has not been saved since.
+    pub fn changed(&self) -> bool {
+        self.changed
+    }
+
+    /// What the box is called over it ("orders.json", "orders.json (changed)",
+    /// "(changed)"), when it is called anything.
+    pub fn heading(&self) -> Option<String> {
+        match (&self.name, self.changed) {
+            (Some(name), true) => Some(format!("{name} (changed)")),
+            (Some(name), false) => Some(name.clone()),
+            (None, true) => Some("(changed)".to_owned()),
+            (None, false) => None,
+        }
+    }
+
+    /// Whether the document is a text in the box (or one that is too big to show
+    /// that a move made), which a save can write. A file that was not read into the
+    /// box, and the open document, are as they are on disk and in the main window.
+    pub fn can_save(&self) -> bool {
+        match &self.content {
+            Content::Text => !self.text.trim().is_empty(),
+            Content::Held(_) => true,
+            Content::Big { .. } | Content::Open(_) => false,
+        }
+    }
+
+    /// What a save writes: the text of the box, or the text a move made.
+    pub fn text_to_save(&self) -> Option<Arc<str>> {
+        match &self.content {
+            Content::Text if !self.text.trim().is_empty() => Some(Arc::from(self.text.as_str())),
+            Content::Held(text) => Some(text.clone()),
+            _ => None,
+        }
+    }
+
+    /// The file name a save offers: the file the document came from, or `fallback`.
+    pub fn save_name(&self, fallback: &str) -> String {
+        self.file.clone().unwrap_or_else(|| fallback.to_owned())
+    }
+
+    /// The folder a save is offered in: the one the file the document came from is in.
+    pub fn save_folder(&self) -> Option<&Path> {
+        self.path.as_deref().and_then(Path::parent)
+    }
+
+    /// Make the text in the box the file at `path`, as if it had been read from it (for
+    /// the tests, which have no file to read).
+    #[cfg(test)]
+    pub fn pretend_read_from(&mut self, path: &Path) {
+        self.saved_as(path);
+    }
+
+    /// The document was written to `path`: it is that file now, and not changed.
+    pub fn saved_as(&mut self, path: &Path) {
+        let name = file_name(path);
+        self.name = Some(name.clone());
+        self.file = Some(name);
+        self.path = Some(path.to_owned());
+        self.changed = false;
     }
 
     #[cfg(test)]
@@ -169,6 +248,8 @@ impl Operand {
             };
             self.name = Some(name.clone());
             self.file = Some(name);
+            self.path = Some(path.to_owned());
+            self.changed = false;
             self.problem = None;
             return;
         }
@@ -182,6 +263,7 @@ impl Operand {
                 self.set_text(text);
                 self.name = Some(name.clone());
                 self.file = Some(name);
+                self.path = Some(path.to_owned());
             }
             Err(e) => self.problem = Some(format!("Could not read {name}: {e}")),
         }
@@ -218,6 +300,11 @@ impl Operand {
             DocumentSource::File(path) => Some(file_name(path)),
             _ => None,
         };
+        self.path = match &doc.source {
+            DocumentSource::File(path) => Some(path.clone()),
+            _ => None,
+        };
+        self.changed = false;
         self.content = Content::Open(doc);
         self.problem = None;
     }
@@ -228,6 +315,8 @@ impl Operand {
         std::mem::swap(&mut self.content, &mut other.content);
         std::mem::swap(&mut self.name, &mut other.name);
         std::mem::swap(&mut self.file, &mut other.file);
+        std::mem::swap(&mut self.path, &mut other.path);
+        std::mem::swap(&mut self.changed, &mut other.changed);
         std::mem::swap(&mut self.problem, &mut other.problem);
     }
 
@@ -244,6 +333,8 @@ impl Operand {
                 if text_box(ui, self.id, &mut self.text, self.hint, None, accent) {
                     self.name = None;
                     self.file = None;
+                    self.path = None;
+                    self.changed = false;
                     self.problem = None;
                     changed = true;
                 }
@@ -318,8 +409,8 @@ impl Operand {
                     if let Some(problem) = &self.problem {
                         ui.add(egui::Label::new(RichText::new(problem).color(ERROR)).truncate())
                             .on_hover_text(problem);
-                    } else if let Some(name) = &self.name {
-                        ui.add(egui::Label::new(RichText::new(name).weak()).truncate())
+                    } else if let Some(name) = self.heading() {
+                        ui.add(egui::Label::new(RichText::new(&name).weak()).truncate())
                             .on_hover_text(name);
                     }
                 });
@@ -426,18 +517,79 @@ mod tests {
         assert_eq!(o.label(), Some("a.json"));
         o.set_moved(Arc::from("[2]"));
         assert_eq!(o.text(), "[2]");
-        assert_eq!(o.label(), None, "no longer the file");
         assert!(matches!(o.input(), Some(Input::Text(text)) if text == "[2]"));
+        // Still called by the file it came from, and said to be changed.
+        assert_eq!(o.label(), Some("a.json"));
+        assert!(o.changed());
+        assert_eq!(o.heading().as_deref(), Some("a.json (changed)"));
 
         let big: Arc<str> = Arc::from(format!("[{}]", "1,".repeat(TEXT_LIMIT as usize) + "1"));
         o.set_moved(big.clone());
         assert!(!o.is_empty());
         assert_eq!(o.text().len(), big.len());
         assert!(matches!(o.input(), Some(Input::Text(text)) if text.len() == big.len()));
+        assert!(
+            o.changed(),
+            "a document that was held unseen is changed too"
+        );
+        assert_eq!(o.label(), Some("a.json"));
         // Clearing empties it, and typing goes in the text box again.
         o.clear();
         assert!(o.is_empty());
         assert!(o.input().is_none());
+        assert!(!o.changed());
+        assert_eq!(o.heading(), None);
+    }
+
+    #[test]
+    fn a_document_that_a_move_changed_is_saved_where_and_as_it_was_and_then_is_unchanged() {
+        let mut o = operand();
+        let dir = temp_dir("saved");
+        let path = dir.join("orders.json");
+        std::fs::write(&path, "[1]").unwrap();
+        o.load_file(&path);
+        assert!(o.can_save(), "text in the box can be written");
+        assert!(!o.changed());
+        o.set_moved(Arc::from("[2]"));
+        // Offered in its folder, under its name.
+        assert_eq!(o.save_folder(), Some(&*dir));
+        assert_eq!(o.save_name("left.json"), "orders.json");
+        assert_eq!(o.text_to_save().as_deref(), Some("[2]"));
+        o.saved_as(&path);
+        assert!(!o.changed());
+        assert_eq!(o.heading().as_deref(), Some("orders.json"));
+
+        // Typed text has no file: the fallback name, no folder, nothing changed.
+        let mut typed = operand();
+        typed.set_text("[3]");
+        assert_eq!(typed.save_name("right.json"), "right.json");
+        assert_eq!(typed.save_folder(), None);
+        assert_eq!(typed.text_to_save().as_deref(), Some("[3]"));
+        // A move gives it no name either, but says it is changed.
+        typed.set_moved(Arc::from("[4]"));
+        assert_eq!(typed.heading().as_deref(), Some("(changed)"));
+        assert_eq!(typed.save_name("right.json"), "right.json");
+        // Typing in it again is a new text: not changed, and no longer anyone's file.
+        o.set_text("[5]");
+        assert_eq!(o.save_name("left.json"), "left.json");
+        assert!(!o.changed());
+    }
+
+    #[test]
+    fn what_is_not_text_in_the_box_is_not_saved_from_here() {
+        let mut o = operand();
+        assert!(!o.can_save(), "an empty box");
+        assert!(o.text_to_save().is_none());
+        let dir = temp_dir("big-not-saved");
+        let path = dir.join("big.json");
+        let big = format!("[{}]", "1,".repeat(TEXT_LIMIT as usize) + "1");
+        std::fs::write(&path, &big).unwrap();
+        o.load_file(&path);
+        assert!(
+            !o.can_save(),
+            "a file that is read when the tool runs is on disk as it is"
+        );
+        assert!(o.text_to_save().is_none());
     }
 
     #[test]

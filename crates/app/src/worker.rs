@@ -1370,6 +1370,7 @@ mod tests {
                     left: jobs::Input::Text("[1]".to_owned()),
                     right: jobs::Input::Text("[2]".to_owned()),
                     take: None,
+                    edit: None,
                 },
                 gen: 1,
                 cancel: Arc::new(AtomicBool::new(true)),

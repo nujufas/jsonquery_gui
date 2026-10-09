@@ -159,9 +159,11 @@ tabs in the command row:
 - **Documents** — the two documents next to each other, to type, paste, drop or
   open (the same box as the other pages). **Compare** (Ctrl+Enter) runs the
   comparison and opens the next view by itself; **Swap** exchanges the two and
-  goes back here.
-- **Side by side** — the two documents, left and right, line by line, and
-  read-only. What both have is on one line on both sides; what only one has
+  goes back here. Compare need not be pressed to look at a comparison: the tab
+  of Side by side, Changes or Patch compares the two documents when it is
+  pressed and nothing has been compared (and says so if a document is missing).
+- **Side by side** — the two documents, left and right, line by line. What both
+  have is on one line on both sides; what only one has
   is **red** on the left (removed) or **green** on the right (added), with a blank
   on the other side; what changed is **amber** on both, with the characters that
   differ picked out. The two sides scroll together (one scroll bar, and a bar
@@ -170,9 +172,14 @@ tabs in the command row:
   drag it to go there. **⏶** and **⏷** (Alt+Up and Alt+Down) go to the previous and
   next difference, and the status bar says which ("Difference 2 of 5").
   **Differences only** folds what is the same into a line ("… 23 lines are the
-  same"), keeping three lines around each difference. Click a difference to copy
-  its path. **⏴** and **⏵** move the picked difference into the other document
-  (see [Moving a difference](#moving-a-difference)).
+  same"), keeping three lines around each difference. Between the two sides each
+  difference has two **arrows**, one over the other, at its first line, that move
+  it into the document they point at; a click **picks** a line, so that only the
+  lines picked are moved, and the right-click menu of a line has Move and Copy
+  path (see [Moving a difference](#moving-a-difference)). A **double click** puts a
+  caret in the line, on either side, to **type over it** (see
+  [Typing over a line](#typing-over-a-line)). **⏴** and **⏵** in the command row
+  move what is picked, and each column has a **Save…** for its document.
 - **Changes** — a list of what was **Added**, **Removed** or **Changed**, each
   with the JSON Pointer to it, and the value (or both values) at the right.
   Click a row to copy its path; hover for the whole of a long value.
@@ -187,25 +194,88 @@ view, and take the whole patch.
 
 A difference can be moved from one document into the other, so that the two come
 to agree there — what a file-comparison tool calls copying to the left or to the
-right. Pick one in the Side by side view (click its lines, or step to it with
-**⏶** and **⏷**) and press **⏴** (Alt+Left) to move it to the left, so that Left
-takes what Right has there, or **⏵** (Alt+Right) to move it to the right, so that
-Right takes what Left has there. The right-click menu of a difference's lines
-has the same two choices and needs nothing picked first.
+right. At the first line of every difference in the Side by side view are two
+arrows between the documents, one over the other: press the upper one, which points
+to the left, and Left takes what Right has there, press the lower one and Right
+takes what Left has there. (A difference that is taller than the window keeps its
+arrows at the top of what is in view.)
 
-What is moved is a difference as the view shows it: lines that differ and touch
-are one. A value that only one side has is put into the other document (at its
-place in an array, after the member before it in an object) or, going the other
-way, taken out of it; a value that is not the same on both sides is replaced by
-the other side's. Everything else stays as it was.
+**Moving only some lines.** A difference can be several lines — a run of values
+that changed, one after the other — and a click on a line **picks** it: it has the
+selection colour over it and the status bar says "1 line picked". **Ctrl** (Command)
+adds a line to those picked, or takes it away if it is picked; **Shift** picks all
+from the line clicked last to this one; dragging over lines picks them; clicking a
+line that is the same on both sides, or pressing **Esc**, lets go of them all.
+Then the arrows of a difference move only the lines picked in it (their hover text
+says so: "Move the picked lines to the left"), and so do **⏴** (Alt+Left) and
+**⏵** (Alt+Right) in the command row — all the lines picked, in every difference —
+and **Move to the left** / **Move to the right** in the right-click menu of a
+line (a line that is not picked is picked first, so the menu is for it alone; one
+that is picked, for all that are). With nothing picked, an arrow moves its whole
+difference, and the buttons and keys move the difference that **⏶** / **⏷** went
+to (stepping to a difference lets go of the lines picked). A value is picked whole,
+whatever its lines: the lines of an object that only one side has are one value,
+and half of an object is no JSON.
+
+What is moved is a difference as the view shows it: a value that only one side has
+is put into the other document (at its place in an array, after the member before it
+in an object) or, going the other way, taken out of it; a value that is not the
+same on both sides is replaced by the other side's. Everything else stays as it
+was.
 
 The document that changed is written back into its box, pretty-printed with two
-spaces to a level; its members keep their order and its numbers their spelling,
-and the box is no longer called by the file it was read from — the file itself is
-never touched. The other document is not changed. The comparison then runs again
-and the view goes on to the next difference, so pressing **⏵** over and over
-walks through the whole comparison, and a document that was NDJSON comes back as
-one array.
+spaces to a level; its members keep their order and its numbers their spelling.
+It is still called by the file it was read from, with **(changed)** after the name
+over its column and in its box's header, until it is saved or its text is put in
+anew; the file itself is never touched by a move. The other document is not
+changed. The comparison then runs again and the view stays where it was: it does not
+go on to the next difference by itself, and nothing is picked. The lines under the
+difference that was moved are where they were (higher only by the lines the move took
+out); **⏷** (Alt+Down) goes to the next difference, from the top of what is in view,
+when you want it. A document that was NDJSON comes back as one array.
+
+### Typing over a line
+
+Either column can be edited in place, like the two panes of a file-comparison tool.
+**Double-click** a line and a caret is in it, on the side that was clicked: type, and
+press **Enter** — or click somewhere else — to put it in; **Esc** puts the line back
+as it was. (A single click only picks the line, as above, so that several can be
+picked; the first click of the double click picks it too. **Ctrl** and **Shift** with
+the double click are two picks and no caret.) What is typed takes the place of the
+member or the element that was on the line, and has to be JSON where it is:
+
+- a value, or `"name": value` — the value of a member, or its name, or both, or an
+  element; a value can be an object or an array, typed on one line;
+- nothing — the line goes (an object left with no members, or an array with no
+  elements, is `{}` or `[]`);
+- several, with commas between — `"b": 2, "c": 3` puts both in where the one was;
+- on a line that opens an object or an array (`"address": {`), only the name can be
+  changed, and the `{` or `[` has to stay at the end.
+
+Anything else is not taken: the status bar says what is wrong ("Not valid JSON:
+expected value (at character 9)", "There already is a member called "a" here") and
+the line keeps its caret to be put right. A line that closes an object or an array,
+the first line of a document, and a line the view cut short (over 400 characters)
+have no caret — the last says so; the Documents page has all of it.
+
+The change is made to the document itself, not to the lines of the view: the members
+of the right document stay in the order it has them (the view shows them in the left
+one's), and a number keeps its spelling. As after a move, the document that changed
+is written back into its box, pretty-printed, called by the file it was read from
+with **(changed)** after the name until it is saved; the comparison runs again, the
+view stays where it was, and the status bar says what was done ("Changed line 3 of
+the left document"). A line that is typed over only on one side is a difference
+between the two, like any other.
+
+**Saving.** Either or both of the documents may have been changed — by a move or by
+typing — and each column has a **Save…** (in bold while its document is changed) that asks where to write it,
+proposing the name of the file it came from and that file's folder, or `left.json`
+/ `right.json` for a text that came from nowhere. The file it writes holds the text
+as it is in the box (for a changed document, as pretty-printed above); once it is
+written the document is that file, no longer changed. A document that was not read
+into its box — a file too big for a text box, which is read when the tool runs, or
+the open document — is as it is on disk, and its Save… is dim until a move has
+changed it.
 
 A text box can only edit about a megabyte, so a document that comes out bigger
 than that is not shown: its box says "Too big to show" and holds it as it is, to

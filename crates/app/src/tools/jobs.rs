@@ -20,6 +20,7 @@ use jsonquery_query::reformat::{self, Indent};
 use jsonquery_query::{patch, schema};
 use serde_json::Value;
 
+use super::line_edit::{self, Edit};
 use crate::app::human_bytes;
 use crate::settings::FileLimits;
 
@@ -177,11 +178,13 @@ pub enum Job {
     },
     /// The patch it makes turns the left document into the right one. With
     /// `take`, some differences are first moved from one document into the
-    /// other, and what is left of them is what is compared.
+    /// other, and with `edit` a line of one of them is first changed; what is left
+    /// of the differences is what is compared.
     Diff {
         left: Input,
         right: Input,
         take: Option<Take>,
+        edit: Option<Edit>,
     },
     Patch {
         document: Input,
@@ -202,9 +205,10 @@ pub enum Job {
 /// for.
 #[derive(Clone, Debug)]
 pub struct Take {
-    /// The numbers of the differences, as the rows of the view carry them (see
-    /// `diff::take_changes`).
-    pub changes: Range<u32>,
+    /// The numbers of the differences, as the rows of the view carry them, in runs
+    /// (see `diff::take_selected`): a whole difference of the view is one run, the
+    /// lines that were picked out of one or of several are as many as they need.
+    pub changes: Vec<Range<u32>>,
     /// The document that takes them in.
     pub into: Side,
 }
@@ -340,7 +344,12 @@ fn run_job(job: Job, cancel: &AtomicBool, limits: &FileLimits) -> anyhow::Result
                 streamed: None,
             }))
         }
-        Job::Diff { left, right, take } => {
+        Job::Diff {
+            left,
+            right,
+            take,
+            edit,
+        } => {
             check_size(&[&left, &right], limits)?;
             let first = left.load(limits).context("Left")?;
             let second = right.load(limits).context("Right")?;
@@ -348,11 +357,29 @@ fn run_job(job: Job, cancel: &AtomicBool, limits: &FileLimits) -> anyhow::Result
             let merged: Value;
             let (mut before, mut after) = (first.held.value(), second.held.value());
             let mut moved = None;
-            if let Some(take) = take {
-                merged = diff::take_changes(before, after, take.changes, take.into, cancel)
-                    .map_err(|_| anyhow::anyhow!("cancelled"))?;
+            // One document changed: by moving differences into it from the other, or by
+            // changing a line of it.
+            let changed = match (take, edit) {
+                (Some(take), _) => Some((
+                    take.into,
+                    diff::take_selected(before, after, &take.changes, take.into, cancel)
+                        .map_err(|_| anyhow::anyhow!("cancelled"))?,
+                )),
+                (None, Some(edit)) => {
+                    let own = match edit.into {
+                        Side::Left => before,
+                        Side::Right => after,
+                    };
+                    let value =
+                        line_edit::apply(own.clone(), &edit).map_err(|e| anyhow::anyhow!("{e}"))?;
+                    Some((edit.into, value))
+                }
+                (None, None) => None,
+            };
+            if let Some((into, value)) = changed {
+                merged = value;
                 let text = reformat::render(&merged, &reformat::Options::default());
-                let kept = match take.into {
+                let kept = match into {
                     Side::Left => second.bytes,
                     Side::Right => first.bytes,
                 };
@@ -360,7 +387,7 @@ fn run_job(job: Job, cancel: &AtomicBool, limits: &FileLimits) -> anyhow::Result
                     bail!(
                         "the {} document would be {}, which with the other is over the {} \
                          these tools can take — they work in memory",
-                        match take.into {
+                        match into {
                             Side::Left => "Left",
                             Side::Right => "Right",
                         },
@@ -368,12 +395,12 @@ fn run_job(job: Job, cancel: &AtomicBool, limits: &FileLimits) -> anyhow::Result
                         human_bytes(limits.tools())
                     );
                 }
-                match take.into {
+                match into {
                     Side::Left => before = &merged,
                     Side::Right => after = &merged,
                 }
                 moved = Some(Moved {
-                    into: take.into,
+                    into,
                     text: text.into(),
                 });
             }
@@ -595,6 +622,7 @@ mod tests {
 
     use serde_json::json;
 
+    use super::line_edit::Fragment;
     use super::*;
     use crate::scratch_dir::{ScratchDir, ScratchFile};
 
@@ -652,6 +680,7 @@ mod tests {
             left: Input::Document(lazy_document("lazy-diff")),
             right: text("[1]"),
             take: None,
+            edit: None,
         })
         .err()
         .expect("refused");
@@ -711,6 +740,7 @@ mod tests {
                 left: Input::File(path.to_path_buf()),
                 right: text("[1]"),
                 take: None,
+                edit: None,
             },
             &limits,
         ) else {
@@ -904,6 +934,7 @@ mod tests {
             left: Input::File(a),
             right: Input::File(b),
             take: None,
+            edit: None,
         }) else {
             panic!("should be refused")
         };
@@ -949,6 +980,7 @@ mod tests {
             left: text(r#"{"a":1,"b":[1,2,3]}"#),
             right: text(r#"{"a":2,"b":[1,3],"c":true}"#),
             take: None,
+            edit: None,
         }) else {
             panic!("should compare")
         };
@@ -969,14 +1001,46 @@ mod tests {
 
     /// A comparison of `left` and `right` that first moves `changes` into `into`.
     fn compared_after_moving(left: &str, right: &str, changes: Range<u32>, into: Side) -> Compared {
+        compared_after_moving_some(left, right, vec![changes], into)
+    }
+
+    /// The same for differences that are not one run.
+    fn compared_after_moving_some(
+        left: &str,
+        right: &str,
+        changes: Vec<Range<u32>>,
+        into: Side,
+    ) -> Compared {
         let Ok(Outcome::Diff(d)) = go(Job::Diff {
             left: text(left),
             right: text(right),
             take: Some(Take { changes, into }),
+            edit: None,
         }) else {
             panic!("should compare")
         };
         d
+    }
+
+    #[test]
+    fn lines_picked_out_of_a_difference_are_moved_and_the_rest_of_it_stays() {
+        // Three changes in a row, so that they are one block of the view; the first and
+        // the last are picked.
+        let (left, right) = (r#"{"a":1,"b":2,"c":3}"#, r#"{"a":9,"b":8,"c":7}"#);
+        let d = compared_after_moving_some(left, right, vec![0..1, 2..3], Side::Left);
+        let moved = d.moved.expect("the left document was changed");
+        assert_eq!(moved.into, Side::Left);
+        assert_eq!(
+            serde_json::from_str::<Value>(&moved.text).unwrap(),
+            json!({"a": 9, "b": 2, "c": 7})
+        );
+        assert_eq!(
+            (d.added, d.removed, d.changed),
+            (0, 0, 1),
+            "only b is left to compare"
+        );
+        assert_eq!(d.changes.len(), 1);
+        assert_eq!(d.changes[0].path, "/b");
     }
 
     #[test]
@@ -1013,12 +1077,109 @@ mod tests {
         assert_eq!(&*d.patch, "[]");
     }
 
+    fn compared_after_typing(left: &str, right: &str, edit: Edit) -> Result<Compared, String> {
+        match go(Job::Diff {
+            left: text(left),
+            right: text(right),
+            take: None,
+            edit: Some(edit),
+        })? {
+            Outcome::Diff(d) => Ok(d),
+            _ => panic!("a comparison"),
+        }
+    }
+
+    fn typed(into: Side, path: &[&str], fragment: Fragment) -> Edit {
+        Edit {
+            into,
+            path: path
+                .iter()
+                .map(|step| match step.parse::<usize>() {
+                    Ok(index) => line_edit::Step::Index(index),
+                    Err(_) => line_edit::Step::Key((*step).to_owned()),
+                })
+                .collect(),
+            fragment,
+        }
+    }
+
+    #[test]
+    fn a_line_typed_over_changes_one_document_and_compares_again() {
+        let (left, right) = (r#"{"a":1,"b":2}"#, r#"{"a":1,"b":3}"#);
+        let put = Fragment::Members(vec![("b".to_owned(), json!(3))]);
+        let d = compared_after_typing(left, right, typed(Side::Left, &["b"], put)).unwrap();
+        let moved = d.moved.expect("the left document was changed");
+        assert_eq!(moved.into, Side::Left);
+        assert_eq!(
+            serde_json::from_str::<Value>(&moved.text).unwrap(),
+            json!({"a": 1, "b": 3})
+        );
+        assert!(moved.text.contains("\n  \"b\": 3"), "written out in full");
+        assert!(d.equal, "what was typed is what is compared");
+
+        // The right document, and an element of an array in it.
+        let (left, right) = (r#"{"l":[1,2,3]}"#, r#"{"l":[1,2,3]}"#);
+        let put = Fragment::Elements(vec![json!(20), json!(21)]);
+        let d = compared_after_typing(left, right, typed(Side::Right, &["l", "1"], put)).unwrap();
+        let moved = d.moved.expect("the right document was changed");
+        assert_eq!(moved.into, Side::Right);
+        assert_eq!(
+            serde_json::from_str::<Value>(&moved.text).unwrap(),
+            json!({"l": [1, 20, 21, 3]})
+        );
+        assert_eq!(
+            (d.added, d.removed, d.changed),
+            (1, 0, 1),
+            "20 for 2, and 21 added"
+        );
+    }
+
+    #[test]
+    fn a_line_typed_over_a_document_that_is_not_the_one_that_was_compared_is_refused() {
+        let put = Fragment::Members(vec![("b".to_owned(), json!(3))]);
+        let said = compared_after_typing("{\"a\":1}", "{}", typed(Side::Left, &["b"], put))
+            .err()
+            .expect("there is no b to type over");
+        assert!(
+            said.contains("not as it was when it was compared"),
+            "{said}"
+        );
+        let said = compared_after_typing(
+            "{\"a\":1,\"b\":2}",
+            "{}",
+            typed(Side::Left, &["a"], Fragment::Rename("b".to_owned())),
+        )
+        .err()
+        .expect("b is taken");
+        assert!(said.contains("already is a member"), "{said}");
+    }
+
+    #[test]
+    fn a_line_typed_over_that_makes_a_document_too_big_is_refused_like_a_move() {
+        let limits = limits_with(&[(crate::settings::Limit::Tools, 64)]);
+        let big = "x".repeat(200);
+        let put = Fragment::Members(vec![("a".to_owned(), json!(big))]);
+        let Err(said) = go_with(
+            Job::Diff {
+                left: text(r#"{"a":1}"#),
+                right: text(r#"{"a":2}"#),
+                take: None,
+                edit: Some(typed(Side::Left, &["a"], put)),
+            },
+            &limits,
+        ) else {
+            panic!("a job over the limit is refused")
+        };
+        assert!(said.contains("these tools can take"), "{said}");
+    }
+
     #[test]
     fn a_comparison_without_a_move_has_nothing_to_put_back() {
         let Ok(Outcome::Diff(d)) = go(Job::Diff {
             left: text("[1]"),
             right: text("[2]"),
             take: None,
+            edit: None,
         }) else {
             panic!("should compare")
         };
@@ -1046,6 +1207,7 @@ mod tests {
             left: text(r#"{"a":1,"b":2}"#),
             right: text(r#"{"b":2,"a":1}"#),
             take: None,
+            edit: None,
         }) else {
             panic!("should compare")
         };
@@ -1059,6 +1221,7 @@ mod tests {
             left: text("[1]"),
             right: text("[1,"),
             take: None,
+            edit: None,
         }) else {
             panic!("should fail")
         };

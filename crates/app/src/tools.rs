@@ -34,6 +34,7 @@
 mod diff;
 mod format;
 pub(crate) mod jobs;
+pub(crate) mod line_edit;
 mod merge;
 mod operand;
 mod patch;
@@ -309,6 +310,10 @@ impl Tools {
         {
             self.shared
                 .say(tool, format!("Saved to {}", path.display()), false);
+            // A document of the Diff page is that file now, and is no longer changed.
+            if tool == Tool::Diff {
+                self.diff.saved(path);
+            }
         }
     }
 
@@ -317,7 +322,28 @@ impl Tools {
         if let Some((tool, _)) = self.shared.saving.take() {
             self.shared
                 .say(tool, format!("Could not save: {error}"), true);
+            if tool == Tool::Diff {
+                self.diff.save_failed();
+            }
         }
+    }
+
+    /// Where the arrow of difference `block` of the Diff page's side-by-side view that
+    /// points to `into` was drawn at the last frame.
+    #[cfg(test)]
+    pub fn diff_arrow(
+        &self,
+        block: usize,
+        into: jsonquery_query::diff::Side,
+    ) -> Option<egui::Pos2> {
+        self.diff.arrow(block, into)
+    }
+
+    /// Make the dialogs that ask where a document of the Diff page is saved answer
+    /// `path` (or be cancelled), in this thread.
+    #[cfg(test)]
+    pub fn answer_save_dialogs_with(&self, path: Option<PathBuf>) {
+        diff::tests::answer_save_dialogs_with(path);
     }
 
     /// The window the page is shown in. The same every frame it is open: egui
