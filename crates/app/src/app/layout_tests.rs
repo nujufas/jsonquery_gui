@@ -2177,6 +2177,62 @@ fn merging_two_files_and_opening_the_result_in_the_main_window() {
 }
 
 #[test]
+fn a_merge_result_as_big_as_files_are_kept_on_disk_from_is_kept_in_a_temporary_file() {
+    let mut h = Harness::new();
+    // About 5 KB pretty-printed (a line to an item): far under what a file is
+    // kept on disk from, and over 2 KB.
+    let a = temp_json("big_a.json", &format!("[{}1]", "1,".repeat(1000)));
+    let b = temp_json("big_b.json", "[2]");
+    let ctx = h.ctx.clone();
+    h.app
+        .tools
+        .add_files(&ctx, vec![a.to_path_buf(), b.to_path_buf()]);
+    h.settle();
+
+    // As the limits are, it is a value in memory, and the status bar says only
+    // what it was made from.
+    press(&mut h, "Merge");
+    wait_for(&mut h, "the merge", |h| {
+        is_drawn_containing(h, "Merged 2 files")
+    });
+    assert!(
+        !is_drawn_containing(&h, "temporary file"),
+        "{:?}",
+        h.texts()
+    );
+
+    // Kept on disk from 2 KB, the same merge is a file, and says so.
+    open_settings(&mut h);
+    set_limit(&mut h, Limit::KeepOnDisk, "2 KB");
+    let current = h.app.settings;
+    h.app.settings_window.close(&current);
+    h.settle();
+    press(&mut h, "Merge");
+    wait_for(&mut h, "the merge, kept in a file", |h| {
+        is_drawn_containing(h, "kept in a temporary file")
+    });
+    assert!(is_drawn_containing(&h, "Merged 2 files"), "{:?}", h.texts());
+    assert!(
+        is_drawn_containing(&h, "array · 1002 items"),
+        "and still says what it is: {:?}",
+        h.texts()
+    );
+    assert!(h.app.doc.is_none(), "nothing is opened until asked");
+
+    // The main window gets the file, as it would a big one opened from disk.
+    press(&mut h, "Open in main window");
+    let doc = h.app.doc.clone().expect("the merge opened");
+    assert!(doc.is_lazy(), "kept as its file, not parsed");
+    assert!(
+        doc.byte_len > 2048,
+        "the size of the result: {}",
+        doc.byte_len
+    );
+    assert_eq!(doc.source.label(), "(merged from 2 files)");
+    assert_eq!(h.app.source_input, "", "nothing to reload from the field");
+}
+
+#[test]
 fn a_failed_merge_says_why_and_editing_the_files_clears_it() {
     let mut h = Harness::new();
     let a = temp_json("fail_a.json", "[1]");

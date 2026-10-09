@@ -164,7 +164,8 @@ impl Limit {
                 "A file this big or bigger is not loaded into memory: it is memory-mapped, \
                  indexed once and read from the disk as you look at it. A smaller one is \
                  loaded and parsed, which is quicker but takes about twelve times its size in \
-                 memory. Applies to the next file you open."
+                 memory. A download, or the result of a merge, this big is kept in a temporary \
+                 file in the same way. Applies to the next file you open."
             }
             Limit::Download => {
                 "The most that is read from a web address or from a pipe (such as standard \

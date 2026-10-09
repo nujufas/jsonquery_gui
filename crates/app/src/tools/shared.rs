@@ -72,6 +72,9 @@ pub(super) struct Env<'a> {
     /// The most the tools take, all of a job's documents together: the user's
     /// limit (`settings.rs`).
     pub tool_bytes: u64,
+    /// From what size a result is kept on disk, in a temporary file, and not in
+    /// memory: the user's limit on keeping a file on disk (`settings.rs`).
+    pub keep_bytes: u64,
     pub shared: &'a mut Shared,
 }
 

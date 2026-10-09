@@ -456,7 +456,7 @@ impl App {
         let ctx = egui_ctx.clone();
         worker::spawn(cmd_rx, evt_tx, settings.limits, move || wake_windows(&ctx));
         let mut tools = Tools::default();
-        tools.use_limit(settings.limits.tools());
+        tools.use_limits(&settings.limits);
 
         Self {
             cmd_tx,
@@ -1521,7 +1521,7 @@ impl App {
         }
         self.settings = settings;
         self.save_settings();
-        self.tools.use_limit(self.settings.limits.tools());
+        self.tools.use_limits(&self.settings.limits);
         let _ = self.cmd_tx.send(Command::UseLimits(self.settings.limits));
     }
 

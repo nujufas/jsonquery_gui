@@ -201,8 +201,13 @@ pub struct MergedFile {
 /// A finished merge: the merged document (ready to open or save), what went in
 /// and a bounded text preview of what came out.
 pub struct MergeOutcome {
+    /// The merged document. In memory, unless the result is as big as a file is
+    /// kept on disk from (`FileLimits::keep_on_disk`): then it is the temporary
+    /// file the result was written to, memory-mapped (see `keep_merged`).
     pub doc: Arc<Document>,
     pub files: Vec<MergedFile>,
+    /// What the files add up to, in bytes.
+    pub input_bytes: u64,
     /// How many outputs the filter produced (more than one are put in an array).
     pub outputs: usize,
     pub preview: String,
@@ -430,8 +435,9 @@ pub fn spawn(
                     gen,
                     cancel,
                 } => {
-                    let result = merge_files(&paths, &filter, &cancel, &limits)
-                        .map_err(|e| format!("{e:#}"));
+                    let result =
+                        merge_files(&paths, &filter, &cancel, &limits, &std::env::temp_dir())
+                            .map_err(|e| format!("{e:#}"));
                     send(&evt_tx, Event::MergeDone { gen, result }, &wake);
                 }
                 Command::Tool {
@@ -489,12 +495,15 @@ pub fn spawn(
 
 /// Read `paths` and run the merge `filter` over them. The files are read one
 /// after the other with the ordinary loader, so a file of several top-level
-/// values (NDJSON) counts as one array, as it does when opened on its own.
+/// values (NDJSON) counts as one array, as it does when opened on its own. A
+/// result as big as a file is kept on disk from is written to a temporary file
+/// in `spill_dir` and kept there (see [`keep_merged`]).
 fn merge_files(
     paths: &[PathBuf],
     filter: &str,
     cancel: &AtomicBool,
     limits: &FileLimits,
+    spill_dir: &Path,
 ) -> anyhow::Result<MergeOutcome> {
     let start = Instant::now();
     let total = paths
@@ -552,23 +561,108 @@ fn merge_files(
         inputs.push(root);
     }
 
-    let merged = merge::merge(inputs, &names, filter, cancel)?;
-    let (preview, preview_truncated) =
-        jsonquery_core::pretty_print_bounded(&merged.value, MERGE_PREVIEW_NODES);
-    let doc = Document::from_value(
-        merged.value,
+    let merge::Merged { value, outputs } = merge::merge(inputs, &names, filter, cancel)?;
+    let doc = keep_merged(
+        value,
         DocumentSource::Merged(paths.to_vec()),
         total,
         read_time,
-    );
+        cancel,
+        spill_dir,
+        limits,
+    )?;
+    let (preview, preview_truncated) = bounded_text(doc.root(), MERGE_PREVIEW_NODES);
     Ok(MergeOutcome {
         doc: Arc::new(doc),
         files,
-        outputs: merged.outputs,
+        input_bytes: total,
+        outputs,
         preview,
         preview_truncated,
         elapsed: start.elapsed(),
     })
+}
+
+/// The document a merge's `value` is. Written out as Save… writes it
+/// (pretty-printed), a result of as many bytes as a file is kept on disk from
+/// (`limits`; 256 MB unless the user changed it) or more is always written to a
+/// temporary file in `spill_dir` and kept there: the value is let go of, and the
+/// document is that file, memory-mapped and indexed as a file of that size is when
+/// it is opened, not parsed (a tree of it would take a dozen times its size).
+/// What the Merge page shows, saves and opens in the main window is then read from
+/// the file. A smaller result stays the value it is, in memory.
+///
+/// The temporary file has no name from the moment it is made, so nothing of it can
+/// be left behind whatever happens, and the document has it for as long as it
+/// lives (see [`create_spill_file`]).
+fn keep_merged(
+    value: serde_json::Value,
+    source: DocumentSource,
+    input_bytes: u64,
+    read_time: Duration,
+    cancel: &AtomicBool,
+    spill_dir: &Path,
+    limits: &FileLimits,
+) -> anyhow::Result<Document> {
+    let spill_at = limits.keep_on_disk();
+    if !written_size_reaches(&value, spill_at) {
+        return Ok(Document::from_value(value, source, input_bytes, read_time));
+    }
+    if cancel.load(Ordering::Relaxed) {
+        anyhow::bail!("cancelled");
+    }
+
+    let file =
+        write_to_spill_file(&value, spill_dir).context("keeping the merged result on disk")?;
+    drop(value);
+    jsonquery_core::load_open_file(&file, source, spill_at)
+        .context("reading the merged result back from its temporary file")
+}
+
+/// Write `value` pretty-printed, as Save… writes it, to a new temporary file in
+/// `dir`, which has no name. A piece at a time, so that the text is never in
+/// memory whole.
+fn write_to_spill_file(value: &serde_json::Value, dir: &Path) -> anyhow::Result<std::fs::File> {
+    use std::io::Write;
+
+    let file = create_spill_file(dir, "merged.json")?;
+    let mut out = std::io::BufWriter::with_capacity(1 << 20, &file);
+    serde_json::to_writer_pretty(&mut out, value).context("writing the temporary file")?;
+    out.flush().context("writing the temporary file")?;
+    drop(out);
+    Ok(file)
+}
+
+/// Whether `value`, written out pretty-printed as Save… writes it, is `at_least`
+/// bytes or more. It writes nowhere and stops counting as soon as it knows, so
+/// that however big the value is, the answer takes no more than `at_least` bytes'
+/// worth of printing and no memory.
+fn written_size_reaches(value: &serde_json::Value, at_least: u64) -> bool {
+    struct Counter {
+        bytes: u64,
+        stop_at: u64,
+    }
+    impl std::io::Write for Counter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.bytes += buf.len() as u64;
+            if self.bytes >= self.stop_at {
+                // Enough is known: ending the printing with an error is how.
+                return Err(std::io::Error::other("long enough"));
+            }
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let mut counter = Counter {
+        bytes: 0,
+        stop_at: at_least,
+    };
+    let _ = serde_json::to_writer_pretty(&mut counter, value);
+    counter.bytes >= at_least
 }
 
 /// A few words on what `root` is, for the merge file list.
@@ -652,17 +746,18 @@ fn download_error(error: std::io::Error, url: &str, max: u64) -> anyhow::Error {
     }
 }
 
-/// Make the file for `url`'s body, which has no name once it is made, and which
-/// nobody but its owner can read where there are file modes, as what is
-/// downloaded may not be for them. It is one that did not exist, so that nothing
-/// already there — a link someone left at a name in a shared temp dir, say — is
-/// written through.
+/// Make the file for a download's body or a merge's result, which has no name once
+/// it is made, and which nobody but its owner can read where there are file modes,
+/// as what is downloaded may not be for them. It is one that did not exist, so that
+/// nothing already there — a link someone left at a name in a shared temp dir, say
+/// — is written through. (`name`, a URL or the name of a result, is only what it is
+/// called for the moment before it is unlinked.)
 ///
 /// Unlinked as soon as it is open (a file that is deleted lives on for whoever
 /// has it open, or mapped); on Windows, which cannot do that, made to be
 /// deleted when the last handle to it closes, the mapping's included.
-fn create_spill_file(dir: &Path, url: &str) -> anyhow::Result<std::fs::File> {
-    let path = temp_path_for_url(dir, url);
+fn create_spill_file(dir: &Path, name: &str) -> anyhow::Result<std::fs::File> {
+    let path = temp_path_for_url(dir, name);
     // Read as well as written: it is mapped afterwards.
     let mut options = std::fs::OpenOptions::new();
     options.read(true).write(true).create_new(true);
@@ -914,6 +1009,7 @@ mod tests {
             "$files",
             &AtomicBool::new(false),
             &FileLimits::default(),
+            &dir,
         )
         .unwrap();
         assert_eq!(
@@ -936,6 +1032,7 @@ mod tests {
             "add",
             &AtomicBool::new(false),
             &FileLimits::default(),
+            &dir,
         )
         .err()
         .expect("a truncated file fails");
@@ -951,6 +1048,7 @@ mod tests {
             "add",
             &AtomicBool::new(false),
             &FileLimits::default(),
+            &std::env::temp_dir(),
         )
         .err()
         .expect("a missing file fails");
@@ -971,6 +1069,7 @@ mod tests {
             "add",
             &AtomicBool::new(false),
             &FileLimits::default(),
+            &dir,
         )
         .err()
         .expect("over the limit");
@@ -991,6 +1090,7 @@ mod tests {
             "add",
             &AtomicBool::new(false),
             &FileLimits::default(),
+            &dir,
         )
         .err()
         .expect("an array and an object do not add");
@@ -1910,7 +2010,7 @@ mod tests {
 
         // Over what the tools take: refused before a file is read.
         let small = limits_with(&[(Limit::Tools, 4096)]);
-        let refused = merge_files(&[a.clone(), b.clone()], "add", &cancel, &small)
+        let refused = merge_files(&[a.clone(), b.clone()], "add", &cancel, &small, &dir)
             .err()
             .expect("over the limit");
         let message = format!("{refused:#}");
@@ -1922,8 +2022,203 @@ mod tests {
         // Under it, though files are kept on disk from a lower size than that,
         // it is parsed and merged.
         let wide = limits_with(&[(Limit::Tools, 64 * 1024), (Limit::KeepOnDisk, 1024)]);
-        let merged = merge_files(&[a, b], "add", &cancel, &wide).unwrap();
+        let merged = merge_files(&[a, b], "add", &cancel, &wide, &dir).unwrap();
         assert_eq!(merged.doc.tree(), Some(&serde_json::json!([1, 2])));
+    }
+
+    // ---- a merge whose result is big -----------------------------------------
+
+    /// How long `value` is written out pretty-printed, as a save writes it.
+    fn pretty_len(value: &serde_json::Value) -> u64 {
+        serde_json::to_string_pretty(value).unwrap().len() as u64
+    }
+
+    /// A folder with the lists `[1, 2, 3]` and `[4, 5]` in it, and their paths.
+    fn two_lists(name: &str) -> (ScratchDir, Vec<PathBuf>) {
+        let dir = temp_dir(name);
+        let files = vec![
+            write(&dir, "a.json", "[1, 2, 3]"),
+            write(&dir, "b.json", "[4, 5]"),
+        ];
+        (dir, files)
+    }
+
+    #[test]
+    fn a_merge_result_smaller_than_files_are_kept_on_disk_from_stays_in_memory() {
+        let (_inputs, files) = two_lists("merge-small");
+        // A folder that is not there: a temporary file could not be made in it, so
+        // that a result that needs none is shown to need none.
+        let nowhere = temp_dir("merge-small-spill").join("not-there");
+        let joined = serde_json::json!([1, 2, 3, 4, 5]);
+        // One byte short of the size of the result.
+        let limits = keeping_on_disk_from(pretty_len(&joined) + 1);
+        let outcome =
+            merge_files(&files, "add", &AtomicBool::new(false), &limits, &nowhere).unwrap();
+        assert!(!outcome.doc.is_lazy());
+        assert_eq!(outcome.doc.tree(), Some(&joined));
+        // The size of what it was built from, as it has always been.
+        assert_eq!(outcome.doc.byte_len, 15);
+        assert_eq!(outcome.input_bytes, 15);
+    }
+
+    #[test]
+    fn a_merge_result_as_big_as_files_are_kept_on_disk_from_is_kept_in_a_temporary_file() {
+        let (_inputs, files) = two_lists("merge-big");
+        let spill = temp_dir("merge-big-spill");
+        let joined = serde_json::json!([1, 2, 3, 4, 5]);
+        let size = pretty_len(&joined);
+        // Exactly the size of the result: a file of that size is kept on disk too.
+        let limits = keeping_on_disk_from(size);
+        let outcome = merge_files(&files, "add", &AtomicBool::new(false), &limits, &spill).unwrap();
+
+        let doc = &outcome.doc;
+        assert!(doc.is_lazy() && doc.lazy().unwrap().is_mapped());
+        assert_eq!(value_of(doc), joined);
+        assert_eq!(doc.byte_len, size, "the result is the file");
+        assert_eq!(
+            outcome.input_bytes, 15,
+            "what went in is said apart from it"
+        );
+        assert_eq!(doc.source.label(), "(merged from 2 files)");
+        assert_eq!(outcome.outputs, 1);
+        // Nobody can open the file, though the document has it open; and
+        // nothing is left once the document is gone.
+        #[cfg(unix)]
+        assert_eq!(files_in(&spill), 0);
+        let shown = (outcome.preview.clone(), outcome.preview_truncated);
+        drop(outcome);
+        assert_eq!(files_in(&spill), 0);
+
+        // What the page shows is the same, whichever way the result is kept.
+        let in_memory = merge_files(
+            &files,
+            "add",
+            &AtomicBool::new(false),
+            &FileLimits::default(),
+            &spill,
+        )
+        .unwrap();
+        assert!(!in_memory.doc.is_lazy());
+        assert_eq!((in_memory.preview, in_memory.preview_truncated), shown);
+    }
+
+    #[test]
+    fn a_merge_result_kept_in_a_temporary_file_is_the_value_and_saves_as_the_value_does() {
+        let dir = temp_dir("merge-faithful");
+        let spill = temp_dir("merge-faithful-spill");
+        let files = [
+            write(
+                &dir,
+                "a.json",
+                r#"[{"id": 1, "name": "Zoë", "tags": ["a\"b", "line\nbreak"], "n": 12345678901234567890.5}]"#,
+            ),
+            write(
+                &dir,
+                "b.json",
+                r#"[{"id": 2, "name": "日本", "tags": [], "n": 1e3, "deep": {"x": null, "y": [true, {}]}}]"#,
+            ),
+        ];
+        // Two outputs: they come as one array, with the number of them said.
+        let cancel = AtomicBool::new(false);
+        let in_memory =
+            merge_files(&files, ".[]", &cancel, &FileLimits::default(), &spill).unwrap();
+        let on_disk =
+            merge_files(&files, ".[]", &cancel, &keeping_on_disk_from(1), &spill).unwrap();
+        assert!(!in_memory.doc.is_lazy() && on_disk.doc.is_lazy());
+        assert_eq!(on_disk.outputs, 2);
+        assert_eq!(value_of(&on_disk.doc), value_of(&in_memory.doc));
+
+        // Saved, byte for byte what a result in memory saves as; and the digits
+        // of a number are kept.
+        let saved = |outcome: &MergeOutcome, name: &str| {
+            let path = dir.join(name);
+            save_root(outcome.doc.root(), &path).unwrap();
+            std::fs::read_to_string(path).unwrap()
+        };
+        let from_disk = saved(&on_disk, "from-disk.json");
+        assert_eq!(from_disk, saved(&in_memory, "from-memory.json"));
+        assert!(from_disk.contains("12345678901234567890.5"), "{from_disk}");
+        // (jq's way of writing 1e3, in memory as well.)
+        assert!(from_disk.contains("1e+3"), "{from_disk}");
+    }
+
+    #[test]
+    fn a_big_merge_result_needs_somewhere_to_go() {
+        let (_inputs, files) = two_lists("merge-nowhere");
+        let nowhere = temp_dir("merge-nowhere-spill").join("not-there");
+        let err = merge_files(
+            &files,
+            "add",
+            &AtomicBool::new(false),
+            &keeping_on_disk_from(1),
+            &nowhere,
+        )
+        .err()
+        .expect("no folder");
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("keeping the merged result on disk")
+                && message.contains("creating temporary file"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn a_merge_cancelled_before_its_result_is_written_writes_nothing() {
+        let spill = temp_dir("merge-cancelled-spill");
+        let source = DocumentSource::Merged(Vec::new());
+        let err = keep_merged(
+            serde_json::json!([1, 2, 3]),
+            source,
+            0,
+            Duration::ZERO,
+            &AtomicBool::new(true),
+            &spill,
+            &keeping_on_disk_from(1),
+        )
+        .err()
+        .expect("cancelled");
+        assert_eq!(format!("{err:#}"), "cancelled");
+        assert_eq!(files_in(&spill), 0);
+    }
+
+    #[test]
+    fn the_size_a_value_is_written_at_is_told_to_the_byte() {
+        use serde_json::json;
+        for value in [
+            json!(null),
+            json!(12),
+            json!("text"),
+            json!([]),
+            json!({}),
+            json!([1, [2, {"a": "b"}], {"c": []}]),
+        ] {
+            let size = pretty_len(&value);
+            assert!(written_size_reaches(&value, 1), "{value}");
+            assert!(written_size_reaches(&value, size), "{value}: exactly");
+            assert!(!written_size_reaches(&value, size + 1), "{value}: one more");
+        }
+    }
+
+    #[test]
+    fn the_worker_keeps_a_big_merge_result_on_disk_and_says_so() {
+        let (_inputs, files) = two_lists("merge-worker");
+        let (commands, events) = start_worker_with(keeping_on_disk_from(1));
+        commands
+            .send(Command::Merge {
+                paths: files,
+                filter: "add".to_owned(),
+                gen: 7,
+                cancel: Arc::new(AtomicBool::new(false)),
+            })
+            .unwrap();
+        let Event::MergeDone { gen, result } = events.recv_timeout(WAIT).unwrap() else {
+            panic!("the merge's answer was expected");
+        };
+        assert_eq!(gen, 7);
+        let outcome = result.unwrap();
+        assert!(outcome.doc.is_lazy());
+        assert_eq!(value_of(&outcome.doc), serde_json::json!([1, 2, 3, 4, 5]));
     }
 
     #[test]
@@ -2045,9 +2340,15 @@ mod tests {
     fn a_cancelled_merge_stops_before_reading() {
         let dir = temp_dir("cancel");
         let a = write(&dir, "a.json", "[1]");
-        let err = merge_files(&[a], "add", &AtomicBool::new(true), &FileLimits::default())
-            .err()
-            .expect("cancelled");
+        let err = merge_files(
+            &[a],
+            "add",
+            &AtomicBool::new(true),
+            &FileLimits::default(),
+            &dir,
+        )
+        .err()
+        .expect("cancelled");
         assert_eq!(format!("{err:#}"), "cancelled");
     }
 }

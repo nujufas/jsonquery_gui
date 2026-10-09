@@ -26,7 +26,7 @@ The table is the same information in one place.
 
 | Limit | Default | What it is |
 |---|---|---|
-| **Keep a file on disk from** | 256 MB | From this size a file is not loaded and parsed but kept where it is, memory-mapped and indexed, and read as you look at it. Below it, a file is parsed, which is quicker but takes about twelve times its size in memory. Also decides whether a download is held in memory or spilled to a file. |
+| **Keep a file on disk from** | 256 MB | From this size a file is not loaded and parsed but kept where it is, memory-mapped and indexed, and read as you look at it. Below it, a file is parsed, which is quicker but takes about twelve times its size in memory. Also decides whether a download is held in memory or spilled to a file, and the same for the result of a merge: one of this size or more is written to a temporary file and kept there. |
 | **Largest download or pipe** | 4 GB | The most that is read from a web address, or from a pipe (such as standard input), which have no size to go by. |
 | **Largest input** (Tools window) | 128 MB | The most that Merge, Diff, Patch and Validate take, all of a job's documents together: they work in memory, with several copies of what they are given. Format writes a file kept on disk out as it goes, whatever its size. |
 | **Largest copy** | 64 MB | The most that Copy to Clipboard takes from a value of a file kept on disk, in bytes of the file. For more, there is Save…. |
@@ -49,7 +49,7 @@ back to its default, and **Restore defaults** all of them, the ones under
 Advanced too.
 
 A change applies from the next thing that uses the limit: the next file you open
-(the first two limits), the next job you run in the Tools window, the next copy,
+or merge (the first two limits), the next job you run in the Tools window, the next copy,
 the next query. A document that is already open stays as it was opened.
 
 Two of the limits work together. The Tools window needs a document in memory, so

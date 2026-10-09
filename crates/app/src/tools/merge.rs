@@ -9,6 +9,12 @@
 //! the filter to edit, as the main window's Query row and box do; the left pane
 //! is the files, the right pane the result, with what to do with it in its
 //! header.
+//!
+//! A result is a document in memory, unless it is as big as a file is kept on
+//! disk from (the user's setting): then the worker has written it to a temporary
+//! file and the document is that file, mapped, so that neither the page nor the
+//! main window it is opened in holds a tree of it (`worker::keep_merged`). The
+//! page shows it the same either way, a preview of the start and where it is.
 
 use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
@@ -103,10 +109,10 @@ impl Merge {
         }
 
         let mut request = None;
-        let tool_bytes = env.tool_bytes;
+        let (tool_bytes, keep_bytes) = (env.tool_bytes, env.keep_bytes);
         command_bar(ui, "merge_command", |ui| request = self.command_ui(ui));
         let (left, right) = halves(ui, "merge_panes", RIGHT_MIN);
-        left.show(ui, |ui| self.files_pane(ui, tool_bytes));
+        left.show(ui, |ui| self.files_pane(ui, tool_bytes, keep_bytes));
         right.show(ui, |ui| {
             if let Some(r) = self.result_pane(ui) {
                 request = Some(r);
@@ -185,15 +191,15 @@ impl Merge {
     }
 
     /// The left pane: the files, in the order they will be merged.
-    fn files_pane(&mut self, ui: &mut egui::Ui, tool_bytes: u64) {
+    fn files_pane(&mut self, ui: &mut egui::Ui, tool_bytes: u64, keep_bytes: u64) {
         ui.add_enabled_ui(!self.run.running(), |ui| {
-            self.files_header(ui, tool_bytes);
+            self.files_header(ui, tool_bytes, keep_bytes);
             self.files_list(ui);
         });
     }
 
     /// "Files (3)" with the buttons that change the list, at the right.
-    fn files_header(&mut self, ui: &mut egui::Ui, tool_bytes: u64) {
+    fn files_header(&mut self, ui: &mut egui::Ui, tool_bytes: u64, keep_bytes: u64) {
         let title = match self.files.len() {
             0 => "Files".to_owned(),
             n => format!("Files ({n})"),
@@ -236,8 +242,10 @@ impl Merge {
             },
         )
         .on_hover_text(format!(
-            "Merged in the order listed. Merging happens in memory, so the files can add up to {}.",
-            human_bytes(tool_bytes)
+            "Merged in the order listed. Merging happens in memory, so the files can add up to \
+             {}. A result of {} or more is kept in a temporary file, not in memory.",
+            human_bytes(tool_bytes),
+            human_bytes(keep_bytes)
         ));
     }
 
@@ -374,15 +382,23 @@ fn result_summary(outcome: &MergeOutcome) -> String {
     summary
 }
 
-/// How it came about: "Merged 2 files (6 B) in 1.2ms".
+/// How it came about: "Merged 2 files (6 B) in 1.2ms" — and, for a result big
+/// enough to have been written to a temporary file, where it is.
 fn result_details(outcome: &MergeOutcome) -> String {
     let files = outcome.files.len();
-    format!(
+    let mut details = format!(
         "Merged {files} file{} ({}) in {:.1?}",
         if files == 1 { "" } else { "s" },
-        human_bytes(outcome.doc.byte_len),
+        human_bytes(outcome.input_bytes),
         outcome.elapsed
-    )
+    );
+    if outcome.doc.is_lazy() {
+        details.push_str(&format!(
+            " · result of {} kept in a temporary file",
+            human_bytes(outcome.doc.byte_len)
+        ));
+    }
+    details
 }
 
 /// One row of the list of files: its position, its name (the whole path in the

@@ -60,7 +60,8 @@ Pasted text and a URL download of under 256 MiB skip straight to parsing; a
 larger download is streamed into a temporary file (readable by its owner only,
 and with no name from the moment it is made: unlinked on Unix, made to be
 deleted when it is closed on Windows), which goes through the same loader, so
-that a download is indexed as a file is.
+that a download is indexed as a file is. The result of a merge is kept the same
+way when it is that big (below).
 
 NDJSON (one JSON value per line) is handled as a shape of JSON input from
 the start, not a separate format — the file is treated as one-or-more
@@ -73,7 +74,18 @@ jq filter over them with the same embedded engine (`jq -s` style: the files
 slurped into one array), and hands the result to the app as an in-memory
 document (`Document::from_value`, `DocumentSource::Merged`). It parses every
 file up front, so it is capped at 128 MB of input in total; each file is read the
-way a file opened on its own is.
+way a file opened on its own is. A result of 256 MiB or more (the size from which
+a file is kept on disk, a setting) is not kept as a tree: it is printed, a piece
+at a time, to a temporary file like a big download's, and the document is that
+file, mapped and indexed (`worker::keep_merged`), so what the app keeps of it is an
+index, not twelve times its size. The merge itself still needs the room for the
+files and the value jq makes of them; what the file saves is what is kept
+afterwards, in the page and in the main window it is opened in. (Measured, release
+build, a result of 49 MB from 25 MB of files: counting what Save… would write takes
+0.09 s, printing it 0.09 s and mapping and indexing it 0.05 s, against 1.6 s for the
+merge; the tree's memory is freed once the file is written, but a process often keeps
+some of what it has freed, so the size of the app in a task manager falls back only in
+part, 1.37 GB to 0.91 GB there.)
 
 The window's other tools work the same way: **Format**, **Diff**, **Patch** and
 **Validate schema** are functions over `serde_json::Value` in `crates/query`

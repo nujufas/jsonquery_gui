@@ -199,7 +199,9 @@ point inside the schema.
   moved it. (Windows, macOS and X11 can; only X11 has been tried — the
   XWayland entry above gets you there on a Wayland desktop.)
 - **A file of 256 MiB or more is not parsed but kept on disk and read as you look
-  at it** (that size is a setting; memory-mapped, and indexed once when it opens), so that a gigabyte of
+  at it** (that size is a setting; memory-mapped, and indexed once when it opens; a
+  download and the result of a Merge that big are kept in a temporary file the same
+  way), so that a gigabyte of
   JSON takes megabytes, not the twelve to seventeen times its size that a parsed
   tree does. Long lists are shown in runs of a thousand; jq queries read the file
   as they go, so `.[] | select(…) | .name`, `map(…)`, `length`, `.[1234567]`,

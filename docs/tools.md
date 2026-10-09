@@ -93,6 +93,29 @@ map(select(type == "array")) | add               # skip the files that are not a
 A filter that gives several outputs (`.[]`) gives them as one array. A filter
 with a runaway output (more than a million) is stopped.
 
+### A big result
+
+The files are merged in memory, but a big *result* is not kept there. One that
+is as big as a file is kept on disk from (**Keep a file on disk from** in the
+[settings](settings.md), 256 MB unless you changed it; its size is that of the
+text **Save…** writes) is written, pretty-printed, to a temporary file in the
+system's temporary folder (`TMPDIR`; `%TEMP%` on Windows), and the merged
+document is that file, memory-mapped and indexed as a file of that size is when
+it is opened, not a tree that would take a dozen times its size. The preview,
+**Open in main window** and **Save…** work as they do for a small result, and the
+status bar adds where it is: "result of 612 MB kept in a temporary file". **Save…**
+copies it from the file, whatever its size, without holding it in memory.
+
+The file has no name: it was removed from the folder the moment it was made
+(on Windows it is deleted when it is closed), so nobody can open it and it goes
+with the document, even if the app ends abruptly. If it cannot be written — the
+disk is full, the folder is not writable — the merge says so and gives no
+result; set `TMPDIR` to a folder with room, or raise the limit.
+
+A document kept on disk can't be given to Diff, Patch or Validate (it can to
+Format), as for any file of that size; **Open in main window** shows it like
+a big file opened from disk.
+
 ## Format JSON
 
 Print a document the way you want it.
@@ -269,7 +292,9 @@ crate.
   **128 MB** by default; the limit is a [setting](settings.md), as is the size from
   which a file is kept on disk, which a tool can't use (Format excepted). (Use `jq`, or a tool made for it, for bigger things; DuckDB reads
   many JSON files with SQL.) Format writes a document that is kept as its file
-  from there, whatever its size, without sorting its keys.
+  from there, whatever its size, without sorting its keys. A Merge's *result* of
+  the size a file is kept on disk from is written to a temporary file and kept
+  there (see [A big result](#a-big-result)).
 - A filter that produces more than a million outputs is stopped.
 - **Cancel** stops a job that is still running; a jq filter that spins without
   producing anything can't be interrupted until it yields, as in the query box.
@@ -299,7 +324,12 @@ crate.
 - A merged or patched document is `Document::from_value` with
   `DocumentSource::Merged` or `DocumentSource::Derived`: it has no file to
   reload from, so the Source field is left empty and the toolbar names it
-  ("(merged from 3 files)", "(patched)").
+  ("(merged from 3 files)", "(patched)"). A merge's result that is as big as a
+  file is kept on disk from is the exception: `worker::keep_merged` counts what
+  Save… would write (stopping as soon as it knows), and if it is that big prints
+  it to a temporary file made as a download's is (`create_spill_file`: private,
+  unlinked at once) and loads that with `load_open_file`, so the document is a
+  lazy one that still says `DocumentSource::Merged`.
 - These are plain in-memory values, read the way a single opened file is, and
   nothing of a file is kept once it is parsed. A file of 256 MiB or more is not a
   value but a lazy document (see the Scaling section in

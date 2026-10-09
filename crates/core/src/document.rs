@@ -1,5 +1,5 @@
 use std::fs::{File, Metadata};
-use std::io::{self, Read};
+use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -63,7 +63,8 @@ pub enum DocumentSource {
     /// file nobody can see when it is not.
     Url(String),
     /// Built by the Tools window's merge from these files, in this order. It
-    /// lives in memory only, until it is saved.
+    /// lives in memory, or, when the result is big, in a temporary file nobody
+    /// can see, until it is saved.
     Merged(Vec<PathBuf>),
     /// Made by another of the Tools window's tools (a patch applied to a
     /// document). It lives in memory only, until it is saved. `label` is what
@@ -292,20 +293,37 @@ fn load_via(
     load_limited(path, limits, map)
 }
 
-/// [`load`] for a file that is already open — a download's temporary file,
-/// which has no name — as the document from `source`, kept lazy if it is
-/// `lazy_threshold` bytes or more (as a file is, from [`LoadLimits`]).
+/// [`load`] for a file that is already open — the temporary file of a download
+/// or of a big merge, which has no name — as the document from `source`, kept lazy
+/// if it is `lazy_threshold` bytes or more (as a file is, from [`LoadLimits`]).
+/// It is read from its start, whatever the position of the handle is: a file
+/// that has just been written is at its end.
 pub fn load_open_file(
     file: &File,
     source: DocumentSource,
     lazy_threshold: u64,
 ) -> Result<Document> {
+    load_open_via(file, source, lazy_threshold, map_file)
+}
+
+/// [`load_open_file`] with the way of mapping a file as a parameter too.
+fn load_open_via(
+    file: &File,
+    source: DocumentSource,
+    lazy_threshold: u64,
+    map: impl FnOnce(&File) -> io::Result<Mmap>,
+) -> Result<Document> {
+    // A mapping starts at the start whatever the handle's position is, but a
+    // read (the way in for a file that cannot be mapped) goes on from it. What
+    // cannot seek is read from where it is.
+    let mut handle = file;
+    let _ = handle.seek(SeekFrom::Start(0));
     let name = source.label();
     let limits = LoadLimits {
         lazy_threshold,
         ..LoadLimits::default()
     };
-    load_file(file, source, &name, limits, map_file)
+    load_file(file, source, &name, limits, map)
 }
 
 fn load_file(
@@ -608,6 +626,39 @@ mod tests {
         assert!(doc.is_lazy() && !doc.lazy().unwrap().is_mapped());
         assert_eq!(value_of(&doc), json!([1, 2]));
         assert_eq!(doc.byte_len, 6);
+    }
+
+    #[test]
+    fn a_file_just_written_is_read_from_its_start_mapped_or_not() {
+        // The temporary file of a download or of a big merge: written through the
+        // handle that then loads it, which is at the end of the file.
+        use std::io::Write as _;
+        let dir = Scratch::new("written-then-loaded");
+        let file = &mut std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(dir.0.join("spill.json"))
+            .unwrap();
+        file.write_all(b"[1, 2]").unwrap();
+
+        let mapped = load_open_file(file, DocumentSource::Pasted, 1).unwrap();
+        assert!(mapped.lazy().unwrap().is_mapped());
+        assert_eq!(value_of(&mapped), json!([1, 2]));
+
+        // Not mapped, the bytes are read: from the start, not from the end, which
+        // would be an empty array and no error.
+        file.seek(SeekFrom::End(0)).unwrap();
+        let read = load_open_via(file, DocumentSource::Pasted, 1, |_| {
+            Err(io::ErrorKind::Unsupported.into())
+        })
+        .unwrap();
+        assert!(!read.lazy().unwrap().is_mapped());
+        assert_eq!(value_of(&read), json!([1, 2]));
+        assert_eq!(read.byte_len, 6);
+        file.seek(SeekFrom::End(0)).unwrap();
+        let parsed = load_open_file(file, DocumentSource::Pasted, u64::MAX).unwrap();
+        assert_eq!(parsed.tree(), Some(&json!([1, 2])));
     }
 
     #[cfg(unix)]

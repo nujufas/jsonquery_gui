@@ -49,6 +49,7 @@ use std::sync::Arc;
 use eframe::egui::{self, RichText};
 use jsonquery_core::Document;
 
+use crate::settings::FileLimits;
 use crate::worker::MergeOutcome;
 use diff::Diff;
 use format::Format;
@@ -134,6 +135,8 @@ pub struct Tools {
     shared: Shared,
     /// The most the tools take (see `Env::tool_bytes`).
     tool_bytes: u64,
+    /// From what size a result is kept on disk (see `Env::keep_bytes`).
+    keep_bytes: u64,
     icon: Option<Arc<egui::IconData>>,
 }
 
@@ -149,6 +152,7 @@ impl Default for Tools {
             validate: Validate::default(),
             shared: Shared::default(),
             tool_bytes: crate::settings::DEFAULT_TOOLS_BYTES,
+            keep_bytes: jsonquery_core::LAZY_THRESHOLD,
             icon: None,
         }
     }
@@ -177,9 +181,11 @@ impl Tools {
         self.open = false;
     }
 
-    /// The most the tools take from now on, all of a job's documents together.
-    pub fn use_limit(&mut self, bytes: u64) {
-        self.tool_bytes = bytes;
+    /// The limits on files from now on: the most the tools take, all of a job's
+    /// documents together, and the size from which a result is kept on disk.
+    pub fn use_limits(&mut self, limits: &FileLimits) {
+        self.tool_bytes = limits.tools();
+        self.keep_bytes = limits.keep_on_disk();
     }
 
     /// Open the window on `tool`'s page.
@@ -385,6 +391,7 @@ impl Tools {
             open_doc,
             own_input,
             tool_bytes: self.tool_bytes,
+            keep_bytes: self.keep_bytes,
             shared: &mut self.shared,
         };
         let request = match self.tool {
