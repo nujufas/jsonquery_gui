@@ -131,6 +131,20 @@ add | unique_by(.id)                              # one record per id, the first
 map(select(type == "array")) | add               # skip the files that are not arrays
 ```
 
+`*`, the **Deep-merge objects** filter, merges objects all the way down but *replaces* an
+array with the later file's. A deep merge that joins the arrays instead (and drops what
+is in both) needs a function of its own — `deep` here is a jq function the filter
+defines, and the files are laid over each other in the order listed:
+
+```jq
+def deep($a; $b):
+  if ($a | type) == "object" and ($b | type) == "object"
+  then reduce ($b | keys_unsorted[]) as $k ($a; .[$k] = deep(.[$k]; $b[$k]))
+  elif ($a | type) == "array" and ($b | type) == "array" then $a + $b | unique
+  else $b end;
+reduce .[] as $file ({}; deep(.; $file))
+```
+
 A filter that gives several outputs (`.[]`) gives them as one array. A filter
 with a runaway output (more than a million) is stopped.
 

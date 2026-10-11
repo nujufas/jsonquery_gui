@@ -6,7 +6,7 @@ file (or paste JSON directly) and query it with **jq**, **JSON Pointer**,
 patches and validates documents too. Built in Rust with
 [egui](https://github.com/emilk/egui)/[eframe](https://github.com/emilk/egui).
 
-![jsonquery: a jq query over a list of users, each step of the query tinted, the source and the results side by side](docs/images/screenshot.png)
+![jsonquery: a multi-line jq query that filters, groups and reshapes a list of users, every step of it tinted, with the source and the results side by side](docs/images/screenshot.png)
 
 ## Features
 
@@ -61,7 +61,11 @@ patches and validates documents too. Built in Rust with
   Tree and Text buttons says when that applies. (jaq has neither filter;
   jsonquery adds them, with `IN`, `INDEX`, `JOIN`, `tostream`, `fromstream`
   and `truncate_stream`.) The tutorial teaches them on the pages of its
-  *Tables & lookups* and *Event streams* topics.
+  *Tables & lookups* and *Event streams* topics. Below, the Text view of an
+  `@csv` query, and the file **Save…** wrote from it, open beside the window in
+  a spreadsheet; end the query in `@tsv` and the rows are tab-separated.
+
+  ![A jq query that ends in @csv: its rows in the Results pane's Text view, and the users.csv that Save… wrote from them, opened in a spreadsheet beside the window](docs/images/screenshot-csv.png)
 - **Search** — `Ctrl+F` opens a Notepad++-style Find dialog with the cursor
   already in its field: a case-insensitive substring or regex search across
   the source or the results tree. **Find** (or `Enter`) jumps to each match in
@@ -109,6 +113,12 @@ patches and validates documents too. Built in Rust with
   size of the window (maximized or not) and of its panes, and whether the Tools
   are docked. All of it is in one small file, `~/.jsonquery/settings.json`. See
   [docs/settings.md](docs/settings.md).
+- **On the web** — the 🌐 in the status bar, between the ⓘ and the ⚙, opens
+  [jsonquery.dev](https://jsonquery.dev) in your web browser: this app's query
+  engine in a browser tab, with nothing to install — jq, JSONPath, JMESPath and
+  JSON Pointer queries, the five tools, and short lessons for each language.
+  The ⓘ window links to the site too. The app never contacts the site by
+  itself: the 🌐 only hands the address to your browser when you click it.
 - **Keyboard shortcuts** — `Ctrl+Enter` run/apply, `Ctrl+F` search,
   `Ctrl+S` save (both scoped to whichever panel you last clicked), `F1`
   tutorial.
@@ -153,6 +163,15 @@ own, and press **Merge**. The result can be saved, or opened in the main
 window.
 
 ![Merge JSON: three monthly order files appended into one array of ten orders](docs/images/screenshot-tools-merge.png)
+
+**Deep-merge objects** lays each file over the one before it, key by key all the
+way down: a later file wins a clash between plain values, a key that only one file
+has is kept, and an array is replaced as a whole. Below, a `defaults.json`, a
+`production.json` and a `local.json` become one configuration. A filter of your
+own can merge differently — [docs/tools.md](docs/tools.md#how-the-filter-sees-the-files)
+has one that joins the arrays too.
+
+![Merge JSON with Deep-merge objects: defaults.json, production.json and local.json laid over each other into one configuration, the nested keys merged, the later file's value winning, the array replaced](docs/images/screenshot-tools-merge-deep.png)
 
 ### Format JSON
 
@@ -341,7 +360,7 @@ files on its window.
 - The script finds jsonquery by itself: the program next to it, the snap, or
   the Arch package. If you keep an AppImage somewhere, name it (make it
   executable first with `chmod +x`):
-  `bash jsonquery-x11.sh ~/Apps/jsonquery_gui-0.5.0-x86_64.AppImage`
+  `bash jsonquery-x11.sh ~/Apps/jsonquery_gui-0.5.1-x86_64.AppImage`
 - **Moved or updated the program?** Run the script again; it rewrites the
   entry.
 - `bash jsonquery-x11.sh run` starts jsonquery under X11 once, without adding
@@ -409,50 +428,12 @@ without pulling in a GUI toolkit:
 ### GUI tests: jsonquery_test
 
 The end-to-end tests live in their own repository,
-[**jsonquery_test**](https://github.com/nujufas/jsonquery_test). It is a
+[**jsonquery_test**](https://github.com/nujufas/jsonquery_test): a
 [Robot Framework](https://robotframework.org) suite that starts the real
-application on a virtual X display of its own (Xvfb with the fluxbox window
-manager, so it never touches your desktop), clicks and types into it the way a
-person would, and reads the screen back with Tesseract OCR, pixel checks and
-the clipboard — egui draws everything itself and has no accessibility tree to
-query. As of October 2026 it has 680 test cases in 26 suites, one directory
-per area of the app (launch and window, opening sources, the toolbar and
-status bar, query engines, query highlighting, the query box, autocomplete,
-tree and text views, context menus, search, saving, keyboard shortcuts,
-pop-out panes, the Tools window and the Tools docked in the main window, the
-tutorial and About windows, pane headers, drag and drop, the jq functions the
-app adds, CSV and TSV output, the tutorial's pages for them, the settings it
-keeps, and whole workflows from a file to a saved file). It is run twice: with
-the Tools in a window of their own, and with them docked as tabs of the main
-window.
-The file dialogs are answered by a stand-in for the desktop's file-chooser
-portal, so the open and save cases run unattended too. Each area is specified
-by a document in the suite's `docs/`, and a traceability matrix gives every
-case's status with its reason.
-
-It needs Linux, Python 3.12, a Rust toolchain and a few system packages
-(`xvfb fluxbox xdotool wmctrl xclip tesseract-ocr gnome-screenshot dbus-daemon
-python3-venv python3-tk python3-dev` on Debian/Ubuntu). Clone it beside this
-checkout and run it — `run.sh` builds the app, creates a Python virtual
-environment and starts the display itself:
-
-```sh
-git clone https://github.com/nujufas/jsonquery_test.git
-cd jsonquery_test
-./run.sh suites/launch_and_window/                           # four quick cases: is everything set up?
-./run.sh suites/query_engines/                               # one suite
-./run.sh suites/tools/tools_diff.robot --test 'TC-DIF-007*'  # one case
-./run.sh                                                     # every suite (over an hour on one display)
-./run_parallel.sh                                            # every suite, in lanes at once
-./run_docked.sh                                              # the same suites with the Tools docked in the main window
-```
-
-It finds this checkout as `../jsonquery_gui`, or wherever `JQ_APP_DIR` points.
-Results land in `results/report.html` and `results/log.html`, with a
-screenshot of the window at the end of every case. The suite's README covers
-running several lanes in parallel, testing a binary you built yourself, the
-environment variables and troubleshooting, and links the guide to writing new
-cases.
+application on a virtual display of its own and drives it the way a person
+would. Its README says what it covers and how to run it; clone it beside this
+checkout (it finds the app as `../jsonquery_gui`, or wherever `JQ_APP_DIR`
+points) and start with `./run.sh`.
 
 The CI workflow ([`ci.yml`](.github/workflows/ci.yml)) runs fmt, clippy, the
 unit tests and a release build on Linux, Windows and macOS for every push and
