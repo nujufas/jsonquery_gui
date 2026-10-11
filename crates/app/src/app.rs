@@ -2458,10 +2458,10 @@ impl App {
         // out for the duration and put back afterwards.
         //
         // The right side is laid out right to left: the (i) first, so that it
-        // stays in the corner, and the ⚙ that opens the Settings beside it, where it
-        // is whether the Tools are docked or not. Then, docked, the 🗗 that undocks
-        // them (the one way out: the row of tabs has none), and last, on native
-        // Wayland, the alert (⚠).
+        // stays in the corner, then the 🌐 that opens the website, and the ⚙ that
+        // opens the Settings, where they are whether the Tools are docked or not.
+        // Then, docked, the 🗗 that undocks them (the one way out: the row of tabs
+        // has none), and last, on native Wayland, the alert (⚠).
         //
         // With the page of a tool in front (the Tools docked), the status text is
         // the tool's: what the page says of its result, and the last thing it did.
@@ -2482,6 +2482,7 @@ impl App {
             },
             |ui| {
                 info_button(ui, &mut info_window);
+                website_button(ui);
                 settings_button(ui, &mut settings_window);
                 if docked && tools::undock_button(ui) {
                     undock = true;
@@ -2923,7 +2924,21 @@ fn tutorial_button(ui: &mut egui::Ui, tutorial: &mut Tutorial) {
     }
 }
 
-/// Small ⚙ button beside the (i) — opens the Settings window (or brings it to
+/// Small 🌐 button between the (i) and the ⚙ — opens the website in the web
+/// browser. Hovering it says in a line what is there, and the address it goes to.
+fn website_button(ui: &mut egui::Ui) {
+    let response = ui.small_button(WEBSITE_ICON).on_hover_ui(|ui| {
+        ui.label(format!(
+            "{WEBSITE_NAME} — queries, tools and lessons in your browser\n\
+             Click to open {WEBSITE_URL}"
+        ));
+    });
+    if response.clicked() {
+        ui.ctx().open_url(egui::OpenUrl::new_tab(WEBSITE_URL));
+    }
+}
+
+/// Small ⚙ button beside the 🌐 — opens the Settings window (or brings it to
 /// the front if it's already open).
 fn settings_button(ui: &mut egui::Ui, window: &mut SettingsWindow) {
     if ui
@@ -2940,12 +2955,30 @@ fn settings_button(ui: &mut egui::Ui, window: &mut SettingsWindow) {
 /// under it.
 const REPO_URL: &str = "https://github.com/nujufas/jsonquery_gui";
 
+/// The jsonquery website: this app's query engine in a browser tab, with the
+/// tools and the lessons. The 🌐 in the status bar and a line of the About
+/// window go there.
+const WEBSITE_URL: &str = "https://jsonquery.dev";
+
+/// The website's name, as the 🌐's hover and the About window write it.
+const WEBSITE_NAME: &str = "jsonquery.dev";
+
+/// The button in the status bar that opens the website.
+const WEBSITE_ICON: &str = "🌐";
+
 fn info_viewport_id() -> egui::ViewportId {
     egui::ViewportId::from_hash_of("jsonquery_info_window")
 }
 
-/// The (i) info window: license, source, issues/contact, privacy and known
-/// limitations. A second native window rather than a tooltip/popup — same
+/// How big the About window opens, and the smallest it can be made: it opens just
+/// big enough for what it says, and not smaller. All of it has to fit in the
+/// smallest (a text that wraps takes more height the narrower the window is), and
+/// a test draws it there.
+const INFO_SIZE: [f32; 2] = [380.0, 300.0];
+const INFO_MIN_SIZE: [f32; 2] = [320.0, 300.0];
+
+/// The (i) info window: license, source, website, issues/contact, privacy and
+/// known limitations. A second native window rather than a tooltip/popup — same
 /// shape as `Tutorial` — so its hyperlinks are ordinary click targets
 /// instead of having to survive inside a hover region.
 #[derive(Default)]
@@ -2982,8 +3015,8 @@ impl InfoWindow {
             .clone();
         egui::ViewportBuilder::default()
             .with_title(crate::title_of("About"))
-            .with_inner_size([380.0, 320.0])
-            .with_min_inner_size([320.0, 280.0])
+            .with_inner_size(INFO_SIZE)
+            .with_min_inner_size(INFO_MIN_SIZE)
             .with_app_id(crate::APP_ID)
             .with_icon(icon)
     }
@@ -3027,6 +3060,10 @@ fn info_window_contents(ui: &mut egui::Ui) {
 
             ui.label("Source:");
             ui.hyperlink_to("GitHub", REPO_URL);
+            ui.end_row();
+
+            ui.label("Website:");
+            ui.hyperlink_to(WEBSITE_NAME, WEBSITE_URL);
             ui.end_row();
 
             ui.label("Issues / contact:");

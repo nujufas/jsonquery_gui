@@ -25,6 +25,9 @@ struct Harness {
     commands: Vec<egui::ViewportCommand>,
     /// Everything any frame has put on the clipboard, oldest first.
     copied: Vec<String>,
+    /// Every address any frame has asked to have opened in the web browser, oldest
+    /// first.
+    opened: Vec<String>,
 }
 
 impl Harness {
@@ -59,6 +62,7 @@ impl Harness {
             shapes: Vec::new(),
             commands: Vec::new(),
             copied: Vec::new(),
+            opened: Vec::new(),
         };
         // A couple of frames so every panel has measured itself.
         h.settle();
@@ -86,8 +90,10 @@ impl Harness {
             self.commands.extend(viewport.commands.iter().cloned());
         }
         for command in &output.platform_output.commands {
-            if let egui::OutputCommand::CopyText(text) = command {
-                self.copied.push(text.clone());
+            match command {
+                egui::OutputCommand::CopyText(text) => self.copied.push(text.clone()),
+                egui::OutputCommand::OpenUrl(open) => self.opened.push(open.url.clone()),
+                _ => {}
             }
         }
     }
@@ -1035,6 +1041,9 @@ struct Windows {
     commands: Vec<(egui::ViewportId, egui::ViewportCommand)>,
     /// When each window asked to be redrawn, as of the latest pass.
     repaint: HashMap<egui::ViewportId, Duration>,
+    /// Every address any window has asked to have opened in the web browser,
+    /// oldest first.
+    opened: Vec<String>,
 }
 
 impl Windows {
@@ -1060,6 +1069,7 @@ impl Windows {
             shapes: HashMap::new(),
             commands: Vec::new(),
             repaint: HashMap::new(),
+            opened: Vec::new(),
         };
         for _ in 0..6 {
             w.main_frame(Vec::new());
@@ -1113,6 +1123,11 @@ impl Windows {
         for (id, v) in &output.viewport_output {
             self.commands
                 .extend(v.commands.iter().map(|c| (*id, c.clone())));
+        }
+        for command in &output.platform_output.commands {
+            if let egui::OutputCommand::OpenUrl(open) = command {
+                self.opened.push(open.url.clone());
+            }
         }
         self.repaint = output
             .viewport_output
@@ -5154,17 +5169,17 @@ fn open_file_of(h: &mut Harness, bytes: usize) {
 }
 
 #[test]
-fn the_settings_button_is_beside_the_info_button_and_opens_the_window() {
+fn the_settings_button_is_beside_the_website_button_and_opens_the_window() {
     let mut h = Harness::new();
-    let info = text_rect(&h, "ℹ").expect("the (i) button");
+    let globe = text_rect(&h, "🌐").expect("the website button");
     let gear = text_rect(&h, "⚙").expect("the settings button");
     assert!(
-        (gear.center().y - info.center().y).abs() < 2.0,
-        "on the (i)'s row: {gear:?} vs {info:?}"
+        (gear.center().y - globe.center().y).abs() < 2.0,
+        "on the 🌐's row: {gear:?} vs {globe:?}"
     );
     assert!(
-        gear.max.x < info.min.x && info.min.x - gear.max.x < 24.0,
-        "just left of it: {gear:?} vs {info:?}"
+        gear.max.x < globe.min.x && globe.min.x - gear.max.x < 24.0,
+        "just left of it: {gear:?} vs {globe:?}"
     );
     assert!(!is_drawn(&h, "File size limits"), "closed at first");
 
@@ -5195,6 +5210,214 @@ fn the_settings_button_moves_neither_the_info_button_nor_the_status_bar() {
         Some(info),
         "the (i) stays in the corner"
     );
+}
+
+// ---- the website ------------------------------------------------------------
+//
+// The 🌐 between the ℹ and the ⚙ opens jsonquery.dev in the web browser, and the
+// About window has a row with a link to it. The addresses are written out in these
+// tests, not taken from the constants, so that a wrong constant fails.
+
+const WEBSITE: &str = "https://jsonquery.dev";
+
+#[test]
+fn the_website_is_jsonquery_dev_and_its_button_is_a_globe() {
+    assert_eq!(WEBSITE_URL, WEBSITE);
+    assert_eq!(WEBSITE_NAME, "jsonquery.dev");
+    assert_eq!(WEBSITE_ICON, "🌐");
+}
+
+#[test]
+fn the_website_button_is_between_the_info_and_the_settings_buttons() {
+    let h = Harness::new();
+    let info = text_rect(&h, "ℹ").expect("the (i) button");
+    let globe = text_rect(&h, "🌐").expect("the website button");
+    let gear = text_rect(&h, "⚙").expect("the settings button");
+    for (name, rect) in [("🌐", globe), ("⚙", gear)] {
+        assert!(
+            (rect.center().y - info.center().y).abs() < 2.0,
+            "the {name} is on the (i)'s row: {rect:?} vs {info:?}"
+        );
+    }
+    assert!(
+        globe.max.x < info.min.x && info.min.x - globe.max.x < 24.0,
+        "the 🌐 is just left of the (i): {globe:?} vs {info:?}"
+    );
+    assert!(
+        gear.max.x < globe.min.x && globe.min.x - gear.max.x < 24.0,
+        "and the ⚙ just left of the 🌐: {gear:?} vs {globe:?}"
+    );
+    assert!(
+        info.center().x > SCREEN.x - 30.0,
+        "the (i) stays in the corner: {info:?}"
+    );
+    // A small button, as the (i) and the ⚙ beside it are: the bar is no higher for it.
+    assert!(
+        (frame_height_at(&h, globe.center()) - frame_height_at(&h, info.center())).abs() < 0.5,
+        "{} against {}",
+        frame_height_at(&h, globe.center()),
+        frame_height_at(&h, info.center())
+    );
+}
+
+#[test]
+fn the_website_button_moves_neither_the_info_button_nor_the_status_bar() {
+    let mut h = Harness::new();
+    let bar = h.panel("status_bar").expect("the status bar");
+    let info = text_rect(&h, "ℹ").expect("the (i) button");
+    let globe = text_rect(&h, "🌐").expect("the website button");
+    let gear = text_rect(&h, "⚙").expect("the settings button");
+    // Hovered, clicked, and the window of the ⚙ opened after it: nothing moves.
+    h.click(globe.center().x, globe.center().y);
+    open_settings(&mut h);
+    assert_eq!(h.panel("status_bar"), Some(bar));
+    assert_eq!(text_rect(&h, "ℹ"), Some(info));
+    assert_eq!(text_rect(&h, "🌐"), Some(globe));
+    assert_eq!(text_rect(&h, "⚙"), Some(gear));
+}
+
+#[test]
+fn clicking_the_website_button_opens_the_website_in_the_browser_whichever_tab_is_in_front() {
+    let mut h = Harness::new();
+    let click_globe = |h: &mut Harness| {
+        let at = h.pop_buttons("🌐");
+        assert_eq!(at.len(), 1, "one website button: {at:?}");
+        h.click(at[0].x, at[0].y);
+    };
+    assert!(h.opened.is_empty(), "looking opens nothing");
+    click_globe(&mut h);
+    assert_eq!(h.opened, [WEBSITE]);
+    assert!(
+        !h.app.settings_window.is_open() && !h.app.info_window.is_open(),
+        "and nothing else"
+    );
+
+    // With the Tools docked, on every tab: the same button, the same address.
+    dock_tools(&mut h, Tool::Diff);
+    for tab in [
+        tools::QUERY_TAB,
+        "Merge JSON",
+        "Format JSON",
+        "Diff JSON",
+        "Patch JSON",
+        "Validate Schema",
+    ] {
+        press(&mut h, tab);
+        let opened = h.opened.len();
+        click_globe(&mut h);
+        assert_eq!(h.opened.len(), opened + 1, "{tab}: once");
+        assert_eq!(h.opened.last().map(String::as_str), Some(WEBSITE), "{tab}");
+    }
+}
+
+#[test]
+fn hovering_the_website_button_says_what_is_there_and_where_it_goes_in_two_short_lines() {
+    let mut h = Harness::new();
+    let globe = h.pop_buttons("🌐")[0];
+    // Still over it for a while: a tooltip does not come at once.
+    h.pointer(globe.x, globe.y);
+    assert!(!is_drawn_containing(&h, "Click to open"), "not at once");
+    for _ in 0..90 {
+        h.frame();
+    }
+    let tip = rect_containing(&h, "Click to open");
+    let text = h
+        .texts()
+        .into_iter()
+        .map(|(t, _)| t)
+        .find(|t| t.contains("Click to open"))
+        .unwrap();
+    // What is there, then where a click goes.
+    assert_eq!(
+        text,
+        "jsonquery.dev — queries, tools and lessons in your browser\n\
+         Click to open https://jsonquery.dev"
+    );
+    // Two lines, neither of them wrapped.
+    assert!(tip.height() < 36.0, "{tip:?}");
+    assert!(
+        tip.min.x >= 0.0 && tip.max.x <= SCREEN.x && tip.min.y >= 0.0 && tip.max.y <= SCREEN.y,
+        "inside the window: {tip:?}"
+    );
+    assert!(h.opened.is_empty(), "hovering opens nothing");
+}
+
+/// The About window opened and drawn at `size`.
+fn about_window_at(size: egui::Vec2) -> Windows {
+    let mut w = Windows::new();
+    w.open_satellite(Satellite::About);
+    let about = Satellite::About.viewport_id();
+    for _ in 0..4 {
+        w.pass_sized(about, egui::ViewportInfo::default(), Vec::new(), size);
+    }
+    w
+}
+
+#[test]
+fn the_about_window_has_a_website_row_among_the_links_and_no_text_about_the_site() {
+    let w = about_window_at(egui::vec2(INFO_SIZE[0], INFO_SIZE[1]));
+    let about = Satellite::About.viewport_id();
+    let (label, link) = (
+        w.rect_in(about, "Website:").expect("the row's name"),
+        w.rect_in(about, "jsonquery.dev").expect("the link"),
+    );
+    assert!(
+        (label.center().y - link.center().y).abs() < 2.0,
+        "{label:?} {link:?}"
+    );
+    // Among the other links, under the source and above the issues.
+    let (source, issues) = (
+        w.rect_in(about, "Source:").unwrap(),
+        w.rect_in(about, "Issues / contact:").unwrap(),
+    );
+    assert!(source.max.y < label.min.y && label.max.y < issues.min.y);
+
+    // The row is all it says of the site: the 🌐's hover tells what is there.
+    for (text, _) in text_rects(&w.shapes[&about]) {
+        assert!(
+            !text.contains("query engine") && !text.contains("nothing to install"),
+            "no paragraph about the site: {text:?}"
+        );
+    }
+}
+
+#[test]
+fn the_link_in_the_about_window_opens_the_website_in_the_browser() {
+    let mut w = about_window_at(egui::vec2(INFO_SIZE[0], INFO_SIZE[1]));
+    let about = Satellite::About.viewport_id();
+    assert!(w.opened.is_empty());
+    let link = w.text_in(about, "jsonquery.dev").expect("the link");
+    w.click_in(about, link);
+    assert_eq!(w.opened, [WEBSITE]);
+}
+
+#[test]
+fn all_the_about_window_says_fits_where_it_opens_and_in_the_smallest_it_can_be() {
+    for size in [INFO_SIZE, INFO_MIN_SIZE] {
+        let size = egui::vec2(size[0], size[1]);
+        let w = about_window_at(size);
+        let about = Satellite::About.viewport_id();
+        // The last thing in it is drawn at all (a widget wholly outside the window
+        // is not), and nothing reaches past the window's edge.
+        for last in ["More in the README", "Known limitations:", "Website:"] {
+            assert!(
+                w.rect_in(about, last).is_some(),
+                "{size:?}: {last:?} is drawn"
+            );
+        }
+        for (text, rect) in text_rects(&w.shapes[&about]) {
+            assert!(
+                rect.min.x >= 0.0 && rect.max.x <= size.x && rect.max.y <= size.y,
+                "{size:?}: {text:?} is inside the window: {rect:?}"
+            );
+        }
+    }
+    const {
+        assert!(
+            INFO_MIN_SIZE[0] <= INFO_SIZE[0] && INFO_MIN_SIZE[1] <= INFO_SIZE[1],
+            "it does not open smaller than it can be"
+        )
+    };
 }
 
 #[test]
@@ -6568,7 +6791,7 @@ fn the_status_bar_says_what_the_tool_in_front_says_and_keeps_its_buttons() {
         is_drawn_containing(h, "Query ran in")
     });
     let status = h.panel("status_bar").unwrap();
-    for glyph in ["ℹ", "⚙"] {
+    for glyph in ["ℹ", "🌐", "⚙"] {
         let at = h.pop_buttons(glyph);
         assert!(
             at.len() == 1 && at[0].y > status.top() && at[0].y < status.bottom(),
@@ -6590,7 +6813,7 @@ fn the_status_bar_says_what_the_tool_in_front_says_and_keeps_its_buttons() {
         said.top() > status.top() && said.bottom() < status.bottom(),
         "in the status bar: {said:?} {status:?}"
     );
-    for glyph in ["ℹ", "⚙"] {
+    for glyph in ["ℹ", "🌐", "⚙"] {
         assert_eq!(h.pop_buttons(glyph).len(), 1, "{glyph} is still there");
     }
     // Only one status bar.
@@ -7061,12 +7284,19 @@ fn the_undock_button_is_in_the_status_bar_beside_the_settings_whichever_tab_is_i
         "undocked: nothing to undock, and no anchor here"
     );
     let classic_status = h.panel("status_bar").unwrap();
-    // The ℹ is in the corner and the ⚙ beside it, as they have always been, and
-    // docking the Tools moves neither.
-    let (info_before, settings_before) = (h.pop_buttons("ℹ")[0], h.pop_buttons("⚙")[0]);
+    // The ℹ is in the corner, the 🌐 beside it and the ⚙ beside that, as they have
+    // always been, and docking the Tools moves none of them.
+    let (info_before, globe_before, settings_before) = (
+        h.pop_buttons("ℹ")[0],
+        h.pop_buttons("🌐")[0],
+        h.pop_buttons("⚙")[0],
+    );
     assert!(
-        settings_before.x < info_before.x && info_before.x - settings_before.x < 30.0,
-        "{settings_before:?} {info_before:?}"
+        settings_before.x < globe_before.x
+            && globe_before.x < info_before.x
+            && globe_before.x - settings_before.x < 30.0
+            && info_before.x - globe_before.x < 30.0,
+        "{settings_before:?} {globe_before:?} {info_before:?}"
     );
     dock_tools(&mut h, Tool::Format);
     for tab in ["Format JSON", tools::QUERY_TAB, "Diff JSON"] {
@@ -7083,18 +7313,25 @@ fn the_undock_button_is_in_the_status_bar_beside_the_settings_whichever_tab_is_i
             1,
             "{tab}: here and not on the row of tabs: {undocks:?}"
         );
-        let (undock, info, settings) = (undocks[0], h.pop_buttons("ℹ")[0], h.pop_buttons("⚙")[0]);
+        let (undock, info, globe, settings) = (
+            undocks[0],
+            h.pop_buttons("ℹ")[0],
+            h.pop_buttons("🌐")[0],
+            h.pop_buttons("⚙")[0],
+        );
         assert!(
             undock.y > status.top()
                 && undock.y < status.bottom()
                 && (undock.y - info.y).abs() < 2.0,
             "{tab}: in the status bar, level with the ℹ: {undock:?} {info:?} {status:?}"
         );
-        // The ⚙ is next to the ℹ, which stays in the corner, where they were; the
-        // button is the next one to the left.
+        // The 🌐 and the ⚙ are next to the ℹ, which stays in the corner, where they
+        // were; the button is the next one to the left.
         assert!(
-            (info - info_before).length() < 0.5 && (settings - settings_before).length() < 0.5,
-            "{tab}: the ℹ and the ⚙ stay: {info:?} {settings:?}"
+            (info - info_before).length() < 0.5
+                && (globe - globe_before).length() < 0.5
+                && (settings - settings_before).length() < 0.5,
+            "{tab}: the ℹ, the 🌐 and the ⚙ stay: {info:?} {globe:?} {settings:?}"
         );
         assert!(
             undock.x < settings.x && settings.x - undock.x < 40.0,
@@ -7122,49 +7359,64 @@ fn the_undock_button_is_in_the_status_bar_beside_the_settings_whichever_tab_is_i
         "back in a window, the main window has none"
     );
     assert_eq!(h.pop_buttons(tools::DOCK_ICON).len(), 1);
-    let (info, settings) = (h.pop_buttons("ℹ")[0], h.pop_buttons("⚙")[0]);
+    let (info, globe, settings) = (
+        h.pop_buttons("ℹ")[0],
+        h.pop_buttons("🌐")[0],
+        h.pop_buttons("⚙")[0],
+    );
     assert!(
-        (info - info_before).length() < 0.5 && (settings - settings_before).length() < 0.5,
-        "{settings:?} {info:?}"
+        (info - info_before).length() < 0.5
+            && (globe - globe_before).length() < 0.5
+            && (settings - settings_before).length() < 0.5,
+        "{settings:?} {globe:?} {info:?}"
     );
 }
 
 #[test]
-fn the_status_bar_buttons_are_the_info_the_settings_the_undock_and_last_the_alert() {
+fn the_status_bar_buttons_are_the_info_the_website_the_settings_the_undock_and_last_the_alert() {
     let mut h = Harness::new();
     h.app.x11_alert = X11Alert::new(true);
     h.settle();
 
-    // Not docked: the alert is the one beside the ⚙, which is beside the ℹ.
-    let (alert, settings, info) = (
+    // Not docked: the alert is the one beside the ⚙, which is beside the 🌐, which
+    // is beside the ℹ.
+    let (alert, settings, globe, info) = (
         h.pop_buttons("⚠")[0],
         h.pop_buttons("⚙")[0],
+        h.pop_buttons("🌐")[0],
         h.pop_buttons("ℹ")[0],
     );
     assert!(
-        alert.x < settings.x && settings.x < info.x,
-        "{alert:?} {settings:?} {info:?}"
+        alert.x < settings.x && settings.x < globe.x && globe.x < info.x,
+        "{alert:?} {settings:?} {globe:?} {info:?}"
     );
-    assert!(info.x - settings.x < 30.0, "the ⚙ is next to the ℹ");
+    assert!(
+        info.x - globe.x < 30.0 && globe.x - settings.x < 30.0,
+        "the 🌐 is next to the ℹ, and the ⚙ to the 🌐"
+    );
 
     // Docked: the undock button comes between the ⚙ and the alert, and nothing else
     // has moved but the alert, out of its way.
     dock_tools_on_jsonquery(&mut h);
     let undock = h.pop_buttons(tools::UNDOCK_ICON)[0];
-    let (docked_alert, docked_settings, docked_info) = (
+    let (docked_alert, docked_settings, docked_globe, docked_info) = (
         h.pop_buttons("⚠")[0],
         h.pop_buttons("⚙")[0],
+        h.pop_buttons("🌐")[0],
         h.pop_buttons("ℹ")[0],
     );
     assert!(
         docked_alert.x < undock.x
             && undock.x < docked_settings.x
-            && docked_settings.x < docked_info.x,
-        "{docked_alert:?} {undock:?} {docked_settings:?} {docked_info:?}"
+            && docked_settings.x < docked_globe.x
+            && docked_globe.x < docked_info.x,
+        "{docked_alert:?} {undock:?} {docked_settings:?} {docked_globe:?} {docked_info:?}"
     );
     assert!(
-        (docked_info - info).length() < 0.5 && (docked_settings - settings).length() < 0.5,
-        "the ⚙ stays next to the ℹ"
+        (docked_info - info).length() < 0.5
+            && (docked_globe - globe).length() < 0.5
+            && (docked_settings - settings).length() < 0.5,
+        "the 🌐 stays next to the ℹ, and the ⚙ next to the 🌐"
     );
     assert!(
         docked_alert.x < alert.x,

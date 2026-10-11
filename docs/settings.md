@@ -2,10 +2,10 @@
 
 What can be set, where it is kept, and what the app remembers of how you left it.
 
-The **⚙** button at the right end of the status bar, just left of the **ⓘ**,
-opens the **Settings** window. It is a small window of its own, like the Tools
-window and the tutorial, so it can stay open beside the main window while you try
-a limit.
+The **⚙** button at the right end of the status bar, left of the **ⓘ** and the
+**🌐** (the one that opens the website), opens the **Settings** window. It is a
+small window of its own, like the Tools window and the tutorial, so it can stay
+open beside the main window while you try a limit.
 
 ## Limits on file sizes
 

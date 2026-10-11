@@ -1,6 +1,6 @@
 # Privacy policy: jsonquery gui
 
-_Last updated: 2026-10-09_
+_Last updated: 2026-10-11_
 
 jsonquery gui ("the app") is a desktop program for browsing and querying JSON files on your own
 computer. This policy covers the app however you install it: the Microsoft Store, GitHub Releases,
@@ -32,6 +32,11 @@ through do their own data collection, independent of anything the app does — s
   system has file modes, and read from there instead of being held in memory. The file is taken out of
   the folder the moment it is made and is gone when the app lets go of it (on Windows, when it is
   closed), so nothing of it is left behind. A smaller result stays in memory.
+- **Links.** The links in the ⓘ window, and the 🌐 button in the status bar (which goes to the
+  project's website, <https://jsonquery.dev>), hand an address to your web browser when you click
+  them. The app sends nothing itself. The site you land on, GitHub or jsonquery.dev, sees an
+  ordinary visit from your browser and handles it under its own policy (the website's is at
+  <https://jsonquery.dev/privacy>).
 - **Files you save.** The app writes a file only when you choose Save, and only where you choose.
 - **Settings.** The app keeps no history of your files or queries. It does save your settings — the
   limits on file sizes you set, the theme, whether autocomplete is on, whether the Tools are docked
