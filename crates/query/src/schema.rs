@@ -1,5 +1,5 @@
 //! Checking a JSON document against a JSON Schema — what the Tools window's
-//! Validate schema does.
+//! Validate Schema does.
 //!
 //! The checking itself is the `jsonschema` crate's (drafts 4, 6, 7, 2019-09 and
 //! 2020-12; the draft is taken from the schema's `$schema`, and is the newest

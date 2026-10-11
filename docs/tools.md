@@ -10,7 +10,7 @@ page of the selected one under them:
 | [Format JSON](#format-json) | Pretty-prints (2 or 4 spaces, tab), minifies, sorts the keys. |
 | [Diff JSON](#diff-json) | Shows two documents side by side with what differs marked, lists the changes, and gives the JSON Patch for it. |
 | [Patch JSON](#patch-json) | Applies a JSON Patch (RFC 6902) or a JSON Merge Patch (RFC 7386) to a document. |
-| [Validate schema](#validate-schema) | Checks a document against a JSON Schema and lists what does not fit. |
+| [Validate Schema](#validate-schema) | Checks a document against a JSON Schema and lists what does not fit. |
 
 Every page has the same shape, and it is the main window's: the tabs on top (as
 its toolbar is), a command row under them with the page's main button and its
@@ -23,6 +23,47 @@ what was last done ("Saved to …"). The line between the panes can be dragged.
 Buttons, text and spacing are the main window's own, so the two look like one
 program, and the window keeps its text short: what a choice does, and the
 limits, are in tooltips.
+
+## In a window, or docked in the main window
+
+The Tools open in a window of their own, which can sit beside the main window or
+on a second screen. They can also be **docked**: the **⚓** button at the right
+end of their row of tabs moves them into the main window, which then has a row of
+tabs on top — **Json Query**, **Merge JSON**, **Format JSON**, **Diff JSON**,
+**Patch JSON** and **Validate Schema** — and shows what the tab in front holds, in
+all the room there is. The tool they were on is the one in front.
+
+![The Tools docked in the main window: the row of tabs with Json Query first, and Diff JSON in front over two documents side by side](images/screenshot-tools-docked.png)
+
+The **Json Query** tab is the main window as it has always been: the source field, the
+query bar and Run, Source and Results with their trees, search, saving and pop-out.
+(The source field has moved down from the top row into this tab, and the autocomplete
+button, which is about the query, with it.) A tool's tab is that tool's page, as big
+as the window, with the status bar of the main window under it saying what the page
+says. What belongs to the window rather than to a tab stays at the right end of the
+top row: the **theme** button and the **tutorial**. The **🗗** at the bottom right, in
+the status bar beside the ⚙, **undocks** the Tools: they open in a window of their own
+again, and the main window is as it was before they were docked, with its 🛠 button.
+
+![The Json Query tab of the main window with the Tools docked: the source field, the query and Source and Results under the row of tabs](images/screenshot-tools-docked-jsonquery.png)
+
+What a page holds is kept while you look at another tab, and when the Tools move
+between the window and the main window. What goes with a document works across the
+tabs: **Open document** in a box takes the one that is open in the **Json Query** tab,
+and what the Tools put in that tab — a merge or a patched document opened with
+**Open in main window**, a value that Validate shows — brings it to the front, as
+does a lesson that the tutorial loads and runs.
+
+Keys and files go to the tab in front. **Ctrl+Enter** runs the main button of a tool's
+page (and Diff's Alt+arrows step through the differences), and runs the query on the
+**Json Query** tab, as it always has; **Ctrl+F** and **Ctrl+S** are about the trees, so
+they are the **Json Query** tab's. A **file dropped on the window** goes into the boxes
+of a tool's tab as it does in the Tools window; on the **Json Query** tab one file is
+opened as the document and several are put in the Merge list, which opens its tab.
+
+Where the Tools are is remembered for the next time
+([Settings](settings.md#what-is-remembered)): docked, the app starts with the row of
+tabs, on **Json Query**.
 
 ## Putting JSON in
 
@@ -327,7 +368,7 @@ The result is previewed. **Open in main window** makes it the loaded document
 `orders.patched.json`), and **Copy** copies it. Objects keep their order: a
 replaced member stays where it was, a new one goes last.
 
-## Validate schema
+## Validate Schema
 
 Check the **Document** against the **Schema** (a JSON Schema: drafts 4, 6, 7,
 2019-09 and 2020-12, read from `$schema`, or the newest when there is none).

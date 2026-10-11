@@ -6,7 +6,8 @@
 //!   `settings_window.rs`): from what size a file is kept on disk instead of
 //!   being loaded, how much the Tools window takes, and so on;
 //! * how the window looks (`interface.rs`): the theme, whether the query box
-//!   suggests, the size of the window and of its panes, as they were left.
+//!   suggests, the size of the window and of its panes, and whether the Tools
+//!   are docked in it, as they were left.
 //!
 //! The defaults are what the app has always done, and only what the user changed
 //! from them is written down, so that a default that is better one day reaches

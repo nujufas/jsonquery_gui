@@ -1,4 +1,4 @@
-//! Validate schema: check a document against a JSON Schema and list what does
+//! Validate Schema: check a document against a JSON Schema and list what does
 //! not fit — where in the document, what is wrong and which keyword of the
 //! schema said so (see `jsonquery_query::schema`). Both boxes take typed or
 //! pasted JSON, a file, or the document open in the main window.

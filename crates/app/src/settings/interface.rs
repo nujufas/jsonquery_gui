@@ -1,6 +1,6 @@
 //! How the window looks and where its parts are, kept from one run to the next:
-//! the theme, whether the query box suggests as you type, the size of the window
-//! and the sizes of its panes.
+//! the theme, whether the query box suggests as you type, the size of the window,
+//! the sizes of its panes, and whether the Tools are docked in the main window.
 //!
 //! Like the limits, only what differs from what the app starts with is written
 //! down: a size is there once the user has changed it, and not before.
@@ -45,6 +45,9 @@ pub struct Interface {
     /// How much of the width Source and Results share Source takes, from 0 to 1,
     /// if the user dragged it from a half.
     pub source_share: Option<f32>,
+    /// The Tools are tabs of the main window, beside Json Query, and not a
+    /// window of their own, which the app starts with.
+    pub tools_docked: bool,
 }
 
 impl Default for Interface {
@@ -56,6 +59,7 @@ impl Default for Interface {
             maximized: false,
             query_height: None,
             source_share: None,
+            tools_docked: false,
         }
     }
 }
@@ -77,6 +81,9 @@ impl Interface {
         }
         if self.autocomplete != default.autocomplete {
             root.insert("autocomplete".to_owned(), Value::from(self.autocomplete));
+        }
+        if self.tools_docked != default.tools_docked {
+            root.insert("tools".to_owned(), Value::from("docked"));
         }
 
         let mut window = Map::new();
@@ -124,6 +131,16 @@ impl Interface {
             Some(Value::Bool(on)) => interface.autocomplete = *on,
             Some(other) => notes.push(format!(
                 "autocomplete: {other} is not true or false, so the default is used"
+            )),
+        }
+        match root.get("tools") {
+            None => {}
+            Some(Value::String(place)) if place.eq_ignore_ascii_case("window") => {}
+            Some(Value::String(place)) if place.eq_ignore_ascii_case("docked") => {
+                interface.tools_docked = true;
+            }
+            Some(other) => notes.push(format!(
+                "tools: {other} is not \"docked\" or \"window\", so a window is used"
             )),
         }
 
@@ -246,6 +263,10 @@ mod tests {
             (interface.query_height, interface.source_share),
             (None, None)
         );
+        assert!(
+            !interface.tools_docked,
+            "the Tools are a window of their own"
+        );
         assert_eq!(written(&interface), json!({}), "nothing to write down");
     }
 
@@ -279,6 +300,10 @@ mod tests {
             written(&interface),
             json!({"panes": {"query_height": 140.5, "source_share": 0.42}})
         );
+        interface.query_height = None;
+        interface.source_share = None;
+        interface.tools_docked = true;
+        assert_eq!(written(&interface), json!({"tools": "docked"}));
     }
 
     #[test]
@@ -290,6 +315,7 @@ mod tests {
             maximized: true,
             query_height: Some(150.0),
             source_share: Some(0.35),
+            tools_docked: true,
         };
         let (read, notes) = read(written(&interface));
         assert_eq!(read, interface);
@@ -393,6 +419,26 @@ mod tests {
         }
         let (_, notes) = read(json!({"panes": 7}));
         assert_eq!(notes.len(), 1);
+    }
+
+    #[test]
+    fn the_tools_are_docked_or_in_a_window_in_any_case() {
+        assert!(read(json!({"tools": "docked"})).0.tools_docked);
+        assert!(read(json!({"tools": "DOCKED"})).0.tools_docked);
+        let (interface, notes) = read(json!({"tools": "window"}));
+        assert!(!interface.tools_docked && notes.is_empty());
+        assert!(!read(json!({"tools": "Window"})).0.tools_docked);
+        for tools in [
+            json!("floating"),
+            json!(true),
+            json!(["docked"]),
+            json!(null),
+        ] {
+            let (interface, notes) = read(json!({ "tools": tools }));
+            assert!(!interface.tools_docked, "{tools}: a window is used");
+            assert_eq!(notes.len(), 1, "{tools}: said why: {notes:?}");
+            assert!(notes[0].starts_with("tools: "), "{notes:?}");
+        }
     }
 
     #[test]

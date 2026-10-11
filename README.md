@@ -39,8 +39,10 @@ patches and validates documents too. Built in Rust with
   ![The tutorial window on the jq lesson about select](docs/images/screenshot-tutorial.png)
 - **Tools** — the 🛠 icon next to the tutorial opens the Tools window, with a
   tab for each of five utilities that go with the viewer: **Merge JSON**,
-  **Format JSON**, **Diff JSON**, **Patch JSON** and **Validate schema**. Each
-  is shown in action under [Tools](#tools) below.
+  **Format JSON**, **Diff JSON**, **Patch JSON** and **Validate Schema**. Each
+  is shown in action under [Tools](#tools) below. They open in a window of their
+  own, or **docked** in the main window — the **⚓** button in their row of tabs gives
+  the main window a row of tabs: **Json Query** itself, then the five tools.
 - **Streamed, cancellable queries** — results appear as jq produces them, so
   `first(...)`/`limit(...)` genuinely stop early; starting a new query aborts
   whatever was still running.
@@ -104,8 +106,9 @@ patches and validates documents too. Built in Rust with
   download or a copy may be, how much a query on a huge file may hold. Hover a
   name for what it does and its default, which is what the app has always used.
   The app also starts as you left it: the theme, whether autocomplete is on, the
-  size of the window (maximized or not) and of its panes. All of it is in one
-  small file, `~/.jsonquery/settings.json`. See [docs/settings.md](docs/settings.md).
+  size of the window (maximized or not) and of its panes, and whether the Tools
+  are docked. All of it is in one small file, `~/.jsonquery/settings.json`. See
+  [docs/settings.md](docs/settings.md).
 - **Keyboard shortcuts** — `Ctrl+Enter` run/apply, `Ctrl+F` search,
   `Ctrl+S` save (both scoped to whichever panel you last clicked), `F1`
   tutorial.
@@ -123,6 +126,20 @@ other. `Ctrl+Enter` runs the tab's main button and **Cancel** stops a job. The
 tools work in memory, so they are for documents that are not very large (what
 a run is given may add up to 128 MB, which is a setting). Details in
 [docs/tools.md](docs/tools.md).
+
+The Tools can also be **docked** into the main window, so that the whole app is one
+window: the **⚓** button at the right end of their row of tabs gives the main window
+a row of tabs — **Json Query** first, which is the window as it has always been (the
+source field, the query, Source and Results), then one tab for each tool — and what
+the tab in front holds takes the window. The theme and the tutorial stay at the right
+end of the row; the **🗗** at the bottom right, in the status bar beside the ⚙, undocks
+the Tools into a window of their own again.
+`Ctrl+Enter` and a file dropped on the window go to what is in front: a tool's tab runs
+and takes the file in one of its boxes, **Json Query** runs the query and opens the file
+as the document (several files go to Merge, whose tab comes to the front). Where the
+Tools are is remembered.
+
+![The Tools docked in the main window: the row of tabs with Json Query first, and Diff JSON in front](docs/images/screenshot-tools-docked.png)
 
 ### Merge JSON
 
@@ -182,7 +199,7 @@ operation that failed.
 
 ![Patch JSON: six operations applied to a document, the result on the right](docs/images/screenshot-tools-patch.png)
 
-### Validate schema
+### Validate Schema
 
 Checks a document against a JSON Schema (drafts 4, 6, 7, 2019-09 and 2020-12,
 read from `$schema`) and lists every problem with its pointer and what is
@@ -190,7 +207,7 @@ wrong. For the document that is open in the main window, **Show in main
 window** reveals a problem there. Nothing is ever fetched: a `$ref` has to
 point inside the schema.
 
-![Validate schema: a document checked against a schema, six problems listed with their pointers](docs/images/screenshot-tools-validate.png)
+![Validate Schema: a document checked against a schema, six problems listed with their pointers](docs/images/screenshot-tools-validate.png)
 
 ## Known limitations
 
@@ -307,8 +324,8 @@ the regular **jsonquery**: click that one, and drop files on its window.
   AppImage): [`scripts/jsonquery-x11.sh`](scripts/jsonquery-x11.sh) adds the
   entry (and, if you ask, a shortcut on the Desktop) with one command. The
   tar.gz has the script inside. For the others, the program carries it: when it
-  is running on native Wayland, a **⚠** appears at the bottom right, next to the
-  **ℹ**. Click it, then **Download jsonquery-x11.sh**, and choose where to save
+  is running on native Wayland, a **⚠** appears at the bottom right, beside the
+  **⚙**. Click it, then **Download jsonquery-x11.sh**, and choose where to save
   it; the popup then shows the command to run, with a **Copy command** button.
   Or download it yourself:
 
@@ -398,14 +415,16 @@ application on a virtual X display of its own (Xvfb with the fluxbox window
 manager, so it never touches your desktop), clicks and types into it the way a
 person would, and reads the screen back with Tesseract OCR, pixel checks and
 the clipboard — egui draws everything itself and has no accessibility tree to
-query. As of October 2026 it has 612 test cases in 23 suites, one directory
+query. As of October 2026 it has 680 test cases in 26 suites, one directory
 per area of the app (launch and window, opening sources, the toolbar and
 status bar, query engines, query highlighting, the query box, autocomplete,
 tree and text views, context menus, search, saving, keyboard shortcuts,
-pop-out panes, the Tools window, the tutorial and About windows, pane headers,
-drag and drop, the jq functions the app adds, CSV and TSV output, the
-tutorial's pages for them, the settings it keeps, and whole workflows from a
-file to a saved file).
+pop-out panes, the Tools window and the Tools docked in the main window, the
+tutorial and About windows, pane headers, drag and drop, the jq functions the
+app adds, CSV and TSV output, the tutorial's pages for them, the settings it
+keeps, and whole workflows from a file to a saved file). It is run twice: with
+the Tools in a window of their own, and with them docked as tabs of the main
+window.
 The file dialogs are answered by a stand-in for the desktop's file-chooser
 portal, so the open and save cases run unattended too. Each area is specified
 by a document in the suite's `docs/`, and a traceability matrix gives every
@@ -425,6 +444,7 @@ cd jsonquery_test
 ./run.sh suites/tools/tools_diff.robot --test 'TC-DIF-007*'  # one case
 ./run.sh                                                     # every suite (over an hour on one display)
 ./run_parallel.sh                                            # every suite, in lanes at once
+./run_docked.sh                                              # the same suites with the Tools docked in the main window
 ```
 
 It finds this checkout as `../jsonquery_gui`, or wherever `JQ_APP_DIR` points.

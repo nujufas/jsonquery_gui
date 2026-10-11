@@ -250,7 +250,7 @@ impl Dock {
             .get_or_insert_with(|| Arc::new(crate::app_icon()))
             .clone();
         let mut builder = egui::ViewportBuilder::default()
-            .with_title(format!("jsonquery — {}", pane.label()))
+            .with_title(crate::title_of(pane.label()))
             .with_inner_size(placement.size)
             .with_min_inner_size(pane.min_size())
             .with_app_id(crate::APP_ID)

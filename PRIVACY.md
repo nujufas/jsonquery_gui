@@ -34,10 +34,11 @@ through do their own data collection, independent of anything the app does — s
   closed), so nothing of it is left behind. A smaller result stays in memory.
 - **Files you save.** The app writes a file only when you choose Save, and only where you choose.
 - **Settings.** The app keeps no history of your files or queries. It does save your settings — the
-  limits on file sizes you set, the theme, whether autocomplete is on, and how big its window and
-  panes were — in one small file on your computer, `settings.json` in the `.jsonquery` folder of your
-  home folder (`%USERPROFILE%\.jsonquery` on Windows). It holds nothing about your files or queries,
-  is never sent anywhere, and can be deleted at any time to put everything back to the defaults.
+  limits on file sizes you set, the theme, whether autocomplete is on, whether the Tools are docked
+  in the main window, and how big its window and panes were — in one small file on your computer,
+  `settings.json` in the `.jsonquery` folder of your home folder (`%USERPROFILE%\.jsonquery` on
+  Windows). It holds nothing about your files or queries, is never sent anywhere, and can be deleted
+  at any time to put everything back to the defaults.
 
 ## Stores and package managers
 

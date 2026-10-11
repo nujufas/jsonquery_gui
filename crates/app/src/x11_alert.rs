@@ -1,4 +1,4 @@
-//! The ⚠ in the status bar, next to the ℹ, that tells a user on a Wayland
+//! The ⚠ in the status bar, beside the ⚙, that tells a user on a Wayland
 //! desktop that files can't be dropped on the window, and what to do about it:
 //! a click opens a small popup with the explanation and a button that saves the
 //! X11 launcher script (`x11_launcher`), then shows the command to run.

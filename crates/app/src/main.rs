@@ -24,6 +24,15 @@ mod x11_launcher;
 /// otherwise "pin to taskbar" after launch doesn't stick.
 const APP_ID: &str = "jsonquery_gui";
 
+/// What the app is called in the title of its windows: the main window's own, and
+/// the start of every other's ("JsonQuery — Tools", see [`title_of`]).
+const APP_TITLE: &str = "JsonQuery";
+
+/// The title of one of the app's other windows: the app, then what the window is.
+fn title_of(window: &str) -> String {
+    format!("{APP_TITLE} — {window}")
+}
+
 /// The window icon, shared by the main window and every other window it opens.
 fn app_icon() -> egui::IconData {
     eframe::icon_data::from_png_bytes(include_bytes!("../../../assets/icon.png"))
@@ -36,7 +45,7 @@ fn main_window(interface: &settings::Interface) -> egui::ViewportBuilder {
     let builder = egui::ViewportBuilder::default()
         .with_inner_size(interface.window_size())
         .with_min_inner_size(settings::MIN_WINDOW)
-        .with_title("jsonquery")
+        .with_title(APP_TITLE)
         .with_app_id(APP_ID)
         .with_icon(app_icon());
     if interface.maximized {
@@ -73,6 +82,13 @@ mod tests {
         assert_eq!(window.inner_size, Some(egui::vec2(1200.0, 800.0)));
         assert_eq!(window.min_inner_size, Some(egui::vec2(640.0, 420.0)));
         assert_ne!(window.maximized, Some(true));
+    }
+
+    #[test]
+    fn the_windows_are_titled_with_the_name_of_the_app() {
+        let window = main_window(&settings::Interface::default());
+        assert_eq!(window.title.as_deref(), Some("JsonQuery"));
+        assert_eq!(title_of("Tools"), "JsonQuery — Tools");
     }
 
     #[test]

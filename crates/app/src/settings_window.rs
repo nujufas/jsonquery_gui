@@ -162,7 +162,7 @@ impl SettingsWindow {
             .get_or_insert_with(|| Arc::new(crate::app_icon()))
             .clone();
         egui::ViewportBuilder::default()
-            .with_title("jsonquery — Settings")
+            .with_title(crate::title_of("Settings"))
             .with_inner_size(OPENING_SIZE)
             .with_min_inner_size(LEAST_SIZE)
             .with_app_id(crate::APP_ID)

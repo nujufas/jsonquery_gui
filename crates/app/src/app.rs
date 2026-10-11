@@ -19,7 +19,7 @@ use crate::query_highlight;
 use crate::query_suggest::{apply_suggestion, QuerySuggest};
 use crate::settings::{Settings, Store, DEFAULT_WINDOW, MIN_WINDOW};
 use crate::settings_window::SettingsWindow;
-use crate::tools::{self, Tools};
+use crate::tools::{self, Place, Tools};
 use crate::tree_view::{RowAction, TreeView};
 use crate::tutorial::{LoadRequest, Tutorial};
 use crate::worker::{self, Command, CopyTarget, Event, SearchRoot};
@@ -82,6 +82,10 @@ const LAYOUT_HOLD_SECS: f64 = 0.25;
 /// "Load" and "Clear" buttons, the byte size, and the icon buttons pinned to
 /// the far right.
 const TOOLBAR_TRAILING_RESERVE: f32 = 380.0;
+/// The same for the row that begins the Json Query tab while the Tools are docked,
+/// which has only the autocomplete button pinned to the far right (the theme, the
+/// tutorial and the Tools are on the row of tabs above it).
+const SOURCE_BAR_TRAILING_RESERVE: f32 = 290.0;
 /// The narrowest the toolbar's source field is made, however much the rest of
 /// the row wants.
 const SOURCE_FIELD_MIN_WIDTH: f32 = 120.0;
@@ -153,7 +157,7 @@ pub struct App {
 
     /// The tutorial window (a second native window) and its state.
     tutorial: Tutorial,
-    /// The Tools window (also a second native window) — Merge JSON today.
+    /// The Tools: a second native window, or tabs of the main window.
     tools: Tools,
     /// The (i) info window (also a second native window) — license, source,
     /// issues/contact, privacy and known limitations.
@@ -457,6 +461,11 @@ impl App {
         worker::spawn(cmd_rx, evt_tx, settings.limits, move || wake_windows(&ctx));
         let mut tools = Tools::default();
         tools.use_limits(&settings.limits);
+        tools.use_place(if settings.interface.tools_docked {
+            Place::Docked
+        } else {
+            Place::Window
+        });
 
         Self {
             cmd_tx,
@@ -997,6 +1006,8 @@ impl App {
         // Only an exact match was revealed (see `Event::Found`), and it was
         // the first entry.
         let selected = searched_for.is_none().then_some(0);
+        // (Docked, a tool's page may be in front of the list.)
+        self.tools.show_query();
         self.hit_list = Some(HitList {
             kind: HitListKind::FindInSource {
                 row: self.find_row.clone(),
@@ -1019,6 +1030,7 @@ impl App {
             PanelKind::Results => Some(Root::Tree(&self.results)),
         };
         let matches = build_search_matches(cursor.query.target, root, cursor.hits.clone());
+        self.tools.show_query();
         self.hit_list = Some(HitList {
             kind: HitListKind::Search(cursor.query.clone()),
             matches,
@@ -1045,15 +1057,22 @@ impl App {
             self.tutorial.open_or_focus(ctx);
         }
 
+        // With the Tools docked in the main window and a tool's tab in front, the
+        // keys pressed in it are the page's: Ctrl+Enter runs the tool, and there is
+        // no tree for Ctrl+F or Ctrl+S to be about. (The window of a pane that was
+        // popped out has its own input, and is still about its pane.)
+        let page = ctx.viewport_id() == egui::ViewportId::ROOT && self.tools.page_in_front();
+
         // Ctrl+Enter runs the query from any window, not just the one the
         // query box is in. Read, not consumed: the editable Source text view
         // takes the same keys as its "Apply".
         let run = ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Enter));
-        if run && self.doc.is_some() && !self.query_running {
+        if run && !page && self.doc.is_some() && !self.query_running {
             self.run_query();
         }
 
-        let find = ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::F));
+        let find =
+            !page && ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::F));
         if find {
             let panel = pane_window.unwrap_or(self.focused_panel);
             self.focused_panel = panel;
@@ -1074,7 +1093,8 @@ impl App {
             }
         }
 
-        let save = ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::S));
+        let save =
+            !page && ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::S));
         if save {
             let panel = pane_window.unwrap_or(self.focused_panel);
             self.focused_panel = panel;
@@ -1118,7 +1138,12 @@ impl App {
     /// something that just happened in it (a row revealed) and may have been
     /// asked for from another window.
     fn raise_pane(&mut self, panel: PanelKind) {
-        self.raise_window = Some(self.viewport_of(panel));
+        let window = self.viewport_of(panel);
+        if window == egui::ViewportId::ROOT {
+            // Docked, a tool's page may be in front of the tree.
+            self.tools.show_query();
+        }
+        self.raise_window = Some(window);
     }
 
     /// The dialogs that belong to `viewport`: the Find dialog is drawn in the
@@ -1444,6 +1469,8 @@ impl App {
     /// auto-detected as jq), put the query in the box, and/or replace the
     /// source document — running the query once that document has loaded.
     fn apply_tutorial_request(&mut self, request: LoadRequest) {
+        // What it loads and runs is for the main window's own tab to show.
+        self.tools.show_query();
         if let Some(query) = request.query {
             self.query_engine = Some(request.kind);
             self.query_text = query.to_owned();
@@ -1477,6 +1504,7 @@ impl App {
             }
             tools::Request::Open(doc) => {
                 self.document_loaded(doc);
+                self.tools.show_query();
                 ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Focus);
             }
             tools::Request::Job {
@@ -1526,6 +1554,7 @@ impl App {
     }
 
     fn show_pointer(&mut self, ctx: &egui::Context, pointer: String) {
+        self.tools.show_query();
         self.query_engine = Some(jsonquery_query::Kind::JsonPointer);
         self.query_text = pointer;
         self.query_suggest.close();
@@ -1534,8 +1563,10 @@ impl App {
     }
 
     /// Whether a file is being dragged over this window, opening one that is
-    /// dropped on it (several go to the Tools window's merge) — unless `open_dropped` is off, for a pane in an embedded
-    /// window, which shares the main window's input and so its dropped file.
+    /// dropped on it (several go to the Tools' merge) — unless `open_dropped` is
+    /// off: for a pane in an embedded window, which shares the main window's input
+    /// and so its dropped file, and for the main window with the page of a tool
+    /// docked in front of it, whose boxes take the files dropped on it.
     fn handle_drag_and_drop(&mut self, ui: &egui::Ui, open_dropped: bool) -> bool {
         let (hovering, dropped) = ui.ctx().input(|i| {
             let hovering = !i.raw.hovered_files.is_empty();
@@ -1562,7 +1593,12 @@ impl App {
     /// One row: a source field that takes a typed or pasted URL or local
     /// path, then "…" (browse for a file), "Load" and "Clear", then what is
     /// loaded (size, NDJSON note) and the icon buttons pinned to the right.
+    ///
+    /// With the Tools docked it is the first row of the Json Query tab, under
+    /// the row of tabs (`tab_strip`) that has the theme, the tutorial and the
+    /// Tools' button: what is left at the right is what is about the query.
     fn toolbar(&mut self, ui: &mut egui::Ui) {
+        let tabbed = self.tools.is_docked();
         ui.horizontal(|ui| {
             // The field gets the row minus a reserve for everything after it
             // (the three buttons, the byte size and an occasional NDJSON
@@ -1581,7 +1617,12 @@ impl App {
                         | DocumentSource::Derived { .. }
                 )
             });
-            let mut reserve = TOOLBAR_TRAILING_RESERVE + self.source_info_extra_width();
+            let trailing = if tabbed {
+                SOURCE_BAR_TRAILING_RESERVE
+            } else {
+                TOOLBAR_TRAILING_RESERVE
+            };
+            let mut reserve = trailing + self.source_info_extra_width();
             if labelled && self.dock.any_popped() {
                 reserve += DOCK_ALL_BUTTON_WIDTH;
             }
@@ -1597,15 +1638,38 @@ impl App {
                 egui::vec2(ui.available_width(), ui.spacing().interact_size.y),
                 egui::Layout::right_to_left(egui::Align::Center),
                 |ui| {
-                    theme_toggle_button(ui);
+                    if !tabbed {
+                        theme_toggle_button(ui);
+                    }
                     autocomplete_toggle_button(ui, &mut self.query_suggest);
-                    tutorial_button(ui, &mut self.tutorial);
-                    tools::button(ui, &mut self.tools);
+                    if !tabbed {
+                        tutorial_button(ui, &mut self.tutorial);
+                        tools::button(ui, &mut self.tools);
+                    }
                     // Only while something is popped out, so the toolbar is
                     // exactly what it always was the rest of the time.
                     if self.dock.any_popped() {
                         dock_all_button(ui, &mut self.dock);
                     }
+                },
+            );
+        });
+    }
+
+    /// The row on top of the main window while the Tools are docked in it: a tab
+    /// for jsonquery itself, which holds the source field, the query, Source and
+    /// Results, and one for each tool; and at the right end what belongs to the
+    /// window and not to a tab — the theme and the tutorial. (The way to undock the
+    /// Tools is not here but at the bottom of the window, in the status bar.)
+    fn tab_strip(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            self.tools.main_tabs(ui);
+            ui.allocate_ui_with_layout(
+                egui::vec2(ui.available_width(), ui.spacing().interact_size.y),
+                egui::Layout::right_to_left(egui::Align::Center),
+                |ui| {
+                    theme_toggle_button(ui);
+                    tutorial_button(ui, &mut self.tutorial);
                 },
             );
         });
@@ -2394,23 +2458,43 @@ impl App {
         // out for the duration and put back afterwards.
         //
         // The right side is laid out right to left: the (i) first, so that it
-        // stays in the corner, and on native Wayland the alert (⚠) beside it,
-        // and then the ⚙ that opens the Settings.
+        // stays in the corner, and the ⚙ that opens the Settings beside it, where it
+        // is whether the Tools are docked or not. Then, docked, the 🗗 that undocks
+        // them (the one way out: the row of tabs has none), and last, on native
+        // Wayland, the alert (⚠).
+        //
+        // With the page of a tool in front (the Tools docked), the status text is
+        // the tool's: what the page says of its result, and the last thing it did.
         let mut info_window = std::mem::take(&mut self.info_window);
         let mut settings_window = std::mem::take(&mut self.settings_window);
         let mut x11_alert = std::mem::take(&mut self.x11_alert);
+        let page = self.tools.page_in_front();
+        let docked = self.tools.is_docked();
+        let mut undock = false;
         egui::Sides::new().shrink_right().show(
             ui,
-            |ui| self.status_bar_text(ui),
+            |ui| {
+                if page {
+                    self.tools.status_bar(ui);
+                } else {
+                    self.status_bar_text(ui);
+                }
+            },
             |ui| {
                 info_button(ui, &mut info_window);
-                x11_alert.ui(ui);
                 settings_button(ui, &mut settings_window);
+                if docked && tools::undock_button(ui) {
+                    undock = true;
+                }
+                x11_alert.ui(ui);
             },
         );
         self.info_window = info_window;
         self.settings_window = settings_window;
         self.x11_alert = x11_alert;
+        if undock {
+            self.tools.request_place(Place::Window);
+        }
     }
 
     fn status_bar_text(&mut self, ui: &mut egui::Ui) {
@@ -2897,7 +2981,7 @@ impl InfoWindow {
             .get_or_insert_with(|| Arc::new(crate::app_icon()))
             .clone();
         egui::ViewportBuilder::default()
-            .with_title("jsonquery — About")
+            .with_title(crate::title_of("About"))
             .with_inner_size([380.0, 320.0])
             .with_min_inner_size([320.0, 280.0])
             .with_app_id(crate::APP_ID)
@@ -3022,7 +3106,9 @@ impl App {
     fn show_with(&mut self, ui: &mut egui::Ui, shared: Option<&Arc<Mutex<App>>>) {
         let ctx = ui.ctx().clone();
         self.drain_events(&ctx);
-        let hovering_drop = self.handle_drag_and_drop(ui, true);
+        // The files dropped on the window are the page's, not the main window's,
+        // while the page of a tool is in front.
+        let hovering_drop = self.handle_drag_and_drop(ui, !self.tools.page_in_front());
         // Shortcuts first, so Ctrl+F's dialog is drawn (and focused) in the
         // frame it was pressed rather than the one after.
         self.handle_shortcuts(&ctx, None);
@@ -3031,8 +3117,22 @@ impl App {
             ctx.send_viewport_cmd_to(window, egui::ViewportCommand::Focus);
         }
 
-        egui::Panel::top("toolbar").show(ui, |ui| self.toolbar(ui));
-        if !self.dock.is_popped(Pane::Query) {
+        // With the Tools docked, the top row is the row of tabs, and the source
+        // field is the first row of the Json Query tab, under it.
+        let docked = self.tools.is_docked();
+        egui::Panel::top("toolbar").show(ui, |ui| {
+            if docked {
+                self.tab_strip(ui);
+            } else {
+                self.toolbar(ui);
+            }
+        });
+        // (A tab that was clicked just now is in front already.)
+        let page = self.tools.page_in_front();
+        if docked && !page {
+            egui::Panel::top("source_bar").show(ui, |ui| self.toolbar(ui));
+        }
+        if !page && !self.dock.is_popped(Pane::Query) {
             let query = egui::Panel::top("query_bar")
                 .resizable(true)
                 .default_size(
@@ -3047,6 +3147,28 @@ impl App {
             self.seen_query_height = Some(query.response.rect.height());
         }
         egui::Panel::bottom("status_bar").show(ui, |ui| self.status_bar(ui));
+        if page {
+            // The page of a tool takes all the room there is.
+            if let Some(request) = self.tools.docked_page(ui, self.doc.as_ref()) {
+                self.apply_tools_request(&ctx, request);
+            }
+        } else {
+            self.query_panels(ui, hovering_drop);
+        }
+
+        self.show_popped_panes(&ctx, shared);
+        // Only now, so that every pane was drawn in one place this frame.
+        self.dock.apply_requests();
+        self.show_satellites(&ctx, shared);
+        // And the Tools, which are a window or tabs of the main window, and not both.
+        self.apply_tools_place(&ctx);
+        self.note_interface(&ctx);
+    }
+
+    /// What is under the rows of the Json Query tab: the list of hits, against the
+    /// panes it lists, and Source and Results.
+    fn query_panels(&mut self, ui: &mut egui::Ui, hovering_drop: bool) {
+        let ctx = ui.ctx().clone();
         if self.hit_list.is_some() {
             egui::Panel::bottom("search_results_panel")
                 .resizable(true)
@@ -3096,12 +3218,19 @@ impl App {
                 egui::CentralPanel::default().show(ui, |ui| self.nothing_docked_note(ui));
             }
         }
+    }
 
-        self.show_popped_panes(&ctx, shared);
-        // Only now, so that every pane was drawn in one place this frame.
-        self.dock.apply_requests();
-        self.show_satellites(&ctx, shared);
-        self.note_interface(&ctx);
+    /// Move the Tools to the other place if they asked to be, now that no frame is
+    /// being drawn: from their window into the main window, or out of it.
+    /// Whichever is to draw them next is told to. True when they moved.
+    fn apply_tools_place(&mut self, ctx: &egui::Context) -> bool {
+        let moved = self.tools.apply_place_request();
+        if moved {
+            ctx.request_repaint();
+            ctx.request_repaint_of(egui::ViewportId::ROOT);
+            ctx.request_repaint_of(tools::viewport_id());
+        }
+        moved
     }
 
     /// See what the interface looks like — the theme, whether the query box
@@ -3113,6 +3242,7 @@ impl App {
         let mut now = self.settings.interface;
         now.dark = ctx.theme() == egui::Theme::Dark;
         now.autocomplete = self.query_suggest.enabled;
+        now.tools_docked = self.tools.place() == Place::Docked;
 
         let (maximized, fullscreen, minimized, monitor) = ctx.input(|i| {
             let window = i.viewport();

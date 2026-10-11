@@ -94,6 +94,6 @@ is in [Architecture](architecture.md).
 - **[Query Engines](query-engines.md)** — jq, JSON Pointer, JSONPath, and
   JMESPath, picked via an auto-detecting query-bar toggle, plus the wider
   landscape surveyed for what to add next.
-- **[Tools](tools.md)** — the 🛠 window: merging several JSON files with a jq
-  filter, formatting, diffing, patching (RFC 6902 / 7386) and validating against
-  a JSON Schema.
+- **[Tools](tools.md)** — the 🛠 window, which can be docked in the main window as
+  tabs beside Json Query: merging several JSON files with a jq filter, formatting,
+  diffing, patching (RFC 6902 / 7386) and validating against a JSON Schema.

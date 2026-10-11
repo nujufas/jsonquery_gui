@@ -76,10 +76,16 @@ The app starts as you left it:
   window managers decide that;
 - **the size of the panes**: how high the query panel is, and how much of the width
   Source has against Results. These are kept while the window is not maximized or
-  full screen.
+  full screen;
+- **where the Tools are**: in a window of their own, which is how they start, or
+  [docked](tools.md#in-a-window-or-docked-in-the-main-window) in the main window, as
+  tabs beside Json Query (the ⚓ button in the Tools' row of tabs). Docked, the app starts
+  with that row of tabs, on the Json Query tab. The size and place of the Tools'
+  *window* are not kept: window managers decide those.
 
 Nothing else is: not the files you opened, not your queries, not the pane layout
-of a window that was popped out. (See the [privacy policy](../PRIVACY.md).)
+of a window that was popped out, not what the Tools hold. (See the
+[privacy policy](../PRIVACY.md).)
 
 ## The file
 
@@ -108,6 +114,7 @@ reaches everyone who never touched it:
   },
   "theme": "light",
   "autocomplete": true,
+  "tools": "docked",
   "window": { "width": 1400.0, "height": 900.0, "maximized": true },
   "panes": { "query_height": 140.0, "source_share": 0.42 }
 }
@@ -117,6 +124,8 @@ The names of the limits are `keep_on_disk_from`, `download`, `tools`, `copy`,
 `query_parse`, `query_value`, `query_result`, `query_gather` and `query_keys`, in the
 order of the table. A limit is text with a unit, as it is typed in the window, or a
 number of bytes. `theme` is `"dark"` or `"light"`; `source_share` is from 0 to 1.
+Beside `limits`, `tools` is `"window"` or `"docked"` (it is not the limit of that name,
+which is inside `limits`).
 
 The file can be edited by hand while the app is not running (the app rewrites it
 as a whole, and keeps nothing of what it does not know). A file that is not there,

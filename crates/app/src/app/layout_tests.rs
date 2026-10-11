@@ -2440,7 +2440,7 @@ fn the_tools_window_lists_every_tool_and_each_opens_its_page() {
         ("Format JSON", "Format"),
         ("Diff JSON", "Compare"),
         ("Patch JSON", "Apply"),
-        ("Validate schema", "Validate"),
+        ("Validate Schema", "Validate"),
     ];
     for (tab, _) in pages {
         assert!(is_drawn(&h, tab), "{tab}: {:?}", h.texts());
@@ -4821,7 +4821,7 @@ fn saving_after_expanding_writes_the_rows_in_the_queries_format() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-// The ⚠ beside the (i), on a Wayland desktop (`x11_alert.rs` tests the widget on
+// The ⚠ beside the ⚙, on a Wayland desktop (`x11_alert.rs` tests the widget on
 // its own). The tests never read the session they run from: the app starts with
 // the alert hidden and these turn it on.
 
@@ -4833,10 +4833,11 @@ fn text_rect(h: &Harness, wanted: &str) -> Option<egui::Rect> {
 }
 
 #[test]
-fn on_wayland_the_alert_sits_beside_the_info_button_and_moves_nothing() {
+fn on_wayland_the_alert_sits_beside_the_settings_button_and_moves_nothing() {
     let mut h = Harness::new();
     let bar = h.panel("status_bar").expect("the status bar");
     let info = text_rect(&h, "ℹ").expect("the (i) button");
+    let settings = text_rect(&h, "⚙").expect("the ⚙ button");
     assert!(
         text_rect(&h, "⚠").is_none(),
         "no alert unless the desktop is Wayland"
@@ -4849,15 +4850,23 @@ fn on_wayland_the_alert_sits_beside_the_info_button_and_moves_nothing() {
         (alert.center().y - info.center().y).abs() < 2.0,
         "on the (i)'s row: {alert:?} vs {info:?}"
     );
-    assert!(alert.max.x < info.min.x, "to the left of it: {alert:?}");
     assert!(
-        info.min.x - alert.max.x < 24.0,
-        "next to it, not across the bar: {alert:?} vs {info:?}"
+        alert.max.x < settings.min.x,
+        "to the left of the ⚙: {alert:?}"
+    );
+    assert!(
+        settings.min.x - alert.max.x < 24.0,
+        "next to it, not across the bar: {alert:?} vs {settings:?}"
     );
     assert_eq!(
         text_rect(&h, "ℹ"),
         Some(info),
         "the (i) stays in the corner"
+    );
+    assert_eq!(
+        text_rect(&h, "⚙"),
+        Some(settings),
+        "and the ⚙ stays beside it"
     );
     assert_eq!(h.panel("status_bar"), Some(bar), "the bar is as it was");
 }
@@ -6127,5 +6136,1433 @@ fn the_limits_and_the_interface_are_kept_together_and_neither_loses_the_other() 
         kept(&file),
         Some(serde_json::json!({"limits": {"copy": "8 MB"}}))
     );
+    forget_settings(&file);
+}
+
+// ---- the Tools, docked in the main window -----------------------------------------
+//
+// The Tools are a window of their own until a button in their row of tabs docks
+// them. The main window then has a row of tabs on top — jsonquery's own, and one for
+// each tool — and shows what the tab in front holds. The source field is the first
+// row of jsonquery's tab; the theme and the tutorial stay at the right end of the row
+// of tabs, and the button that undocks the Tools is in the status bar, at the bottom.
+
+use crate::tools::Place;
+
+/// The tabs of the main window while the Tools are docked in it, left to right.
+const TABS: [&str; 6] = [
+    tools::QUERY_TAB,
+    "Merge JSON",
+    "Format JSON",
+    "Diff JSON",
+    "Patch JSON",
+    "Validate Schema",
+];
+
+/// The Tools, docked and on `tool`'s tab.
+fn dock_tools(h: &mut Harness, tool: Tool) {
+    let ctx = h.ctx.clone();
+    h.app.tools.use_place(Place::Docked);
+    h.app.tools.open_on(&ctx, tool);
+    h.settle();
+}
+
+/// The Tools, docked and on jsonquery's own tab, which is where they start.
+fn dock_tools_on_jsonquery(h: &mut Harness) {
+    h.app.tools.use_place(Place::Docked);
+    h.settle();
+}
+
+/// Where the theme button is: a sun in the dark theme, a moon in the light one.
+fn theme_button(h: &Harness) -> egui::Pos2 {
+    ["☀", "🌙"]
+        .iter()
+        .find_map(|glyph| h.pop_buttons(glyph).first().copied())
+        .expect("the theme button")
+}
+
+/// Ctrl+Enter, with the modifier held down the way a keyboard holds it.
+fn ctrl_enter(h: &mut Harness) {
+    let key = |pressed| egui::Event::Key {
+        key: egui::Key::Enter,
+        physical_key: Some(egui::Key::Enter),
+        pressed,
+        repeat: false,
+        modifiers: egui::Modifiers::COMMAND,
+    };
+    h.frame_with(vec![egui::Event::ModifiersChanged(
+        egui::Modifiers::COMMAND,
+    )]);
+    h.frame_with(vec![key(true)]);
+    h.frame_with(vec![key(false)]);
+    h.frame_with(vec![egui::Event::ModifiersChanged(egui::Modifiers::NONE)]);
+}
+
+/// Drop these files on the main window, in one frame.
+fn drop_files(h: &mut Harness, files: &[&std::path::Path]) {
+    let input = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, SCREEN)),
+        time: Some(h.time),
+        dropped_files: files
+            .iter()
+            .map(|f| {
+                std::sync::Arc::new(FakeDroppedFile(f.to_path_buf()))
+                    as std::sync::Arc<dyn egui::DroppedFile + Send + Sync>
+            })
+            .collect(),
+        ..Default::default()
+    };
+    let app = &mut h.app;
+    let mut out = h.ctx.run_ui(input, |ui| app.show(ui));
+    out.textures_delta.clear();
+    h.settle();
+}
+
+/// Whether the button drawn around `at` is lit, with the fill that marks what is
+/// selected.
+fn is_lit(h: &Harness, at: egui::Pos2) -> bool {
+    fn walk(shape: &egui::Shape, at: egui::Pos2, lit: egui::Color32, found: &mut bool) {
+        match shape {
+            egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, at, lit, found)),
+            egui::Shape::Rect(r) if r.fill == lit && r.rect.contains(at) => *found = true,
+            _ => {}
+        }
+    }
+    let lit = h.ctx.global_style().visuals.selection.bg_fill;
+    let mut found = false;
+    for clipped in &h.shapes {
+        walk(&clipped.shape, at, lit, &mut found);
+    }
+    found
+}
+
+/// The height of the frame of the button drawn around `at`: that of the smallest
+/// filled rectangle that contains it.
+fn frame_height_at(h: &Harness, at: egui::Pos2) -> f32 {
+    fn walk(shape: &egui::Shape, at: egui::Pos2, best: &mut Option<f32>) {
+        match shape {
+            egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, at, best)),
+            egui::Shape::Rect(r) if r.fill.a() > 0 && r.rect.contains(at) => {
+                let height = r.rect.height();
+                if best.is_none_or(|b| height < b) {
+                    *best = Some(height);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut best = None;
+    for clipped in &h.shapes {
+        walk(&clipped.shape, at, &mut best);
+    }
+    best.unwrap_or_else(|| panic!("a button is drawn around {at:?}"))
+}
+
+/// The rectangle of the first text drawn that contains `part`.
+fn rect_containing(h: &Harness, part: &str) -> egui::Rect {
+    text_rects(&h.shapes)
+        .into_iter()
+        .find(|(t, _)| t.contains(part))
+        .unwrap_or_else(|| panic!("a text with {part:?} is drawn: {:?}", h.texts()))
+        .1
+}
+
+#[test]
+fn the_tools_window_has_a_button_that_docks_the_tools_in_the_main_window() {
+    let mut h = Harness::new();
+    assert!(
+        h.pop_buttons(tools::DOCK_ICON).is_empty(),
+        "nothing to dock before the Tools are open"
+    );
+    let tools = h.pop_buttons("🛠")[0];
+    h.click(tools.x, tools.y);
+    assert!(
+        h.app.tools.in_window() && !h.app.tools.is_docked(),
+        "the 🛠 button opens a window, as it always did"
+    );
+    assert_eq!(h.app.tools.place(), Place::Window);
+
+    // The anchor is at the right end of the window's row of tabs, on its level; there
+    // is nothing to undock yet.
+    let dock = h.pop_buttons(tools::DOCK_ICON);
+    assert_eq!(dock.len(), 1, "{dock:?}");
+    assert!(h.pop_buttons(tools::UNDOCK_ICON).is_empty());
+    let last_tab = rect_of(&h, "Validate Schema");
+    assert!(dock[0].x > last_tab.right(), "{:?} {last_tab:?}", dock[0]);
+    assert!((dock[0].y - last_tab.center().y).abs() < 4.0);
+    assert!(
+        !is_drawn(&h, tools::QUERY_TAB),
+        "a tab of jsonquery's own is for the main window"
+    );
+
+    h.click(dock[0].x, dock[0].y);
+    assert!(h.app.tools.is_docked(), "docked");
+    assert!(!h.app.tools.in_window(), "and no longer a window");
+    assert_eq!(h.app.tools.place(), Place::Docked);
+    assert!(
+        h.app.tools.page_in_front() && is_drawn(&h, "Merge"),
+        "the page they were on is the one in front: {:?}",
+        h.texts()
+    );
+    // Docked, the anchor has done its work: what is there to undock them is the 🗗
+    // in the status bar, and only there.
+    assert!(h.pop_buttons(tools::DOCK_ICON).is_empty());
+    assert_eq!(
+        h.pop_buttons(tools::UNDOCK_ICON).len(),
+        1,
+        "{:?}",
+        h.texts()
+    );
+}
+
+#[test]
+fn docked_the_main_window_has_a_row_of_tabs_that_begins_with_jsonquery() {
+    let mut h = Harness::new();
+    dock_tools(&mut h, Tool::Merge);
+    let rects: Vec<_> = TABS.iter().map(|tab| rect_of(&h, tab)).collect();
+    for (pair, names) in rects.windows(2).zip(TABS.windows(2)) {
+        assert!(
+            pair[0].right() < pair[1].left(),
+            "{names:?} in this order: {pair:?}"
+        );
+        assert!(
+            (pair[0].center().y - pair[1].center().y).abs() < 1.0,
+            "{names:?} on one row"
+        );
+    }
+    // The row is the top of the window, where the toolbar was.
+    let strip = h.panel("toolbar").expect("the row of tabs");
+    assert!(strip.top() < 1.0, "{strip:?}");
+    assert!(
+        rects
+            .iter()
+            .all(|r| r.top() >= strip.top() && r.bottom() <= strip.bottom()),
+        "{strip:?} {rects:?}"
+    );
+
+    // The tab in front is the one that is lit.
+    let lit: Vec<_> = TABS
+        .iter()
+        .filter(|tab| is_lit(&h, rect_of(&h, tab).center()))
+        .collect();
+    assert_eq!(lit, [&"Merge JSON"], "{:?}", h.app.tools.page_in_front());
+
+    // At the right end of the same row: the tutorial's button and the theme's. The
+    // button that undocks the Tools is not on the row: there is one, and it is in the
+    // status bar.
+    let last = rects[TABS.len() - 1];
+    let undocks = h.pop_buttons(tools::UNDOCK_ICON);
+    assert_eq!(undocks.len(), 1, "one place for it: {undocks:?}");
+    assert!(
+        undocks[0].y > h.panel("status_bar").unwrap().top(),
+        "in the status bar: {:?}",
+        undocks[0]
+    );
+    assert!(
+        h.pop_buttons("⬈").is_empty(),
+        "the panes are under a tab that is not in front"
+    );
+    let (tutorial, theme) = (h.pop_buttons("📖")[0], theme_button(&h));
+    assert!(
+        last.right() < tutorial.x && tutorial.x < theme.x,
+        "{last:?} {tutorial:?} {theme:?}"
+    );
+    for at in [tutorial, theme] {
+        assert!((at.y - last.center().y).abs() < 2.0, "{at:?} {last:?}");
+        assert!(
+            (frame_height_at(&h, at) - frame_height_at(&h, theme)).abs() < 0.5,
+            "as big as the buttons beside it: {at:?}"
+        );
+    }
+    assert!(theme.x > SCREEN.x - 60.0, "in the corner: {theme:?}");
+    // The Tools are here: nothing opens them.
+    assert!(h.pop_buttons("🛠").is_empty());
+
+    // On jsonquery's tab that one alone is lit, whichever tool the Tools were on.
+    press(&mut h, tools::QUERY_TAB);
+    let lit: Vec<_> = TABS
+        .iter()
+        .filter(|tab| is_lit(&h, rect_of(&h, tab).center()))
+        .collect();
+    assert_eq!(lit, [&tools::QUERY_TAB]);
+}
+
+#[test]
+fn the_theme_and_the_tutorial_work_from_the_row_of_tabs() {
+    let mut h = Harness::new();
+    dock_tools(&mut h, Tool::Format);
+    let dark = h.ctx.theme();
+    let theme = theme_button(&h);
+    h.click(theme.x, theme.y);
+    assert_ne!(h.ctx.theme(), dark, "the theme flipped");
+
+    assert!(!h.app.tutorial.is_open());
+    let tutorial = h.pop_buttons("📖")[0];
+    h.click(tutorial.x, tutorial.y);
+    assert!(h.app.tutorial.is_open());
+    assert!(
+        h.app.tools.is_docked(),
+        "and the Tools stayed where they are"
+    );
+}
+
+#[test]
+fn the_source_field_is_the_first_row_of_jsonquerys_tab_under_the_row_of_tabs() {
+    let mut h = Harness::new();
+    dock_tools_on_jsonquery(&mut h);
+    let strip = h.panel("toolbar").unwrap();
+    let source = h.panel("source_bar").expect("a row of its own");
+    assert!(
+        (source.top() - strip.bottom()).abs() < 1.5,
+        "right under the row of tabs: {strip:?} {source:?}"
+    );
+    // The field, its buttons and what is loaded are in it…
+    for text in ["Source:", "…", "Load", "Clear"] {
+        let r = rect_of(&h, text);
+        assert!(
+            r.top() >= source.top() && r.bottom() <= source.bottom(),
+            "{text:?} {r:?} {source:?}"
+        );
+    }
+    // …the query panel follows it…
+    let query = h.query_panel();
+    assert!((query.top() - source.bottom()).abs() < 1.5, "{query:?}");
+    // …and the row of tabs has none of it.
+    assert!(rect_of(&h, "Source:").top() > strip.bottom());
+    // The autocomplete button stays with the query, at the right end of the source
+    // row; the theme and the tutorial are on the row of tabs.
+    let bulb = h.pop_buttons("💡");
+    assert_eq!(bulb.len(), 1, "{bulb:?}");
+    assert!(
+        bulb[0].y > source.top() && bulb[0].y < source.bottom() && bulb[0].x > SCREEN.x - 60.0,
+        "{:?} {source:?}",
+        bulb[0]
+    );
+    assert!(theme_button(&h).y < strip.bottom());
+
+    // A tool's tab has none of that: the document is not what it is about.
+    let buttons = |h: &Harness| {
+        (
+            h.pop_buttons("☀").len() + h.pop_buttons("🌙").len(),
+            h.pop_buttons("📖").len(),
+            h.pop_buttons("🛠").len(),
+        )
+    };
+    assert_eq!(
+        buttons(&h),
+        (1, 1, 0),
+        "the theme and the tutorial are on the row of tabs only, and there is no 🛠"
+    );
+    press(&mut h, "Format JSON");
+    for gone in ["Source:", "Load", "URL or local path…"] {
+        assert!(!is_drawn(&h, gone), "{gone:?}: {:?}", h.texts());
+    }
+    assert!(h.pop_buttons("💡").is_empty());
+    assert_eq!(buttons(&h), (1, 1, 0));
+}
+
+#[test]
+fn the_row_of_tabs_is_where_the_toolbar_was_and_the_rest_of_the_window_is_as_it_was() {
+    // Docked, jsonquery's tab is the window without the Tools but for the row of tabs
+    // on top of it: the rows under that are the ones the window has always had.
+    let mut h = Harness::new();
+    let classic_query = h.query_panel();
+    let classic_status = h.panel("status_bar").unwrap();
+    dock_tools_on_jsonquery(&mut h);
+    let query = h.query_panel();
+    assert_eq!(query.height(), classic_query.height());
+    assert!(
+        query.top() > classic_query.top(),
+        "one row lower: {query:?}"
+    );
+    assert_eq!(h.panel("status_bar").unwrap(), classic_status);
+    let source = h.panel("source_panel").expect("Source");
+    assert!((source.top() - query.bottom()).abs() < 1.5);
+    assert!((source.bottom() - classic_status.top()).abs() < 1.5);
+}
+
+#[test]
+fn jsonquerys_tab_works_as_the_main_window_always_did() {
+    let mut h = Harness::new();
+    load(&mut h, r#"{"members":[{"name":"Ann"},{"name":"Bob"}]}"#);
+    dock_tools(&mut h, Tool::Format);
+    press(&mut h, tools::QUERY_TAB);
+    assert!(!h.app.tools.page_in_front());
+    for text in ["Source", "Results", "Run  (Ctrl+Enter)"] {
+        assert!(is_drawn(&h, text), "{text:?}: {:?}", h.texts());
+    }
+    h.app.query_text = ".members[].name".to_owned();
+    press(&mut h, "Run  (Ctrl+Enter)");
+    wait_for(&mut h, "the results", |h| !h.app.query_running);
+    assert_eq!(
+        h.app.results,
+        serde_json::json!(["Ann", "Bob"]),
+        "the query ran while the Tools were docked"
+    );
+    assert!(
+        h.app.tools.is_docked(),
+        "and the Tools stayed where they were"
+    );
+
+    // The panes' icons are under the tab; the button that undocks the Tools is not the
+    // panes' business.
+    assert_eq!(h.pop_buttons("⬈").len(), 3);
+    assert_eq!(h.pop_buttons(tools::UNDOCK_ICON).len(), 1);
+    // A pane is popped out from its header, and the tabs stay.
+    h.app.dock.pop_out(Pane::Results, None, None);
+    h.settle();
+    assert!(h.app.tools.is_docked() && is_drawn(&h, "Format JSON"));
+}
+
+#[test]
+fn a_tools_tab_takes_the_room_of_jsonquerys_panes_and_jsonquery_brings_them_back_as_they_were() {
+    let mut h = Harness::new();
+    load(&mut h, r#"{"a": 1}"#);
+    h.app.query_text = ".a".to_owned();
+    dock_tools(&mut h, Tool::Format);
+    h.app
+        .tools
+        .fill(Tool::Format, "Input", r#"{"b":1,"a":[1,2]}"#);
+    h.settle();
+
+    // The page fills the window under the row of tabs and above the status bar.
+    let strip = h.panel("toolbar").unwrap();
+    let status = h.panel("status_bar").unwrap();
+    for gone in ["Source", "Results", "Source:", "Run  (Ctrl+Enter)"] {
+        assert!(!is_drawn(&h, gone), "{gone:?}: {:?}", h.texts());
+    }
+    let format = rect_of(&h, "Format");
+    assert!(format.top() > strip.bottom() && format.bottom() < status.top());
+    let input = rect_of(&h, "Input");
+    assert!(
+        input.left() < 40.0,
+        "the page begins at the window's edge: {input:?}"
+    );
+
+    // jsonquery's tab: the panes are back, and the page is gone.
+    press(&mut h, tools::QUERY_TAB);
+    for text in ["Source", "Results", "Run  (Ctrl+Enter)"] {
+        assert!(is_drawn(&h, text), "{text:?}: {:?}", h.texts());
+    }
+    assert!(!is_drawn(&h, "Format"), "{:?}", h.texts());
+    assert_eq!(h.app.query_text, ".a");
+    assert!(h.app.doc.is_some());
+
+    // And back to the tool: it holds what it held.
+    press(&mut h, "Format JSON");
+    assert_eq!(
+        h.app.tools.box_text(Tool::Format, "Input"),
+        r#"{"b":1,"a":[1,2]}"#
+    );
+    assert!(is_drawn(&h, "Format") && !is_drawn(&h, "Source"));
+}
+
+#[test]
+fn the_status_bar_says_what_the_tool_in_front_says_and_keeps_its_buttons() {
+    let mut h = Harness::new();
+    load(&mut h, r#"{"a": 1}"#);
+    h.app.query_text = ".a".to_owned();
+    dock_tools_on_jsonquery(&mut h);
+    press(&mut h, "Run  (Ctrl+Enter)");
+    wait_for(&mut h, "the query", |h| {
+        is_drawn_containing(h, "Query ran in")
+    });
+    let status = h.panel("status_bar").unwrap();
+    for glyph in ["ℹ", "⚙"] {
+        let at = h.pop_buttons(glyph);
+        assert!(
+            at.len() == 1 && at[0].y > status.top() && at[0].y < status.bottom(),
+            "{glyph}: {at:?} {status:?}"
+        );
+    }
+
+    // On a tool's tab it is the tool's.
+    press(&mut h, "Format JSON");
+    h.app.tools.fill(Tool::Format, "Input", "[1]");
+    h.settle();
+    assert!(!is_drawn_containing(&h, "Query ran in"), "{:?}", h.texts());
+    press(&mut h, "Format");
+    wait_for(&mut h, "Format's answer", |h| {
+        is_drawn_containing(h, "Formatted in")
+    });
+    let said = rect_containing(&h, "Formatted in");
+    assert!(
+        said.top() > status.top() && said.bottom() < status.bottom(),
+        "in the status bar: {said:?} {status:?}"
+    );
+    for glyph in ["ℹ", "⚙"] {
+        assert_eq!(h.pop_buttons(glyph).len(), 1, "{glyph} is still there");
+    }
+    // Only one status bar.
+    assert_eq!(h.panel("status_bar").unwrap(), status);
+    assert!(rect_of(&h, "Format").bottom() < status.top());
+}
+
+#[test]
+fn the_settings_button_in_the_status_bar_opens_the_settings_whichever_tab_is_in_front() {
+    let mut h = Harness::new();
+    dock_tools(&mut h, Tool::Diff);
+    let settings = h.pop_buttons("⚙")[0];
+    h.click(settings.x, settings.y);
+    assert!(h.app.settings_window.is_open());
+}
+
+#[test]
+fn ctrl_enter_runs_what_is_in_front() {
+    let mut h = Harness::new();
+    load(&mut h, r#"{"a": 1}"#);
+    h.app.query_text = ".a".to_owned();
+    dock_tools_on_jsonquery(&mut h);
+    h.app
+        .tools
+        .fill(Tool::Format, "Input", r#"{"b":1,"a":[1,2]}"#);
+
+    // jsonquery's tab: the query runs, and the tool waits.
+    let runs = h.app.query_gen;
+    ctrl_enter(&mut h);
+    assert_eq!(h.app.query_gen, runs + 1, "the query ran");
+    wait_for(&mut h, "the query", |h| !h.app.query_running);
+    press(&mut h, "Format JSON");
+    assert!(
+        !is_drawn_containing(&h, "Formatted in") && !is_drawn(&h, "Working…"),
+        "Format did not run: {:?}",
+        h.texts()
+    );
+
+    // The tool's tab: the page runs, and the query is left alone.
+    let runs = h.app.query_gen;
+    ctrl_enter(&mut h);
+    wait_for(&mut h, "Format's answer", |h| {
+        is_drawn_containing(h, "Formatted in")
+    });
+    assert_eq!(h.app.query_gen, runs, "the query was not run");
+}
+
+#[test]
+fn ctrl_enter_in_a_popped_out_query_window_runs_the_query_with_a_tool_in_front() {
+    let mut w = Windows::new();
+    let root = egui::ViewportId::ROOT;
+    let query_window = Pane::Query.viewport_id();
+    {
+        let mut app = w.app();
+        app.tools.use_place(Place::Docked);
+        app.tools.open_on(&w.ctx, Tool::Format);
+        app.query_text = ".a".to_owned();
+        app.open_text(r#"{"a": 1}"#.to_owned());
+    }
+    for _ in 0..300 {
+        w.main_frame(Vec::new());
+        if w.app().doc.is_some() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(w.app().doc.is_some());
+    w.pop_out(Pane::Query);
+    assert!(w.app().tools.page_in_front());
+
+    let ctrl_enter_in = |w: &mut Windows, viewport| {
+        let key = |pressed| egui::Event::Key {
+            key: egui::Key::Enter,
+            physical_key: Some(egui::Key::Enter),
+            pressed,
+            repeat: false,
+            modifiers: egui::Modifiers::COMMAND,
+        };
+        let info = egui::ViewportInfo::default;
+        w.pass(
+            viewport,
+            info(),
+            vec![egui::Event::ModifiersChanged(egui::Modifiers::COMMAND)],
+        );
+        w.pass(viewport, info(), vec![key(true)]);
+        w.pass(viewport, info(), vec![key(false)]);
+        w.pass(
+            viewport,
+            info(),
+            vec![egui::Event::ModifiersChanged(egui::Modifiers::NONE)],
+        );
+    };
+    // The main window shows a tool: its Ctrl+Enter is not the query's.
+    let runs = w.app().query_gen;
+    ctrl_enter_in(&mut w, root);
+    assert_eq!(w.app().query_gen, runs, "the page's, not the query's");
+    // The window of the query is about the query, whatever the main window shows.
+    ctrl_enter_in(&mut w, query_window);
+    assert_eq!(w.app().query_gen, runs + 1, "the query ran");
+}
+
+#[test]
+fn ctrl_f_searches_a_tree_only_while_jsonquery_is_in_front() {
+    let mut h = Harness::new();
+    load(&mut h, r#"{"a": 1}"#);
+    dock_tools(&mut h, Tool::Format);
+    h.frame_with(ctrl(egui::Key::F));
+    assert!(!h.app.show_search_dialog, "no tree is in front to search");
+    press(&mut h, tools::QUERY_TAB);
+    h.frame_with(ctrl(egui::Key::F));
+    assert!(h.app.show_search_dialog);
+}
+
+#[test]
+fn ctrl_s_is_taken_by_the_main_window_only_while_jsonquery_is_in_front() {
+    // (With no document there is nothing for it to save, so that no dialog opens:
+    // whether the key is taken is what is looked at.)
+    fn left_over(h: &mut Harness) -> bool {
+        let mut left = false;
+        h.run_with(ctrl(egui::Key::S), |app, ui| {
+            app.show(ui);
+            left = ui.input(|i| i.key_pressed(egui::Key::S));
+        });
+        left
+    }
+    let mut h = Harness::new();
+    dock_tools(&mut h, Tool::Format);
+    assert!(
+        left_over(&mut h),
+        "a tool's page is in front: the key is left to it"
+    );
+    press(&mut h, tools::QUERY_TAB);
+    assert!(
+        !left_over(&mut h),
+        "jsonquery's tab takes it, as it always did"
+    );
+}
+
+#[test]
+fn a_file_dropped_on_a_tools_tab_is_the_pages_and_on_jsonquerys_it_is_the_document() {
+    let mut h = Harness::new();
+    dock_tools(&mut h, Tool::Format);
+    let one = temp_json("docked_one.json", r#"{"one": 1}"#);
+    drop_files(&mut h, &[&*one]);
+    assert_eq!(
+        h.app.tools.box_text(Tool::Format, "Input"),
+        r#"{"one": 1}"#,
+        "in the box, as it is in a window of the Tools"
+    );
+    assert!(h.app.doc.is_none(), "and not opened as the document");
+    assert!(
+        h.app.source_input.is_empty(),
+        "(the main window did not so much as start to: {:?})",
+        h.app.source_input
+    );
+
+    press(&mut h, tools::QUERY_TAB);
+    let two = temp_json("docked_two.json", r#"{"two": 2}"#);
+    drop_files(&mut h, &[&*two]);
+    for _ in 0..300 {
+        if h.app.doc.is_some() {
+            break;
+        }
+        h.frame();
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    h.settle();
+    assert!(h.app.doc.is_some(), "on jsonquery's tab it is opened");
+    assert_eq!(
+        h.app.tools.box_text(Tool::Format, "Input"),
+        r#"{"one": 1}"#,
+        "and the box is left alone"
+    );
+    assert!(!h.app.tools.page_in_front());
+}
+
+#[test]
+fn several_files_dropped_on_jsonquery_go_to_merge_and_bring_its_tab_forward() {
+    let mut h = Harness::new();
+    dock_tools_on_jsonquery(&mut h);
+    let a = temp_json("closed_a.json", "[1]");
+    let b = temp_json("closed_b.json", "[2]");
+    drop_files(&mut h, &[&*a, &*b]);
+    assert!(h.app.tools.is_docked(), "no window opened");
+    assert!(!h.app.tools.in_window());
+    assert!(h.app.tools.page_in_front(), "Merge is in front");
+    assert!(is_drawn(&h, "Files (2)"), "{:?}", h.texts());
+    assert!(is_drawn(&h, "closed_a.json") && is_drawn(&h, "closed_b.json"));
+}
+
+/// One frame of the main window in which `count` files are being dragged over it.
+fn drag_files_over(h: &mut Harness, count: usize) {
+    let input = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, SCREEN)),
+        time: Some(h.time),
+        hovered_files: (0..count)
+            .map(|i| egui::HoveredFile {
+                path: Some(format!("/x/{i}.json").into()),
+                mime: String::new(),
+            })
+            .collect(),
+        ..Default::default()
+    };
+    h.time += 1.0 / 60.0;
+    let app = &mut h.app;
+    let mut out = h.ctx.run_ui(input, |ui| app.show(ui));
+    out.textures_delta.clear();
+    h.shapes = out.shapes;
+}
+
+/// Whether anything is drawn with the outline that says a dragged file would land
+/// here: a stroke of 1.5 in the colour of a link (which an embedded window that
+/// is still fading in draws a little dimmer, so it is the blue that is looked
+/// for).
+fn has_drop_outline(h: &Harness) -> bool {
+    fn walk(shape: &egui::Shape, found: &mut bool) {
+        match shape {
+            egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, found)),
+            egui::Shape::Rect(r)
+                if r.stroke.width == 1.5 && r.stroke.color.b() > r.stroke.color.r() =>
+            {
+                *found = true;
+            }
+            _ => {}
+        }
+    }
+    let mut found = false;
+    for clipped in &h.shapes {
+        walk(&clipped.shape, &mut found);
+    }
+    found
+}
+
+#[test]
+fn the_boxes_of_a_docked_tool_offer_a_drop_as_those_of_the_window_do() {
+    let mut h = Harness::new();
+    dock_tools(&mut h, Tool::Format);
+    assert!(
+        is_drawn(&h, "Paste JSON here, or drop a file"),
+        "{:?}",
+        h.texts()
+    );
+    assert!(!has_drop_outline(&h));
+    drag_files_over(&mut h, 1);
+    assert!(
+        has_drop_outline(&h),
+        "the box a file would land in is outlined"
+    );
+
+    press(&mut h, "Merge JSON");
+    assert!(
+        is_drawn(&h, "Drop JSON files here, or use Add files…"),
+        "{:?}",
+        h.texts()
+    );
+    drag_files_over(&mut h, 1);
+    assert!(is_drawn(&h, "Drop to add"), "{:?}", h.texts());
+}
+
+#[test]
+fn the_docked_tools_have_the_same_pages_as_the_window() {
+    let mut h = Harness::new();
+    dock_tools(&mut h, Tool::Merge);
+    let pages = [
+        ("Merge JSON", "Merge"),
+        ("Format JSON", "Format"),
+        ("Diff JSON", "Compare"),
+        ("Patch JSON", "Apply"),
+        ("Validate Schema", "Validate"),
+    ];
+    for (tab, button) in pages {
+        press(&mut h, tab);
+        assert!(is_drawn(&h, button), "{tab}: {:?}", h.texts());
+        let strip = h.panel("toolbar").unwrap();
+        let status = h.panel("status_bar").unwrap();
+        let button = rect_of(&h, button);
+        assert!(
+            button.top() > strip.bottom() && button.bottom() < status.top(),
+            "{tab}: the page is between the row of tabs and the status bar"
+        );
+        let lit: Vec<_> = TABS
+            .iter()
+            .filter(|t| is_lit(&h, rect_of(&h, t).center()))
+            .collect();
+        assert_eq!(lit, [&tab], "only the tab in front is lit");
+    }
+}
+
+#[test]
+fn a_tool_runs_in_its_tab_and_its_answer_comes_back_to_it() {
+    let mut h = Harness::new();
+    dock_tools(&mut h, Tool::Format);
+    press(&mut h, "Paste JSON here, or drop a file");
+    h.type_text(r#"{"b":1,"a":[1,2]}"#);
+    h.settle();
+    press(&mut h, "Format");
+    wait_for(&mut h, "the formatted text", |h| {
+        is_drawn(h, "{\n  \"b\": 1,\n  \"a\": [\n    1,\n    2\n  ]\n}")
+    });
+    assert!(
+        is_drawn_containing(&h, "Formatted in"),
+        "the page's status line is the window's"
+    );
+    let status = h.panel("status_bar").unwrap();
+    assert!(rect_of(&h, "Format").bottom() < status.top());
+}
+
+#[test]
+fn a_document_the_tools_made_opens_in_jsonquerys_tab() {
+    let mut h = Harness::new();
+    let a = temp_json("docked_merge_a.json", "[1, 2]");
+    let b = temp_json("docked_merge_b.json", "[3]");
+    h.app.tools.use_place(Place::Docked);
+    h.settle();
+    let ctx = h.ctx.clone();
+    h.app
+        .tools
+        .add_files(&ctx, vec![a.to_path_buf(), b.to_path_buf()]);
+    h.settle();
+    press(&mut h, "Merge");
+    wait_for(&mut h, "the merged preview", |h| {
+        is_drawn(h, "[\n  1,\n  2,\n  3\n]")
+    });
+    press(&mut h, "Open in main window");
+    let doc = h.app.doc.clone().expect("the merge opened");
+    assert_eq!(doc.tree(), Some(&serde_json::json!([1, 2, 3])));
+    assert!(h.app.tools.is_docked(), "the Tools stayed");
+    assert!(
+        !h.app.tools.page_in_front() && is_drawn(&h, "Source") && is_drawn(&h, "Results"),
+        "jsonquery's tab shows it: {:?}",
+        h.texts()
+    );
+    // And a tool can use it: Open document in a box takes the one in the main window.
+    press(&mut h, "Format JSON");
+    press(&mut h, "Open document");
+    assert!(is_drawn(&h, "The open document"), "{:?}", h.texts());
+}
+
+#[test]
+fn whatever_the_tools_or_the_tutorial_put_in_jsonquery_brings_its_tab_forward() {
+    let mut h = Harness::new();
+    let ctx = h.ctx.clone();
+
+    // A value Validate shows in the open document.
+    dock_tools(&mut h, Tool::Validate);
+    assert!(h.app.tools.page_in_front());
+    h.app
+        .apply_tools_request(&ctx, crate::tools::Request::Show("/a".to_owned()));
+    assert!(!h.app.tools.page_in_front());
+    assert_eq!(h.app.query_text, "/a");
+
+    // A lesson the tutorial loads and runs.
+    dock_tools(&mut h, Tool::Validate);
+    assert!(h.app.tools.page_in_front());
+    h.app.apply_tutorial_request(crate::tutorial::LoadRequest {
+        kind: jsonquery_query::Kind::Jq,
+        data: None,
+        query: Some(".b"),
+        run: false,
+    });
+    assert!(!h.app.tools.page_in_front());
+    assert_eq!(h.app.query_text, ".b");
+
+    // A list of hits: of a row looked for in Source…
+    dock_tools(&mut h, Tool::Validate);
+    h.app.show_find_list(Vec::new(), None);
+    assert!(!h.app.tools.page_in_front());
+    assert!(h.app.hit_list.is_some());
+    h.settle();
+    assert!(h.panel("search_results_panel").is_some());
+    // …and of "Find All".
+    dock_tools(&mut h, Tool::Validate);
+    h.app.find_cursor = Some(FindCursor {
+        query: SearchQuery {
+            target: PanelKind::Source,
+            text: "a".to_owned(),
+            regex: false,
+        },
+        hits: Vec::new(),
+        pos: None,
+        wrapped: false,
+    });
+    h.app.show_search_list();
+    assert!(!h.app.tools.page_in_front());
+
+    // A row revealed in the tree of the main window, but not in a window of its own.
+    dock_tools(&mut h, Tool::Validate);
+    h.app.dock.pop_out(Pane::Results, None, None);
+    h.app.reveal_in_tree(PanelKind::Results, vec![]);
+    assert!(
+        h.app.tools.page_in_front(),
+        "that tree is in another window"
+    );
+    h.app.reveal_in_tree(PanelKind::Source, vec![]);
+    assert!(!h.app.tools.page_in_front());
+}
+
+#[test]
+fn the_undock_button_takes_the_tools_out_into_a_window_and_the_main_window_is_as_before() {
+    let mut h = Harness::new();
+    let classic_query = h.query_panel();
+    dock_tools(&mut h, Tool::Format);
+    h.app.tools.fill(Tool::Format, "Input", "[1, 2]");
+    h.settle();
+    let undocks = h.pop_buttons(tools::UNDOCK_ICON);
+    assert_eq!(undocks.len(), 1, "{undocks:?}");
+    let undock = undocks[0];
+    assert!(
+        undock.y > h.panel("status_bar").unwrap().top(),
+        "the button is in the status bar: {undock:?}"
+    );
+    h.click(undock.x, undock.y);
+    assert!(h.app.tools.in_window() && !h.app.tools.is_docked());
+    assert_eq!(h.app.tools.place(), Place::Window);
+
+    // The window has what the Tools held, and the anchor to dock them again; no
+    // undock button is left in the main window.
+    assert_eq!(h.app.tools.box_text(Tool::Format, "Input"), "[1, 2]");
+    assert!(is_drawn(&h, "Format JSON") && !is_drawn(&h, "Compare"));
+    assert_eq!(h.pop_buttons(tools::DOCK_ICON).len(), 1);
+    assert!(h.pop_buttons(tools::UNDOCK_ICON).is_empty());
+    // The main window is the one it was before they were docked: the toolbar is back
+    // with the source field and the buttons, and no row of tabs.
+    assert!(!is_drawn(&h, tools::QUERY_TAB));
+    assert_eq!(h.pop_buttons("🛠").len(), 1);
+    assert_eq!(h.pop_buttons("💡").len(), 1);
+    assert_eq!(h.query_panel(), classic_query);
+    assert!(h.panel("toolbar").unwrap().height() < 40.0);
+}
+
+#[test]
+fn the_tools_keep_what_they_hold_when_they_move_between_the_window_and_the_main_window() {
+    let mut h = Harness::new();
+    open_tool(&mut h, Tool::Diff);
+    h.app.tools.fill(Tool::Diff, "Left", r#"{"a":1}"#);
+    h.app.tools.fill(Tool::Diff, "Right", r#"{"a":2}"#);
+    h.settle();
+    assert!(h.app.tools.in_window());
+
+    // Into the main window…
+    let dock = h.pop_buttons(tools::DOCK_ICON)[0];
+    h.click(dock.x, dock.y);
+    assert!(h.app.tools.is_docked());
+    assert!(is_drawn(&h, "Compare"), "the same page: {:?}", h.texts());
+    assert_eq!(h.app.tools.box_text(Tool::Diff, "Left"), r#"{"a":1}"#);
+    assert_eq!(h.app.tools.box_text(Tool::Diff, "Right"), r#"{"a":2}"#);
+
+    // …to jsonquery's tab and back…
+    press(&mut h, tools::QUERY_TAB);
+    press(&mut h, "Diff JSON");
+    assert_eq!(h.app.tools.box_text(Tool::Diff, "Left"), r#"{"a":1}"#);
+
+    // …out of it again…
+    let undock = h.pop_buttons(tools::UNDOCK_ICON)[0];
+    h.click(undock.x, undock.y);
+    assert!(h.app.tools.in_window() && !h.app.tools.is_docked());
+    assert!(is_drawn(&h, "Compare"));
+    assert_eq!(h.app.tools.box_text(Tool::Diff, "Left"), r#"{"a":1}"#);
+    // …and the window offers the way back in.
+    assert_eq!(h.pop_buttons(tools::DOCK_ICON).len(), 1);
+}
+
+#[test]
+fn the_undock_button_is_in_the_status_bar_beside_the_settings_whichever_tab_is_in_front() {
+    let mut h = Harness::new();
+    assert!(
+        h.pop_buttons(tools::UNDOCK_ICON).is_empty(),
+        "undocked: nothing to undock, and no anchor here"
+    );
+    let classic_status = h.panel("status_bar").unwrap();
+    // The ℹ is in the corner and the ⚙ beside it, as they have always been, and
+    // docking the Tools moves neither.
+    let (info_before, settings_before) = (h.pop_buttons("ℹ")[0], h.pop_buttons("⚙")[0]);
+    assert!(
+        settings_before.x < info_before.x && info_before.x - settings_before.x < 30.0,
+        "{settings_before:?} {info_before:?}"
+    );
+    dock_tools(&mut h, Tool::Format);
+    for tab in ["Format JSON", tools::QUERY_TAB, "Diff JSON"] {
+        press(&mut h, tab);
+        let status = h.panel("status_bar").unwrap();
+        if tab == tools::QUERY_TAB {
+            // The button is small, as the ℹ and the ⚙ are: the bar is as high as it
+            // has always been.
+            assert_eq!(status.height(), classic_status.height(), "{status:?}");
+        }
+        let undocks = h.pop_buttons(tools::UNDOCK_ICON);
+        assert_eq!(
+            undocks.len(),
+            1,
+            "{tab}: here and not on the row of tabs: {undocks:?}"
+        );
+        let (undock, info, settings) = (undocks[0], h.pop_buttons("ℹ")[0], h.pop_buttons("⚙")[0]);
+        assert!(
+            undock.y > status.top()
+                && undock.y < status.bottom()
+                && (undock.y - info.y).abs() < 2.0,
+            "{tab}: in the status bar, level with the ℹ: {undock:?} {info:?} {status:?}"
+        );
+        // The ⚙ is next to the ℹ, which stays in the corner, where they were; the
+        // button is the next one to the left.
+        assert!(
+            (info - info_before).length() < 0.5 && (settings - settings_before).length() < 0.5,
+            "{tab}: the ℹ and the ⚙ stay: {info:?} {settings:?}"
+        );
+        assert!(
+            undock.x < settings.x && settings.x - undock.x < 40.0,
+            "{tab}: {undock:?} {settings:?} {info:?}"
+        );
+        // A small button, as the ℹ and the ⚙ beside it are.
+        assert!(
+            (frame_height_at(&h, undock) - frame_height_at(&h, info)).abs() < 0.5,
+            "{tab}: {} against {}",
+            frame_height_at(&h, undock),
+            frame_height_at(&h, info)
+        );
+        assert!(
+            info.x > SCREEN.x - 30.0,
+            "{tab}: the ℹ is in the corner: {info:?}"
+        );
+    }
+
+    // It undocks them.
+    let undock = h.pop_buttons(tools::UNDOCK_ICON)[0];
+    h.click(undock.x, undock.y);
+    assert!(h.app.tools.in_window() && !h.app.tools.is_docked());
+    assert!(
+        h.pop_buttons(tools::UNDOCK_ICON).is_empty(),
+        "back in a window, the main window has none"
+    );
+    assert_eq!(h.pop_buttons(tools::DOCK_ICON).len(), 1);
+    let (info, settings) = (h.pop_buttons("ℹ")[0], h.pop_buttons("⚙")[0]);
+    assert!(
+        (info - info_before).length() < 0.5 && (settings - settings_before).length() < 0.5,
+        "{settings:?} {info:?}"
+    );
+}
+
+#[test]
+fn the_status_bar_buttons_are_the_info_the_settings_the_undock_and_last_the_alert() {
+    let mut h = Harness::new();
+    h.app.x11_alert = X11Alert::new(true);
+    h.settle();
+
+    // Not docked: the alert is the one beside the ⚙, which is beside the ℹ.
+    let (alert, settings, info) = (
+        h.pop_buttons("⚠")[0],
+        h.pop_buttons("⚙")[0],
+        h.pop_buttons("ℹ")[0],
+    );
+    assert!(
+        alert.x < settings.x && settings.x < info.x,
+        "{alert:?} {settings:?} {info:?}"
+    );
+    assert!(info.x - settings.x < 30.0, "the ⚙ is next to the ℹ");
+
+    // Docked: the undock button comes between the ⚙ and the alert, and nothing else
+    // has moved but the alert, out of its way.
+    dock_tools_on_jsonquery(&mut h);
+    let undock = h.pop_buttons(tools::UNDOCK_ICON)[0];
+    let (docked_alert, docked_settings, docked_info) = (
+        h.pop_buttons("⚠")[0],
+        h.pop_buttons("⚙")[0],
+        h.pop_buttons("ℹ")[0],
+    );
+    assert!(
+        docked_alert.x < undock.x
+            && undock.x < docked_settings.x
+            && docked_settings.x < docked_info.x,
+        "{docked_alert:?} {undock:?} {docked_settings:?} {docked_info:?}"
+    );
+    assert!(
+        (docked_info - info).length() < 0.5 && (docked_settings - settings).length() < 0.5,
+        "the ⚙ stays next to the ℹ"
+    );
+    assert!(
+        docked_alert.x < alert.x,
+        "the alert gave way: {docked_alert:?}"
+    );
+    assert!(
+        undock.x - docked_alert.x < 40.0,
+        "the alert is next to the button: {docked_alert:?} {undock:?}"
+    );
+}
+
+#[test]
+fn every_window_of_the_app_is_titled_with_its_name_and_then_what_it_is() {
+    let mut h = Harness::new();
+    let title = |builder: egui::ViewportBuilder| builder.title.expect("a title");
+    assert_eq!(title(h.app.tools.builder()), "JsonQuery — Tools");
+    assert_eq!(title(h.app.tutorial.builder()), "JsonQuery — Tutorial");
+    assert_eq!(title(h.app.info_window.builder()), "JsonQuery — About");
+    assert_eq!(
+        title(h.app.settings_window.builder()),
+        "JsonQuery — Settings"
+    );
+    for pane in Pane::ALL {
+        assert_eq!(
+            title(h.app.dock.window_builder(pane)),
+            format!("JsonQuery — {}", pane.label())
+        );
+    }
+}
+
+#[test]
+fn the_row_of_tabs_and_what_it_holds_do_not_creep() {
+    let mut h = Harness::new();
+    dock_tools_on_jsonquery(&mut h);
+    let panels = |h: &Harness| {
+        [
+            "toolbar",
+            "source_bar",
+            "query_bar",
+            "status_bar",
+            "source_panel",
+        ]
+        .map(|id| h.panel(id).unwrap())
+    };
+    let before = panels(&h);
+    for _ in 0..30 {
+        h.frame();
+    }
+    assert_eq!(panels(&h), before, "jsonquery's tab crept");
+
+    for tool in [
+        Tool::Merge,
+        Tool::Format,
+        Tool::Diff,
+        Tool::Patch,
+        Tool::Validate,
+    ] {
+        dock_tools(&mut h, tool);
+        let strip = h.panel("toolbar").unwrap();
+        let status = h.panel("status_bar").unwrap();
+        for _ in 0..30 {
+            h.frame();
+        }
+        assert_eq!(h.panel("toolbar").unwrap(), strip, "{tool:?} crept");
+        assert_eq!(h.panel("status_bar").unwrap(), status, "{tool:?} crept");
+        assert_eq!(strip, before[0], "the row of tabs is as high on every tab");
+    }
+
+    // Nor with something to show: a comparison, side by side.
+    open_tool(&mut h, Tool::Diff);
+    h.app
+        .tools
+        .fill(Tool::Diff, "Left", r#"{"a":1,"b":[1,2,3]}"#);
+    h.app
+        .tools
+        .fill(Tool::Diff, "Right", r#"{"a":2,"b":[1,3],"c":true}"#);
+    h.settle();
+    press(&mut h, "Compare");
+    press(&mut h, "Side by side");
+    wait_for(&mut h, "the comparison", |h| is_drawn(h, "Changes (3)"));
+    let before = (h.panel("toolbar").unwrap(), h.panel("status_bar").unwrap());
+    for _ in 0..30 {
+        h.frame();
+    }
+    assert_eq!(
+        (h.panel("toolbar").unwrap(), h.panel("status_bar").unwrap()),
+        before,
+        "a comparison crept"
+    );
+}
+
+#[test]
+fn in_the_smallest_window_the_row_of_tabs_still_holds_every_tab_and_button() {
+    let mut h = Harness::new();
+    h.screen = egui::vec2(MIN_WINDOW[0], MIN_WINDOW[1]);
+    h.settle();
+    dock_tools(&mut h, Tool::Merge);
+    let rects: Vec<_> = TABS.iter().map(|tab| rect_of(&h, tab)).collect();
+    for (pair, names) in rects.windows(2).zip(TABS.windows(2)) {
+        assert!(
+            pair[0].right() < pair[1].left()
+                && (pair[0].center().y - pair[1].center().y).abs() < 1.0,
+            "{names:?}: {pair:?}"
+        );
+    }
+    let last = rects[TABS.len() - 1];
+    let undocks = h.pop_buttons(tools::UNDOCK_ICON);
+    assert_eq!(undocks.len(), 1, "{undocks:?}");
+    let status_undock = undocks[0];
+    let tutorial = h.pop_buttons("📖")[0];
+    let theme = theme_button(&h);
+    assert!(
+        last.right() < tutorial.x && tutorial.x < theme.x,
+        "none over another: {last:?} {tutorial:?} {theme:?}"
+    );
+    assert!(theme.x < MIN_WINDOW[0], "inside the window: {theme:?}");
+    // And the status bar's buttons, the undock button among them: it, the ⚙, the ℹ.
+    let (info, settings) = (h.pop_buttons("ℹ")[0], h.pop_buttons("⚙")[0]);
+    assert!(
+        status_undock.x < settings.x && settings.x < info.x && info.x < MIN_WINDOW[0],
+        "{status_undock:?} {settings:?} {info:?}"
+    );
+    // The page and the status bar fit as well, and jsonquery's tab.
+    let status = h.panel("status_bar").unwrap();
+    assert!(rect_of(&h, "Merge").bottom() < status.top());
+    press(&mut h, tools::QUERY_TAB);
+    let source = h.panel("source_panel").expect("Source");
+    assert!(source.height() > 40.0, "{source:?}");
+    let load = rect_of(&h, "Clear");
+    assert!(
+        load.right() < MIN_WINDOW[0],
+        "the source row fits: {load:?}"
+    );
+}
+
+#[test]
+fn a_box_is_scrolled_as_it_was_when_the_tools_move_between_the_window_and_the_main_window() {
+    // The pages' ids come from the Tools and not from the window or main window around
+    // them, so a box that was scrolled keeps its place, as a pane that is popped
+    // out does.
+    let text = (0..300)
+        .map(|i| format!("line {i}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut h = Harness::new();
+    open_tool(&mut h, Tool::Format);
+    h.app.tools.fill(Tool::Format, "Input", &text);
+    h.settle();
+
+    // The galley of the box is the one text that starts with its first line; how
+    // far its top is above the top of the page is how far the box is scrolled.
+    fn scrolled_by(h: &Harness) -> f32 {
+        let galley = text_rects(&h.shapes)
+            .into_iter()
+            .find(|(t, _)| t.starts_with("line 0\nline 1\n"))
+            .expect("the box is drawn")
+            .1;
+        let title = rect_of(h, "Input");
+        title.bottom() - galley.top()
+    }
+    assert!(scrolled_by(&h) < 20.0, "it starts at the top");
+    let at = rect_of(&h, "Input").center() + egui::vec2(100.0, 80.0);
+    h.pointer(at.x, at.y);
+    h.frame_with(vec![egui::Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Point,
+        delta: egui::vec2(0.0, -400.0),
+        phase: egui::TouchPhase::Move,
+        modifiers: egui::Modifiers::NONE,
+    }]);
+    h.settle();
+    let in_window = scrolled_by(&h);
+    assert!(in_window > 300.0, "scrolled: {in_window}");
+
+    // Into the main window…
+    let dock = h.pop_buttons(tools::DOCK_ICON)[0];
+    h.click(dock.x, dock.y);
+    assert!(h.app.tools.is_docked());
+    // (Give or take a line: the boxes in the window and in the main window are not
+    // the same height, and what is cut off at the top is whole lines.)
+    assert!(
+        (scrolled_by(&h) - in_window).abs() < 20.0,
+        "the box started over: {} against {in_window}",
+        scrolled_by(&h)
+    );
+    // …and out again.
+    let out = h.pop_buttons(tools::UNDOCK_ICON)[0];
+    h.click(out.x, out.y);
+    assert!(h.app.tools.in_window());
+    assert!(
+        (scrolled_by(&h) - in_window).abs() < 20.0,
+        "{}",
+        scrolled_by(&h)
+    );
+}
+
+#[test]
+fn alt_and_the_arrows_step_through_the_differences_only_on_the_diff_tab() {
+    let mut h = Harness::new();
+    dock_tools(&mut h, Tool::Diff);
+    h.app
+        .tools
+        .fill(Tool::Diff, "Left", r#"{"a":1,"b":[1,2,3]}"#);
+    h.app
+        .tools
+        .fill(Tool::Diff, "Right", r#"{"a":2,"b":[1,3],"c":true}"#);
+    h.settle();
+    press(&mut h, "Compare");
+    press(&mut h, "Side by side");
+    wait_for(&mut h, "the comparison", |h| is_drawn(h, "Changes (3)"));
+
+    // Whether the page took Alt+Down: a key that is taken is gone from the input.
+    fn left_over(h: &mut Harness) -> bool {
+        let alt_down = egui::Event::Key {
+            key: egui::Key::ArrowDown,
+            physical_key: Some(egui::Key::ArrowDown),
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::ALT,
+        };
+        let mut left = false;
+        h.run_with(vec![alt_down], |app, ui| {
+            app.show(ui);
+            left = ui.input(|i| i.key_pressed(egui::Key::ArrowDown));
+        });
+        left
+    }
+    assert!(!left_over(&mut h), "Diff took it");
+
+    // On jsonquery's tab there is no Diff to take it.
+    press(&mut h, tools::QUERY_TAB);
+    assert!(left_over(&mut h), "nobody took it");
+}
+
+// The same on a desktop, where the Tools window is a window of its own that eframe
+// redraws by itself.
+
+#[test]
+fn the_tools_window_docks_itself_with_no_frame_of_the_main_window() {
+    let mut w = Windows::new();
+    let tools = Satellite::Tools.viewport_id();
+    let root = egui::ViewportId::ROOT;
+    w.open_satellite(Satellite::Tools);
+    w.settle_in(tools);
+    assert!(w.open.contains_key(&tools));
+
+    let dock = w
+        .text_in(tools, tools::DOCK_ICON)
+        .expect("the window has the button");
+    w.click_in(tools, dock);
+    assert!(
+        w.app().tools.is_docked(),
+        "the window's own frame docked it"
+    );
+    // From then on the window only waits to be dropped, saying where the Tools are…
+    assert!(
+        w.text_in(tools, "Back in the main window").is_some(),
+        "{:?}",
+        w.shapes.get(&tools).map(|s| text_rects(s))
+    );
+    // …and the main window was brought forward to show them.
+    assert!(w.commands_in(root).contains(&egui::ViewportCommand::Focus));
+    // Its next frame draws the tabs and leaves the window out.
+    w.main_frame(Vec::new());
+    w.main_frame(Vec::new());
+    assert!(
+        !w.open.contains_key(&tools),
+        "the window is gone: {:?}",
+        w.open.keys()
+    );
+    assert!(
+        w.text_in(root, "Merge JSON").is_some() && w.text_in(root, tools::QUERY_TAB).is_some(),
+        "the tabs are drawn"
+    );
+    assert!(
+        w.text_in(root, "Merge").is_some(),
+        "and the page of the tool they were on is in front"
+    );
+}
+
+#[test]
+fn docking_the_tools_from_a_window_over_the_main_window_uncovers_it() {
+    let covering = || egui::ViewportInfo {
+        maximized: Some(true),
+        ..Default::default()
+    };
+    let mut w = Windows::new();
+    let tools = Satellite::Tools.viewport_id();
+    w.open_satellite(Satellite::Tools);
+    w.settle_in(tools);
+    let dock = w
+        .text_in(tools, tools::DOCK_ICON)
+        .expect("the window has the button");
+    let button = |pressed| egui::Event::PointerButton {
+        pos: dock,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    w.pass(tools, covering(), vec![egui::Event::PointerMoved(dock)]);
+    w.pass(tools, covering(), vec![button(true)]);
+    w.pass(tools, covering(), vec![button(false)]);
+    w.pass(tools, covering(), Vec::new());
+    assert!(w.app().tools.is_docked());
+    assert!(
+        w.commands_in(tools)
+            .contains(&egui::ViewportCommand::Maximized(false)),
+        "the window gives up covering the main window, whose frames then resume and \
+         drop it: {:?}",
+        w.commands_in(tools)
+    );
+}
+
+#[test]
+fn the_docked_tools_open_a_window_again_from_the_status_bar() {
+    let mut w = Windows::new();
+    let tools = Satellite::Tools.viewport_id();
+    let root = egui::ViewportId::ROOT;
+    w.app().tools.use_place(Place::Docked);
+    w.settle_in(root);
+    assert!(w.text_in(root, "Merge JSON").is_some());
+    assert!(w.open.is_empty(), "tabs, not a window: {:?}", w.open.keys());
+
+    // There is one undock button, in the status bar beside the ⚙, and none on the row
+    // of tabs.
+    let undocks: Vec<_> = text_rects(&w.shapes[&root])
+        .into_iter()
+        .filter(|(t, _)| t == tools::UNDOCK_ICON)
+        .map(|(_, rect)| rect.center())
+        .collect();
+    assert_eq!(undocks.len(), 1, "{undocks:?}");
+    w.click_in(root, undocks[0]);
+    assert!(w.app().tools.in_window() && !w.app().tools.is_docked());
+    w.settle_in(root);
+    assert!(
+        w.open.contains_key(&tools),
+        "the window is a deferred viewport: {:?}",
+        w.open.keys()
+    );
+    assert_eq!(w.repaint[&tools], Duration::ZERO);
+    w.settle_in(tools);
+    assert!(
+        w.text_in(tools, "Merge JSON").is_some() && w.text_in(root, "Merge JSON").is_none(),
+        "drawn in the window and no longer in the main window"
+    );
+    assert!(
+        w.text_in(root, tools::QUERY_TAB).is_none(),
+        "and the main window has no row of tabs"
+    );
+}
+
+// What is kept for the next start.
+
+#[test]
+fn where_the_tools_are_is_kept_for_the_next_start() {
+    let (mut h, file) = start_with("tools-dock", None);
+    let tools = h.pop_buttons("🛠")[0];
+    h.click(tools.x, tools.y);
+    h.pause(1.0);
+    assert!(
+        !file.exists(),
+        "a window is what the app starts with: nothing to keep"
+    );
+
+    let dock = h.pop_buttons(tools::DOCK_ICON)[0];
+    h.click(dock.x, dock.y);
+    h.pause(1.0);
+    assert_eq!(
+        kept(&file),
+        Some(serde_json::json!({"limits": {}, "tools": "docked"}))
+    );
+
+    // The next start: the Tools are in the main window, on jsonquery's own tab.
+    let mut again = Harness::with_store(Store::at(Some(file.clone())));
+    assert_eq!(again.app.tools.place(), Place::Docked);
+    assert!(again.app.tools.is_docked() && !again.app.tools.page_in_front());
+    for tab in TABS {
+        assert!(is_drawn(&again, tab), "{tab}: {:?}", again.texts());
+    }
+    assert!(is_drawn(&again, "Source:") && is_drawn(&again, "Run  (Ctrl+Enter)"));
+    assert!(again.pop_buttons("🛠").is_empty());
+
+    // Back to a window of their own: the file says nothing of the place any more.
+    let undock = again.pop_buttons(tools::UNDOCK_ICON)[0];
+    again.click(undock.x, undock.y);
+    assert!(again.app.tools.in_window());
+    again.pause(1.0);
+    assert!(
+        kept(&file).unwrap().get("tools").is_none(),
+        "{:?}",
+        kept(&file)
+    );
+    forget_settings(&file);
+}
+
+#[test]
+fn a_place_the_file_cannot_say_is_a_window() {
+    let (h, file) = start_with("tools-start-bad", Some(r#"{"tools": "floating"}"#));
+    assert_eq!(h.app.tools.place(), Place::Window);
+    assert!(!is_drawn(&h, tools::QUERY_TAB));
     forget_settings(&file);
 }

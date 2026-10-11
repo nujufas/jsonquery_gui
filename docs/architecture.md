@@ -88,7 +88,7 @@ some of what it has freed, so the size of the app in a task manager falls back o
 part, 1.37 GB to 0.91 GB there.)
 
 The window's other tools work the same way: **Format**, **Diff**, **Patch** and
-**Validate schema** are functions over `serde_json::Value` in `crates/query`
+**Validate Schema** are functions over `serde_json::Value` in `crates/query`
 (`reformat`, `diff` — which also lays the two documents out side by side from
 the same edit tree the patch comes from (`diff/view.rs`), so what is marked is
 what is in the patch — `patch` — RFC 6902 and RFC 7386 — and `schema`, a thin
@@ -220,6 +220,30 @@ are applied after it, never in the middle of it. Every window handles its own
 keyboard input (`handle_shortcuts`), and a dialog is drawn in the window of the
 pane it belongs to.
 
+The Tools are the one satellite that is not always a window. The ⚓ button at the right
+end of their row of tabs (`tools::dock_button`) *docks* them: the main window then has a
+row of tabs (`App::tab_strip`, with `Tools::main_tabs`) — Json Query, which is the
+window as it is without them, and one for each tool — and draws what the tab in front
+holds: either Json Query's rows (the source row, the query bar, Source and Results), or
+the page of a tool in all the room under the row of tabs (`Tools::docked_page`), with
+the main window's status bar saying what the page says (`Tools::status_bar`) and, beside
+the ⚙, the 🗗 (`tools::undock_button`) that lets them out again. `Tools`
+(`tools.rs`) keeps where they are (`Place`), which tab is in front, and a move that was
+asked for during a frame (`request_place`), which is made once the frame is drawn
+(`apply_place_request`) for the reason a pane is moved after the frame: the pages'
+ids come from `Tools` and not from the window or the main window (`UiBuilder::id`, as
+for the panes), so a page must be drawn in one place per frame, and it keeps its
+scroll positions and carets across a move. The pages do not know the difference:
+what is in front owns the keys and the files dropped on the window
+(`handle_shortcuts` leaves Ctrl+Enter, Ctrl+F and Ctrl+S to the page, in the main
+window — a pane's window has its own input and is not affected — and
+`handle_drag_and_drop` leaves it the files), and whatever puts something in
+the Json Query tab — a document the Tools made, a value to show, a lesson of the
+tutorial, a list of hits — brings that tab forward (`Tools::show_query`). Where the
+Tools are is kept like the sizes of the other panes (`settings/interface.rs`). A
+window docked from over the main window un-maximizes itself and brings the main
+window forward, as a closed one does.
+
 Expand/collapse state is *not* stored on the tree itself — it lives in a
 side map keyed by node path. Every frame, the widget reads the current
 scroll offset and viewport height, computes which row indices are visible
@@ -275,7 +299,7 @@ text on the clipboard.
 | `jaq-core` / `jaq-std` / `jaq-json` | Embedded jq-compatible query language and evaluator. |
 | `jsonpath-rust` | JSONPath (RFC 9535) engine. |
 | `jmespath` | JMESPath engine. |
-| `jsonschema` | JSON Schema validation for the Tools window's Validate schema (drafts 4–2020-12), without its HTTP and file features. |
+| `jsonschema` | JSON Schema validation for the Tools window's Validate Schema (drafts 4–2020-12), without its HTTP and file features. |
 | `crossbeam-channel` | UI ⇄ worker-thread messaging. |
 | `rfd` | Native file dialog behind the toolbar's "…" button, alongside OS-level drag-and-drop (handled directly by egui/winit). |
 | `ureq` | Loading a document from a URL. |

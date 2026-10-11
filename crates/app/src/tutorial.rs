@@ -115,7 +115,7 @@ impl Tutorial {
             .get_or_insert_with(|| Arc::new(crate::app_icon()))
             .clone();
         egui::ViewportBuilder::default()
-            .with_title("jsonquery — Tutorial")
+            .with_title(crate::title_of("Tutorial"))
             .with_inner_size([1040.0, 720.0])
             .with_min_inner_size([720.0, 460.0])
             .with_app_id(crate::APP_ID)

@@ -1,5 +1,6 @@
 //! The windows besides the main window and the panes' windows: the Tools
-//! window, the tutorial, About and the Settings.
+//! window, the tutorial, About and the Settings. (The Tools are a window only
+//! while they are not docked in the main window.)
 //!
 //! Each is a viewport of its own, with its state in the app (`Tools`,
 //! `Tutorial`, `InfoWindow`, `SettingsWindow`). They are drawn the way a pane's window is
@@ -76,7 +77,7 @@ impl Leaving {
 impl App {
     pub(super) fn satellite_open(&self, which: Satellite) -> bool {
         match which {
-            Satellite::Tools => self.tools.is_open(),
+            Satellite::Tools => self.tools.in_window(),
             Satellite::Tutorial => self.tutorial.is_open(),
             Satellite::About => self.info_window.is_open(),
             Satellite::Settings => self.settings_window.is_open(),
@@ -163,12 +164,7 @@ impl App {
             self.close_satellite(which);
             // Closed from over the main window (maximized, or fullscreen):
             // uncover it, so that its frames resume and it drops this window.
-            if info.fullscreen == Some(true) {
-                ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
-            }
-            if info.maximized == Some(true) {
-                ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(false));
-            }
+            uncover_main_window(&ctx, &info);
         }
         if !self.satellite_open(which) {
             self.wait_to_be_dropped_satellite(ui, which);
@@ -180,6 +176,13 @@ impl App {
             Satellite::Tools => {
                 if let Some(request) = self.tools.window_frame(ui, self.doc.as_ref()) {
                     self.apply_tools_request(&ctx, request);
+                }
+                // Docked from here: the main window shows them from its next
+                // frame, so it is uncovered, if this window covers it, and brought
+                // forward to be seen in. (This window waits to be dropped.)
+                if self.apply_tools_place(&ctx) {
+                    uncover_main_window(&ctx, &info);
+                    ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Focus);
                 }
             }
             Satellite::Tutorial => {
@@ -217,8 +220,13 @@ impl App {
     /// closed already.
     fn wait_to_be_dropped_satellite(&mut self, ui: &mut egui::Ui, which: Satellite) {
         let ctx = ui.ctx().clone();
+        let note = if which == Satellite::Tools && self.tools.is_docked() {
+            "Back in the main window"
+        } else {
+            "Closing…"
+        };
         egui::CentralPanel::default().show(ui, |ui| {
-            ui.centered_and_justified(|ui| ui.weak("Closing…"));
+            ui.centered_and_justified(|ui| ui.weak(note));
         });
         ctx.request_repaint_of(egui::ViewportId::ROOT);
         if self.leaving.waited(which, ctx.input(|i| i.time)) > WINDOW_DROP_GRACE_SECS {
@@ -226,6 +234,18 @@ impl App {
         } else {
             ctx.request_repaint_after(Duration::from_millis(100));
         }
+    }
+}
+
+/// A window that covers the main window (maximized, or fullscreen) and is going
+/// away gives that up, so that the main window's frames resume: nothing but its
+/// next frame ends a window.
+fn uncover_main_window(ctx: &egui::Context, info: &egui::ViewportInfo) {
+    if info.fullscreen == Some(true) {
+        ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+    }
+    if info.maximized == Some(true) {
+        ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(false));
     }
 }
 

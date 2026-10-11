@@ -1,12 +1,12 @@
-//! The Tools window: a second native window (an egui *viewport*, like the
-//! tutorial) that holds the small utilities that go with the main viewer:
+//! The Tools: a second native window (an egui *viewport*, like the tutorial)
+//! that holds the small utilities that go with the main viewer:
 //!
 //! * **Merge JSON** — several files into one, with a jq filter (`merge.rs`);
 //! * **Format JSON** — pretty-print, minify, sort the keys (`format.rs`);
 //! * **Diff JSON** — what differs between two documents, as a list and as a
 //!   JSON Patch (`diff.rs`);
 //! * **Patch JSON** — apply a JSON Patch or a JSON Merge Patch (`patch.rs`);
-//! * **Validate schema** — check a document against a JSON Schema
+//! * **Validate Schema** — check a document against a JSON Schema
 //!   (`validate.rs`).
 //!
 //! The logic of each is in `crates/query` and the work runs on the worker
@@ -30,6 +30,20 @@
 //! redraw callbacks then). Where there are no real windows (an embedded
 //! viewport; the headless tests) it is an immediate viewport, drawn inside the
 //! main window's frame, and egui shows it as a floating window.
+//!
+//! The Tools need not be a window. They can be *docked*: the main window then has
+//! a row of tabs on top — [`QUERY_TAB`], which is the window as it has always
+//! been (the source field, the query, Source and Results), and one for each tool —
+//! and shows what the tab in front holds, in all the room there is. The main window
+//! is what the app is for, and with the Tools in it nothing of it is out of reach.
+//! The [`DOCK_ICON`] button (`dock_button`) at the right end of the Tools window's
+//! row of tabs docks them ([`Place`]); the [`UNDOCK_ICON`] button (`undock_button`),
+//! in the main window's status bar beside the ⚙ and nowhere else, takes them out
+//! again. The place is kept for the next run (`settings`), and
+//! they start as a window. The pages do not know the difference: the main window
+//! draws their row of tabs and their status line (`App::tab_strip`,
+//! `Tools::status_bar`), and leaves the files dropped on it and the keys pressed in
+//! it to the page in front.
 
 mod diff;
 mod format;
@@ -50,6 +64,7 @@ use std::sync::Arc;
 use eframe::egui::{self, RichText};
 use jsonquery_core::Document;
 
+use crate::pane_header;
 use crate::settings::FileLimits;
 use crate::worker::MergeOutcome;
 use diff::Diff;
@@ -96,6 +111,18 @@ pub enum Request {
     Show(String),
 }
 
+/// How the pages are shown in a frame.
+#[derive(Clone, Copy)]
+enum Showing {
+    /// In a window of their own. `own_input`: the files dropped on it are the
+    /// pages'; not so when it is embedded in the main window's frame, which shares
+    /// the main window's input and so has taken them.
+    Window { own_input: bool },
+    /// As a tab of the main window, which draws the row of tabs and the status line
+    /// and has left the files dropped on it to the page.
+    Docked,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tool {
     Merge,
@@ -120,13 +147,42 @@ impl Tool {
             Tool::Format => "Format JSON",
             Tool::Diff => "Diff JSON",
             Tool::Patch => "Patch JSON",
-            Tool::Validate => "Validate schema",
+            Tool::Validate => "Validate Schema",
         }
     }
 }
 
+/// The ⚓ on the button that docks the Tools in the main window.
+pub const DOCK_ICON: &str = "⚓";
+
+/// The 🗗 (two windows, one over the other) on the button that undocks the Tools
+/// again, into a window of their own.
+pub const UNDOCK_ICON: &str = "🗗";
+
+/// What the first tab of the main window says while the Tools are docked: the window
+/// as it is without them, the one the app is for.
+pub const QUERY_TAB: &str = "Json Query";
+
+/// Where the Tools are shown, and where they open.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Place {
+    /// A window of their own.
+    #[default]
+    Window,
+    /// Tabs of the main window, beside the [`QUERY_TAB`].
+    Docked,
+}
+
 pub struct Tools {
-    open: bool,
+    place: Place,
+    /// In a window of their own: the window is open. (Docked, the Tools are in the
+    /// main window all the time.)
+    window_open: bool,
+    /// Where the Tools are asked to go, once the frame that asked has been drawn
+    /// (see [`Tools::request_place`]).
+    moving: Option<Place>,
+    /// Docked: the [`QUERY_TAB`] is the one in front, and not a tool's.
+    query_front: bool,
     tool: Tool,
     merge: Merge,
     format: Format,
@@ -144,7 +200,10 @@ pub struct Tools {
 impl Default for Tools {
     fn default() -> Self {
         Self {
-            open: false,
+            place: Place::Window,
+            window_open: false,
+            moving: None,
+            query_front: true,
             tool: Tool::Merge,
             merge: Merge::default(),
             format: Format::default(),
@@ -164,22 +223,90 @@ pub(crate) fn viewport_id() -> egui::ViewportId {
 }
 
 impl Tools {
-    /// Open the window, or bring it to the front if it's already open.
+    /// Open the Tools where they were left: their window — or, if it is open
+    /// already, bring it to the front — or, docked, the tab of the tool they were
+    /// on (they are in the main window all the time).
     pub fn open_or_focus(&mut self, ctx: &egui::Context) {
-        if self.open {
-            ctx.send_viewport_cmd_to(viewport_id(), egui::ViewportCommand::Focus);
-        } else {
-            self.open = true;
+        match self.place {
+            Place::Window if self.window_open => {
+                ctx.send_viewport_cmd_to(viewport_id(), egui::ViewportCommand::Focus);
+            }
+            Place::Window => self.window_open = true,
+            Place::Docked => self.query_front = false,
         }
     }
 
+    /// Showing, in a window that is open or docked in the main window.
+    #[cfg(test)]
     pub fn is_open(&self) -> bool {
-        self.open
+        self.window_open || self.is_docked()
     }
 
-    /// The window was closed (by the user): stop showing it.
+    /// Open in a window of their own.
+    pub fn in_window(&self) -> bool {
+        self.window_open && self.place == Place::Window
+    }
+
+    /// Tabs of the main window.
+    pub fn is_docked(&self) -> bool {
+        self.place == Place::Docked
+    }
+
+    /// Where they are shown, and where they open next.
+    pub fn place(&self) -> Place {
+        self.place
+    }
+
+    /// Start out in `place` — as the settings have it. (For a move while the
+    /// app runs, [`Tools::request_place`].)
+    pub fn use_place(&mut self, place: Place) {
+        self.place = place;
+    }
+
+    /// Ask for the Tools to be moved to `place` once the frame is drawn. A page is
+    /// drawn in one place a frame — its ids are the same in a window and in the
+    /// main window, so drawing it in both would make its widgets clash — and so it
+    /// cannot move part-way through one.
+    pub fn request_place(&mut self, place: Place) {
+        self.moving = Some(place);
+    }
+
+    /// Make the move that was asked for, after the frame. True when the Tools
+    /// went to the other place.
+    pub fn apply_place_request(&mut self) -> bool {
+        let Some(place) = self.moving.take() else {
+            return false;
+        };
+        let moved = self.place != place;
+        self.place = place;
+        match place {
+            // The window is gone, and the page that was in it is in front.
+            Place::Docked => {
+                self.window_open = false;
+                self.query_front = false;
+            }
+            Place::Window => self.window_open = true,
+        }
+        moved
+    }
+
+    /// The window of the Tools was closed: stop showing it. What the Tools hold is
+    /// kept for when they are opened again.
     pub fn close(&mut self) {
-        self.open = false;
+        self.window_open = false;
+    }
+
+    /// Docked, with the page of a tool in front: it is what the main window shows,
+    /// in place of the [`QUERY_TAB`].
+    pub fn page_in_front(&self) -> bool {
+        self.is_docked() && !self.query_front
+    }
+
+    /// Bring the [`QUERY_TAB`] to the front — for whatever has just been put in
+    /// it: a document, a value to show, a list of hits, a query to run. (Nothing
+    /// changes where there is no tab to bring forward.)
+    pub fn show_query(&mut self) {
+        self.query_front = true;
     }
 
     /// The limits on files from now on: the most the tools take, all of a job's
@@ -354,7 +481,7 @@ impl Tools {
             .get_or_insert_with(|| Arc::new(crate::app_icon()))
             .clone();
         egui::ViewportBuilder::default()
-            .with_title("jsonquery — Tools")
+            .with_title(crate::title_of("Tools"))
             .with_inner_size([900.0, 580.0])
             .with_min_inner_size([760.0, 440.0])
             .with_app_id(crate::APP_ID)
@@ -369,7 +496,7 @@ impl Tools {
         ui: &mut egui::Ui,
         open_doc: Option<&Arc<Document>>,
     ) -> Option<Request> {
-        self.contents(ui, true, open_doc)
+        self.contents(ui, Showing::Window { own_input: true }, open_doc)
     }
 
     /// Draw the window (if open) for this frame as an immediate viewport, inside
@@ -382,7 +509,7 @@ impl Tools {
         ctx: &egui::Context,
         open_doc: Option<&Arc<Document>>,
     ) -> Option<Request> {
-        if !self.open {
+        if !self.in_window() {
             return None;
         }
 
@@ -394,23 +521,56 @@ impl Tools {
             // An embedded window shares the main window's input, and so its
             // dropped files — which the main window has already taken.
             let own_input = class != egui::ViewportClass::EmbeddedWindow;
-            request = self.contents(ui, own_input, open_doc);
+            request = self.contents(ui, Showing::Window { own_input }, open_doc);
         });
         if close {
-            self.open = false;
+            self.window_open = false;
         }
         request
+    }
+
+    /// One frame of the page of the tool whose tab is in front, docked: in `ui`,
+    /// the room the main window has left between its row of tabs and its status
+    /// bar. `open_doc` is the document open in the main window. Returns what the
+    /// page asks the app to do, if anything.
+    pub fn docked_page(
+        &mut self,
+        ui: &mut egui::Ui,
+        open_doc: Option<&Arc<Document>>,
+    ) -> Option<Request> {
+        self.contents(ui, Showing::Docked, open_doc)
     }
 
     fn contents(
         &mut self,
         ui: &mut egui::Ui,
-        own_input: bool,
+        showing: Showing,
+        open_doc: Option<&Arc<Document>>,
+    ) -> Option<Request> {
+        // The same ids in a window and in the main window, so that what a page keeps
+        // (scrolling, the caret in a box) is still there when the Tools move.
+        let scope = egui::UiBuilder::new().id(egui::Id::new("jsonquery_tools"));
+        ui.scope_builder(scope, |ui| self.pages(ui, showing, open_doc))
+            .inner
+    }
+
+    fn pages(
+        &mut self,
+        ui: &mut egui::Ui,
+        showing: Showing,
         open_doc: Option<&Arc<Document>>,
     ) -> Option<Request> {
         self.shared.expire(ui.ctx());
-        egui::Panel::top("tools_tabs").show(ui, |ui| self.tabs(ui));
-        egui::Panel::bottom("tools_status").show(ui, |ui| self.status_bar(ui));
+        let own_input = match showing {
+            Showing::Window { own_input } => {
+                egui::Panel::top("tools_tabs").show(ui, |ui| self.tabs(ui));
+                egui::Panel::bottom("tools_status").show(ui, |ui| self.status_bar(ui));
+                own_input
+            }
+            // The main window has drawn those, and leaves the files dropped on it to
+            // the page in front.
+            Showing::Docked => true,
+        };
 
         // The page takes what is left: its command row, then its two panes.
         let mut env = Env {
@@ -442,18 +602,39 @@ impl Tools {
     }
 
     /// The tools, as tabs: what the Tree and Text tabs of the main window's
-    /// panes are.
+    /// panes are. At the right end, the way to dock them in the main window.
     fn tabs(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             for tool in Tool::ALL {
                 ui.selectable_value(&mut self.tool, tool, tool.label());
             }
+            pane_header::pinned_right(ui, |ui| {
+                if dock_button(ui) {
+                    self.request_place(Place::Docked);
+                }
+            });
         });
+    }
+
+    /// The tabs of the main window while the Tools are docked in it: [`QUERY_TAB`],
+    /// which is the window as it is without them, and one for each tool.
+    pub fn main_tabs(&mut self, ui: &mut egui::Ui) {
+        if ui.selectable_label(self.query_front, QUERY_TAB).clicked() {
+            self.query_front = true;
+        }
+        for tool in Tool::ALL {
+            let selected = !self.query_front && self.tool == tool;
+            if ui.selectable_label(selected, tool.label()).clicked() {
+                self.query_front = false;
+                self.tool = tool;
+            }
+        }
     }
 
     /// What the page says about its result, then the line about what was last
     /// done (a save, a copy), as the main window's status bar says such things.
-    fn status_bar(&mut self, ui: &mut egui::Ui) {
+    /// The main window shows it as its own while a tool's tab is in front.
+    pub fn status_bar(&mut self, ui: &mut egui::Ui) {
         // The bar keeps its height when there is nothing to say.
         let row = ui.spacing().interact_size.y;
         ui.set_min_height(row);
@@ -496,6 +677,44 @@ pub fn button(ui: &mut egui::Ui, tools: &mut Tools) {
     }
 }
 
+/// Small, dimmed [`DOCK_ICON`] button, in the shape of the tutorial and theme
+/// buttons, at the right end of the Tools window's row of tabs: the anchor docks the
+/// Tools in the main window. Gives whether it was clicked, and the caller moves the
+/// Tools (`Tools::request_place`).
+pub fn dock_button(ui: &mut egui::Ui) -> bool {
+    dim_button(
+        ui,
+        DOCK_ICON,
+        false,
+        "Dock the Tools in the main window, as tabs beside Json Query.\n\
+         They keep what they hold.",
+    )
+}
+
+/// The [`UNDOCK_ICON`] button that takes the docked Tools out of the main window
+/// again, into a window of their own. It is the main window's one way out, in the
+/// status bar beside the ⚙, and small as the buttons there are; the row of tabs has
+/// none. Gives whether it was clicked, and the caller moves the Tools.
+pub fn undock_button(ui: &mut egui::Ui) -> bool {
+    dim_button(
+        ui,
+        UNDOCK_ICON,
+        true,
+        "Undock the Tools — open them in a window of their own.\n\
+         They keep what they hold.",
+    )
+}
+
+/// A single-icon-plus-hover-text button, dimmed like the tutorial's and theme's.
+fn dim_button(ui: &mut egui::Ui, icon: &str, small: bool, tip: &str) -> bool {
+    let icon = RichText::new(icon).color(ui.visuals().weak_text_color());
+    let mut button = egui::Button::new(icon);
+    if small {
+        button = button.small();
+    }
+    ui.add(button).on_hover_text(tip).clicked()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -533,6 +752,88 @@ mod tests {
     }
 
     #[test]
+    fn the_tools_are_a_window_until_docked_and_open_where_they_were_left() {
+        let ctx = egui::Context::default();
+        let mut tools = Tools::default();
+        assert_eq!(tools.place(), Place::Window);
+        assert!(!tools.is_open() && !tools.in_window() && !tools.is_docked());
+
+        tools.open_or_focus(&ctx);
+        assert!(tools.in_window() && !tools.is_docked());
+        tools.close();
+        assert!(!tools.is_open());
+        assert_eq!(tools.place(), Place::Window, "closing forgets nothing");
+
+        // Docked, they are in the main window from the start: there is nothing to
+        // open, and no window.
+        tools.use_place(Place::Docked);
+        assert!(tools.is_docked() && tools.is_open());
+        assert!(!tools.in_window());
+    }
+
+    #[test]
+    fn a_move_asked_for_is_made_once_and_the_tools_are_there() {
+        let mut tools = Tools::default();
+        assert!(!tools.apply_place_request(), "nothing was asked");
+
+        tools.request_place(Place::Docked);
+        assert!(!tools.is_docked(), "nothing moves until the frame is drawn");
+        assert!(tools.apply_place_request(), "it moved");
+        assert!(tools.is_docked() && !tools.in_window());
+        assert!(!tools.apply_place_request(), "and it was made once");
+
+        // A move to where they already are is no move.
+        tools.request_place(Place::Docked);
+        assert!(!tools.apply_place_request(), "no move");
+        assert!(tools.is_docked());
+
+        // Out of the main window, they are a window that is open.
+        tools.request_place(Place::Window);
+        assert!(tools.apply_place_request());
+        assert!(tools.in_window() && !tools.is_docked());
+        // Closed, and docked again, they leave no window behind.
+        tools.request_place(Place::Docked);
+        tools.apply_place_request();
+        tools.request_place(Place::Window);
+        tools.apply_place_request();
+        tools.close();
+        assert!(!tools.in_window() && !tools.is_open());
+    }
+
+    #[test]
+    fn docked_the_tab_in_front_is_jsonquerys_or_a_tools_and_a_move_goes_to_the_tool() {
+        let ctx = egui::Context::default();
+        let mut tools = Tools::default();
+        assert!(!tools.page_in_front(), "not docked: no page in the way");
+
+        // From the start the window is jsonquery.
+        tools.use_place(Place::Docked);
+        assert!(tools.is_docked() && !tools.page_in_front());
+
+        // Opening the Tools (a drop of several files does) is going to a tool.
+        tools.open_on(&ctx, Tool::Diff);
+        assert!(tools.page_in_front());
+        // What has to be seen in the Json Query tab brings it forward.
+        tools.show_query();
+        assert!(!tools.page_in_front() && tools.is_docked());
+
+        // Docking from their window leaves the user with the tool they were on.
+        let mut tools = Tools::default();
+        tools.open_on(&ctx, Tool::Patch);
+        tools.request_place(Place::Docked);
+        tools.apply_place_request();
+        assert!(tools.page_in_front());
+        // And it is not forgotten when the Tools leave the main window and come back.
+        tools.show_query();
+        tools.request_place(Place::Window);
+        tools.apply_place_request();
+        assert!(!tools.page_in_front(), "a window has no tab in front");
+        tools.request_place(Place::Docked);
+        tools.apply_place_request();
+        assert!(tools.page_in_front());
+    }
+
+    #[test]
     fn every_tool_has_a_page_in_the_list() {
         let labels: Vec<_> = Tool::ALL.iter().map(|t| t.label()).collect();
         assert_eq!(
@@ -542,8 +843,15 @@ mod tests {
                 "Format JSON",
                 "Diff JSON",
                 "Patch JSON",
-                "Validate schema"
+                "Validate Schema"
             ]
         );
+    }
+
+    #[test]
+    fn the_first_tab_and_the_buttons_that_move_the_tools_say_what_they_are() {
+        assert_eq!(QUERY_TAB, "Json Query");
+        assert_eq!(DOCK_ICON, "⚓");
+        assert_eq!(UNDOCK_ICON, "🗗");
     }
 }
