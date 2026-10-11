@@ -25,7 +25,7 @@
 # jsonquery_gui, or the AppImage), else `jsonquery_gui` / `jsonquery-gui` on the
 # PATH, else the snap. To name it, put its path last:
 #
-#   jsonquery-x11.sh ~/Apps/jsonquery_gui-0.5.0-x86_64.AppImage
+#   jsonquery-x11.sh ~/Apps/jsonquery_gui-0.5.1-x86_64.AppImage
 #
 # Run it again after moving or updating the program: the entry is rewritten.
 # On a desktop that is not Wayland it does nothing, unless given --force.
