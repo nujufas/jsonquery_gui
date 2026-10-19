@@ -5,6 +5,9 @@ members = [
     "crates/query",
     "crates/app",
 ]
+# jaq-json with a few changes (see its JSONQUERY.md): a path dependency of crates/query, but
+# not a member, so that fmt, clippy and the tests of the workspace are not run on it.
+exclude = ["third_party/jaq-json"]
 
 [workspace.package]
 version = "0.5.1"

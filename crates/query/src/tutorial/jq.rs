@@ -1000,7 +1000,6 @@ pub(super) static TOPICS: &[Topic] = &[
             .tips(&[
                 "jaq lacks `@csv`, `@tsv`, `IN`, `INDEX`, `JOIN`, `tostream`, `fromstream` and `truncate_stream`; jsonquery adds them, and they work as in jq.",
                 "Not available: `$ENV` (use `env`), `input`, `leaf_paths` and `toarray`.",
-                "Assignment can't create several missing levels at once: `{} | .a.b.c = 1` is an error here.",
                 "Available and handy: `@base64`, `@uri`, `@html`, `@sh`, `@json`, regex (`test`, `capture`, `sub`, `gsub`), `reduce`, `foreach`, `limit`, `first`, `walk`, `paths`, `getpath`, `to_entries`, `with_entries`, `group_by`, `unique_by`, `min_by` and `max_by`.",
             ]),
         ],

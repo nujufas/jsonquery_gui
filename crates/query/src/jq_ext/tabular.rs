@@ -110,20 +110,24 @@ fn escape(out: &mut Vec<u8>, text: &[u8]) {
 /// A value as jq names it in an error: its type, then its JSON cut short —
 /// `object ({"b":[1,2,3...)`.
 pub(super) fn describe(val: &Val) -> String {
-    let kind = match val {
+    let mut quoted = Quoted::default();
+    // Cut short on purpose: the value may be huge, and there is no need to
+    // print all of it only to throw most of it away.
+    let _ = write!(quoted, "{val}");
+    let cut = if quoted.cut { "..." } else { "" };
+    format!("{} ({}{cut})", kind(val), quoted.text)
+}
+
+/// The name jq gives the type of a value in its errors.
+pub(super) fn kind(val: &Val) -> &'static str {
+    match val {
         Val::Null => "null",
         Val::Bool(_) => "boolean",
         Val::Num(_) => "number",
         Val::TStr(_) | Val::BStr(_) => "string",
         Val::Arr(_) => "array",
         Val::Obj(_) => "object",
-    };
-    let mut quoted = Quoted::default();
-    // Cut short on purpose: the value may be huge, and there is no need to
-    // print all of it only to throw most of it away.
-    let _ = write!(quoted, "{val}");
-    let cut = if quoted.cut { "..." } else { "" };
-    format!("{kind} ({}{cut})", quoted.text)
+    }
 }
 
 /// A `fmt::Write` that keeps the first [`QUOTE_CHARS`] characters and then

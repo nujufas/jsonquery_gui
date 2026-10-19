@@ -431,6 +431,10 @@ without pulling in a GUI toolkit:
   `QueryEngine` trait, plus the merge, format, diff, patch and schema logic
   behind the Tools window.
 - **`crates/app`** — the eframe/egui application itself.
+- **`third_party/jaq-json`** — jaq-json 2.0.3 with a few changes, so that an assignment
+  makes the place it writes to (`null | .a.b = 1`), as jq's does. It is not part of the
+  workspace, and `cargo test --workspace` leaves it alone; its
+  [JSONQUERY.md](third_party/jaq-json/JSONQUERY.md) lists the changes and how to test them.
 
 ### GUI tests: jsonquery_test
 

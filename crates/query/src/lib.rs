@@ -268,14 +268,15 @@ impl Program {
             path: (),
         };
 
-        // What jq_ext writes again (`fromjson`, `tonumber`, `tojson`) is left out of
-        // jaq-json's: of two filters of a name, the first found would be the one called.
+        // What jq_ext writes again (`fromjson`, `tonumber`, `tojson`, `decode_base64`) is
+        // left out of jaq-json's and jaq-std's: of two filters of a name, the first found
+        // would be the one called.
         let defs = jaq_core::defs()
             .chain(jaq_std::defs())
             .chain(jaq_json::defs().filter(|def| !jq_ext::replaces_def(def.name)))
             .chain(jq_ext::defs());
         let funs = jaq_core::funs()
-            .chain(jaq_std::funs())
+            .chain(jaq_std::funs().filter(|fun| !jq_ext::replaces_fun(fun.0, fun.1.len())))
             .chain(jaq_json::funs().filter(|fun| !jq_ext::replaces_fun(fun.0, fun.1.len())))
             .chain(jq_ext::funs());
 

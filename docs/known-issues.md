@@ -60,52 +60,14 @@ Workaround: Use `env` for `$ENV`: `env | type` gives `"object"`.
 
 ## Fails where jq works
 
-**Setting a value in `null`, or in a place that isn't there, fails: `null | .a.b = 1`, `.a += 1`, `setpath(…)`, and `reduce` that starts from `null` (jq makes the objects and arrays)**
-
-| Input | Program | jq 1.8.1 | Here |
-|---|---|---|---|
-| `null` | `.a.b = 1` | `{"a":{"b":1}}` | an error |
-| `null` | `.a += 1` | `{"a":1}` | an error |
-| `null` | `setpath(["a","b"]; 1)` | `{"a":{"b":1}}` | an error |
-| `null` | `reduce range(3) as $i (null; .[$i] = $i)` | `[0,1,2]` | an error |
-
-Workaround: Make each level yourself: `{} | .a = ((.a // {}) | .b = 1)` gives `{"a":{"b":1}}`.
-
-**Setting an array item that isn't there yet fails: `[] | .[0] = 1`, `[0] | .[2] = 1` (jq adds it, and fills a gap with `null`)**
-
-| Input | Program | jq 1.8.1 | Here |
-|---|---|---|---|
-| `[]` | `.[0] = 1` | `[1]` | an error |
-| `[0]` | `.[2] = 1` | `[0,null,1]` | an error |
-| `[0]` | `setpath([2]; 1)` | `[0,null,1]` | an error |
-
-Workaround: Add items at the end with `+`: `[0] | . + [1]` gives `[0,1]`.
-
-**`first(f)`, `limit(n; f)`, `skip(n; f)` and `try f` can't be the target of `=`, `|=` or `del`**
+**`first(f)`, `limit(n; f)`, `skip(n; f)`, `last(f)` and `try f` can't be the target of `=` or `|=`**
 
 | Input | Program | jq 1.8.1 | Here |
 |---|---|---|---|
 | `[1,2,3]` | `first(.[] \| select(. > 1)) \|= 10` | `[1,10,3]` | an error |
-| `[1,2,3]` | `del(limit(2; .[]))` | `[3]` | an error |
+| `[1,2,3]` | `limit(2; .[]) \|= 0` | `[0,0,3]` | an error |
 
 Workaround: Take the path first, then update it: `[1,2,3] | getpath(path(first(.[] | select(. > 1)))) |= 10` gives `[1,10,3]`.
-
-**`del(.[1,2])` fails (several items of an array at once), and so does `del(.[5])` for an item that isn't there**
-
-| Input | Program | jq 1.8.1 | Here |
-|---|---|---|---|
-| `[1,2,3]` | `del(.[1,2])` | `[1]` | an error |
-| `[1]` | `del(.[5])` | `[1]` | an error |
-
-Workaround: Delete the highest index first: `[1,2,3] | del(.[2], .[1])` gives `[1]`.
-
-**`@base64d` fails on base64 without `=` padding, such as a JWT segment**
-
-| Input | Program | jq 1.8.1 | Here |
-|---|---|---|---|
-| `"aGVsbG8"` | `@base64d` | `"hello"` | an error |
-
-Workaround: Pad the text to a multiple of four first: `"aGVsbG8" | . + (["", "===", "==", "="][length % 4]) | @base64d` gives `"hello"`.
 
 **Regex: Unicode classes (`\p{L}`), look-ahead and look-behind, back-references, atomic groups and `test(["re","flags"])` fail**
 
@@ -128,13 +90,16 @@ Workaround: Pad the text to a multiple of four first: `"aGVsbG8" | . + (["", "==
 
 Workaround: Go through `mktime`: `1425599621 | gmtime | mktime | todate` gives `"2015-03-05T23:53:41Z"`.
 
-**`null | .[1:]` fails, and so do fractions as indexes: `.[1.5]`, `.[1.2:3.5]`**
+**`null | .[1:]` fails, and so does an index with a fraction, or that a division made: `.[1.5]`, `.[length / 2]`, `.[1.2:3.5]`**
 
 | Input | Program | jq 1.8.1 | Here |
 |---|---|---|---|
 | `null` | `.[1:]` | `null` | an error |
 | `[1,2,3]` | `.[1.5]` | `2` | an error |
+| `[1,2,3,4]` | `.[length / 2]` | `3` | an error |
 | `[1,2,3]` | `.[1.2:2.5]` | `[2,3]` | an error |
+
+Workaround: Round it down first: `[1,2,3,4] | .[length / 2 | floor]` gives `3`.
 
 **`ldexp`, `scalbln`, `jn` and `yn` fail on a fraction as an argument**
 
@@ -143,16 +108,13 @@ Workaround: Go through `mktime`: `1425599621 | gmtime | mktime | todate` gives `
 | `null` | `ldexp(10; 0.5)` | `10` | an error |
 | `null` | `jn(1.5; 2)` | `0.5767248077568733` | an error |
 
-## Gives a different result
-
-**`scan` finds only the first match, and never returns capture groups**
+**A value can be put at an index of an array up to 16,777,215, and `.[20000000] = 1` on `[]` is an error (jq: up to 536,870,911)**
 
 | Input | Program | jq 1.8.1 | Here |
 |---|---|---|---|
-| `"a1b22"` | `[scan("[0-9]+")]` | `["1","22"]` | `["1"]` |
-| `"ab ab"` | `[scan("(a)(b)")]` | `[["a","b"],["a","b"]]` | `["ab"]` |
+| `[]` | `.[20000000] = 1 \| length` | `20000001` | an error |
 
-Workaround: Use `match` with the `g` flag: `"a1b22" | [match("[0-9]+"; "g").string]` gives `["1","22"]`.
+## Gives a different result
 
 **`%` binds tighter than `*` and `/`: `2 * 3 % 4` is 6 (jq: 2)**
 
@@ -163,33 +125,6 @@ Workaround: Use `match` with the `g` flag: `"a1b22" | [match("[0-9]+"; "g").stri
 
 Workaround: Use parentheses: `(2 * 3) % 4` gives `2`.
 
-**`del(.a[0], .a[1])` and `delpaths([[0],[0]])` remove the wrong items: they delete one path after the other**
-
-| Input | Program | jq 1.8.1 | Here |
-|---|---|---|---|
-| `{"a":[1,2,3]}` | `del(.a[0], .a[1])` | `{"a":[3]}` | `{"a":[2]}` |
-| `[1,2,3]` | `delpaths([[0],[0]])` | `[2,3]` | `[3]` |
-
-Workaround: Delete the highest index first: `{"a":[1,2,3]} | del(.a[1], .a[0])` gives `{"a":[3]}`.
-
-**`join` turns `null` into "null" (jq: ""), and accepts arrays and objects (jq: an error)**
-
-| Input | Program | jq 1.8.1 | Here |
-|---|---|---|---|
-| `["a",null,"b"]` | `join(",")` | `"a,,b"` | `"a,null,b"` |
-| `[[1]]` | `join(",")` | an error | `"[1]"` |
-
-Workaround: Turn the `null`s into empty text first: `["a",null,"b"] | map(if . == null then "" else . end) | join(",")` gives `"a,,b"`.
-
-**`from_entries` knows only `key` and `value`: `Key` and `Value` (AWS tags) or `name` give `{null: null}`**
-
-| Input | Program | jq 1.8.1 | Here |
-|---|---|---|---|
-| `[{"Key":"a","Value":1}]` | `from_entries` | `{"a":1}` | `"{null:null}"` |
-| `[{"name":"a","value":1}]` | `from_entries` | `{"a":1}` | `"{null:1}"` |
-
-Workaround: Say which keys to use: `[{"Key":"a","Value":1}] | map({key: (.Key // .name), value: (.Value // .value)}) | from_entries` gives `{"a":1}`.
-
 **Regex: `\w`, `\d` and `\s` match only ASCII (`"héllo"` gives `h` and `llo`), groups that took no part are left out, and `gsub` with several replacements gives every combination**
 
 | Input | Program | jq 1.8.1 | Here |
@@ -197,13 +132,6 @@ Workaround: Say which keys to use: `[{"Key":"a","Value":1}] | map({key: (.Key //
 | `"héllo wörld"` | `[match("\\w+";"g").string]` | `["héllo","wörld"]` | `["h","llo","w","rld"]` |
 | `"b"` | `capture("(?<a>a)?(?<b>b)")` | `{"a":null,"b":"b"}` | `{"b":"b"}` |
 | `"aa"` | `[gsub("a";"1","2")]` | `["11","22"]` | `["11","12","21","22"]` |
-
-**`pick` of array indexes gives an object, `{0: 1}`, not an array**
-
-| Input | Program | jq 1.8.1 | Here |
-|---|---|---|---|
-| `[1,2,3]` | `pick(.[0])` | `[1]` | `"{0:1}"` |
-| `[1,2,3]` | `pick(first)` | `[1]` | `"{0:1}"` |
 
 **`has(-1)` is true, `nth(1,2; f)` gives only the first, and `limit(-1; f)` and `flatten(-1)` don't complain (jq: false, both, an error)**
 
@@ -258,6 +186,19 @@ Workaround: Say which keys to use: `[{"Key":"a","Value":1}] | map({key: (.Key //
 | `"1 # one"` | `fromjson` | an error | `1` |
 | `".5"` | `fromjson` | `0.5` | an error |
 | `"nan"` | `fromjson` | `null` | an error |
+
+**`.a.b |= empty` and `.a[]? |= f`, where `a` isn't there, leave `"a": null` behind (jq changes nothing)**
+
+| Input | Program | jq 1.8.1 | Here |
+|---|---|---|---|
+| `{"x":1}` | `.a.b \|= empty` | `{"x":1}` | `{"x":1,"a":null}` |
+| `{"x":1}` | `.a[]? \|= 1` | `{"x":1}` | `{"x":1,"a":null}` |
+
+**An object can be made with a key that is not a string: `{(1): 2}` is an error in jq, and here an object that is shown as text**
+
+| Input | Program | jq 1.8.1 | Here |
+|---|---|---|---|
+| `null` | `{(1): 2}` | an error | a string of text |
 
 ## Looks different
 

@@ -63,56 +63,14 @@ pub const GROUPS: &[Group] = &[
     ]),
     Group::new("Fails where jq works", &[
         Issue::new(
-            "assign-null",
-            "Setting a value in `null`, or in a place that isn't there, fails: `null | .a.b = 1`, `.a += 1`, `setpath(…)`, and `reduce` that starts from `null` (jq makes the objects and arrays)",
-            &[
-                Example::new("null", ".a.b = 1", r#"`{"a":{"b":1}}`"#, Here::Error),
-                Example::new("null", ".a += 1", r#"`{"a":1}`"#, Here::Error),
-                Example::new("null", r#"setpath(["a","b"]; 1)"#, r#"`{"a":{"b":1}}`"#, Here::Error),
-                Example::new("null", "reduce range(3) as $i (null; .[$i] = $i)", "`[0,1,2]`", Here::Error),
-            ],
-        )
-        .workaround(Workaround::new("Make each level yourself", "{}", ".a = ((.a // {}) | .b = 1)", r#"{"a":{"b":1}}"#))
-        ,
-        Issue::new(
-            "assign-past-end",
-            "Setting an array item that isn't there yet fails: `[] | .[0] = 1`, `[0] | .[2] = 1` (jq adds it, and fills a gap with `null`)",
-            &[
-                Example::new("[]", ".[0] = 1", "`[1]`", Here::Error),
-                Example::new("[0]", ".[2] = 1", "`[0,null,1]`", Here::Error),
-                Example::new("[0]", "setpath([2]; 1)", "`[0,null,1]`", Here::Error),
-            ],
-        )
-        .workaround(Workaround::new("Add items at the end with `+`", "[0]", ". + [1]", "[0,1]"))
-        ,
-        Issue::new(
             "path-first",
-            "`first(f)`, `limit(n; f)`, `skip(n; f)` and `try f` can't be the target of `=`, `|=` or `del`",
+            "`first(f)`, `limit(n; f)`, `skip(n; f)`, `last(f)` and `try f` can't be the target of `=` or `|=`",
             &[
                 Example::new("[1,2,3]", "first(.[] | select(. > 1)) |= 10", "`[1,10,3]`", Here::Error),
-                Example::new("[1,2,3]", "del(limit(2; .[]))", "`[3]`", Here::Error),
+                Example::new("[1,2,3]", "limit(2; .[]) |= 0", "`[0,0,3]`", Here::Error),
             ],
         )
         .workaround(Workaround::new("Take the path first, then update it", "[1,2,3]", "getpath(path(first(.[] | select(. > 1)))) |= 10", "[1,10,3]"))
-        ,
-        Issue::new(
-            "del-several",
-            "`del(.[1,2])` fails (several items of an array at once), and so does `del(.[5])` for an item that isn't there",
-            &[
-                Example::new("[1,2,3]", "del(.[1,2])", "`[1]`", Here::Error),
-                Example::new("[1]", "del(.[5])", "`[1]`", Here::Error),
-            ],
-        )
-        .workaround(Workaround::new("Delete the highest index first", "[1,2,3]", "del(.[2], .[1])", "[1]"))
-        ,
-        Issue::new(
-            "base64d",
-            "`@base64d` fails on base64 without `=` padding, such as a JWT segment",
-            &[
-                Example::new(r#""aGVsbG8""#, "@base64d", r#"`"hello"`"#, Here::Error),
-            ],
-        )
-        .workaround(Workaround::new("Pad the text to a multiple of four first", r#""aGVsbG8""#, r#". + (["", "===", "==", "="][length % 4]) | @base64d"#, r#""hello""#))
         ,
         Issue::new(
             "regex-features",
@@ -140,14 +98,15 @@ pub const GROUPS: &[Group] = &[
         ,
         Issue::new(
             "slice-null",
-            "`null | .[1:]` fails, and so do fractions as indexes: `.[1.5]`, `.[1.2:3.5]`",
+            "`null | .[1:]` fails, and so does an index with a fraction, or that a division made: `.[1.5]`, `.[length / 2]`, `.[1.2:3.5]`",
             &[
                 Example::new("null", ".[1:]", "`null`", Here::Error),
                 Example::new("[1,2,3]", ".[1.5]", "`2`", Here::Error),
+                Example::new("[1,2,3,4]", ".[length / 2]", "`3`", Here::Error),
                 Example::new("[1,2,3]", ".[1.2:2.5]", "`[2,3]`", Here::Error),
             ],
         )
-        .minor()
+        .workaround(Workaround::new("Round it down first", "[1,2,3,4]", ".[length / 2 | floor]", "3"))
         ,
         Issue::new(
             "fraction-args",
@@ -159,18 +118,17 @@ pub const GROUPS: &[Group] = &[
         )
         .minor()
         ,
-    ]),
-    Group::new("Gives a different result", &[
         Issue::new(
-            "scan",
-            "`scan` finds only the first match, and never returns capture groups",
+            "write-limit",
+            "A value can be put at an index of an array up to 16,777,215, and `.[20000000] = 1` on `[]` is an error (jq: up to 536,870,911)",
             &[
-                Example::new(r#""a1b22""#, r#"[scan("[0-9]+")]"#, r#"`["1","22"]`"#, Here::Output(&[r#"["1"]"#])),
-                Example::new(r#""ab ab""#, r#"[scan("(a)(b)")]"#, r#"`[["a","b"],["a","b"]]`"#, Here::Output(&[r#"["ab"]"#])),
+                Example::new("[]", ".[20000000] = 1 | length", "`20000001`", Here::Error),
             ],
         )
-        .workaround(Workaround::new("Use `match` with the `g` flag", r#""a1b22""#, r#"[match("[0-9]+"; "g").string]"#, r#"["1","22"]"#))
+        .minor()
         ,
+    ]),
+    Group::new("Gives a different result", &[
         Issue::new(
             "percent-precedence",
             "`%` binds tighter than `*` and `/`: `2 * 3 % 4` is 6 (jq: 2)",
@@ -182,36 +140,6 @@ pub const GROUPS: &[Group] = &[
         .workaround(Workaround::new("Use parentheses", "null", "(2 * 3) % 4", "2"))
         ,
         Issue::new(
-            "del-several-wrong",
-            "`del(.a[0], .a[1])` and `delpaths([[0],[0]])` remove the wrong items: they delete one path after the other",
-            &[
-                Example::new(r#"{"a":[1,2,3]}"#, "del(.a[0], .a[1])", r#"`{"a":[3]}`"#, Here::Output(&[r#"{"a":[2]}"#])),
-                Example::new("[1,2,3]", "delpaths([[0],[0]])", "`[2,3]`", Here::Output(&["[3]"])),
-            ],
-        )
-        .workaround(Workaround::new("Delete the highest index first", r#"{"a":[1,2,3]}"#, "del(.a[1], .a[0])", r#"{"a":[3]}"#))
-        ,
-        Issue::new(
-            "join-null",
-            r#"`join` turns `null` into "null" (jq: ""), and accepts arrays and objects (jq: an error)"#,
-            &[
-                Example::new(r#"["a",null,"b"]"#, r#"join(",")"#, r#"`"a,,b"`"#, Here::Output(&[r#""a,null,b""#])),
-                Example::new("[[1]]", r#"join(",")"#, "an error", Here::Output(&[r#""[1]""#])),
-            ],
-        )
-        .workaround(Workaround::new("Turn the `null`s into empty text first", r#"["a",null,"b"]"#, r#"map(if . == null then "" else . end) | join(",")"#, r#""a,,b""#))
-        ,
-        Issue::new(
-            "from-entries",
-            "`from_entries` knows only `key` and `value`: `Key` and `Value` (AWS tags) or `name` give `{null: null}`",
-            &[
-                Example::new(r#"[{"Key":"a","Value":1}]"#, "from_entries", r#"`{"a":1}`"#, Here::Output(&[r#""{null:null}""#])),
-                Example::new(r#"[{"name":"a","value":1}]"#, "from_entries", r#"`{"a":1}`"#, Here::Output(&[r#""{null:1}""#])),
-            ],
-        )
-        .workaround(Workaround::new("Say which keys to use", r#"[{"Key":"a","Value":1}]"#, "map({key: (.Key // .name), value: (.Value // .value)}) | from_entries", r#"{"a":1}"#))
-        ,
-        Issue::new(
             "regex-semantics",
             r#"Regex: `\w`, `\d` and `\s` match only ASCII (`"héllo"` gives `h` and `llo`), groups that took no part are left out, and `gsub` with several replacements gives every combination"#,
             &[
@@ -220,16 +148,6 @@ pub const GROUPS: &[Group] = &[
                 Example::new(r#""aa""#, r#"[gsub("a";"1","2")]"#, r#"`["11","22"]`"#, Here::Output(&[r#"["11","12","21","22"]"#])),
             ],
         )
-        ,
-        Issue::new(
-            "pick-array",
-            "`pick` of array indexes gives an object, `{0: 1}`, not an array",
-            &[
-                Example::new("[1,2,3]", "pick(.[0])", "`[1]`", Here::Output(&[r#""{0:1}""#])),
-                Example::new("[1,2,3]", "pick(first)", "`[1]`", Here::Output(&[r#""{0:1}""#])),
-            ],
-        )
-        .minor()
         ,
         Issue::new(
             "odd-arguments",
@@ -302,6 +220,25 @@ pub const GROUPS: &[Group] = &[
                 Example::new(r#""1 # one""#, "fromjson", "an error", Here::Output(&["1"])),
                 Example::new(r#"".5""#, "fromjson", "`0.5`", Here::Error),
                 Example::new(r#""nan""#, "fromjson", "`null`", Here::Error),
+            ],
+        )
+        .minor()
+        ,
+        Issue::new(
+            "update-empty",
+            r#"`.a.b |= empty` and `.a[]? |= f`, where `a` isn't there, leave `"a": null` behind (jq changes nothing)"#,
+            &[
+                Example::new(r#"{"x":1}"#, ".a.b |= empty", r#"`{"x":1}`"#, Here::Output(&[r#"{"x":1,"a":null}"#])),
+                Example::new(r#"{"x":1}"#, ".a[]? |= 1", r#"`{"x":1}`"#, Here::Output(&[r#"{"x":1,"a":null}"#])),
+            ],
+        )
+        .minor()
+        ,
+        Issue::new(
+            "object-keys",
+            "An object can be made with a key that is not a string: `{(1): 2}` is an error in jq, and here an object that is shown as text",
+            &[
+                Example::new("null", "{(1): 2}", "an error", Here::Text),
             ],
         )
         .minor()

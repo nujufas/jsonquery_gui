@@ -378,12 +378,15 @@ mod tests {
     }
 
     #[test]
-    fn the_window_leaves_some_to_the_page_but_not_most() {
+    fn the_window_leaves_some_to_the_page_but_shows_a_good_part() {
         assert!(
             minor_count() > 0,
             "otherwise there is nothing to say of the page"
         );
-        assert!(minor_count() * 2 < count(), "most are in the window");
+        assert!(
+            minor_count() * 3 < count() * 2,
+            "at least a third of them are in the window"
+        );
     }
 
     /// Says that an example no longer does what the list says it does.

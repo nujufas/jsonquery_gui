@@ -143,20 +143,27 @@ Two things fall out of embedding jaq specifically:
   than always running to completion.
 
 jaq is not jq, though, and a few things people paste from the jq manual are not
-in it. `crates/query/src/jq_ext.rs` adds them in the two forms jaq's own
-builtins take: definitions written in jq (`jq_ext/prelude.jq`: `IN`, `INDEX`,
-`JOIN`, `fromstream`, `truncate_stream`) and native Rust filters (`@csv`, `@tsv`
-and `tostream`, native for speed and for byte-level work). `run_query_with_vars`
-— the one place a jq program is compiled, and the Merge tool's too — chains them
-after jaq's own. They were checked against jq 1.8.1's output, and the cases are
-in the module's tests, so they hold on a machine without jq. Still missing:
-`$ENV`, `input`, `leaf_paths`, `toarray`, and assignments that create several
-missing levels at once (`{} | .a.b.c = 1`).
+in it, or mean something else in it. `crates/query/src/jq_ext.rs` adds and changes
+them in the two forms jaq's own builtins take: definitions written in jq
+(`jq_ext/prelude.jq`: `IN`, `INDEX`, `JOIN`, `fromstream`, `truncate_stream`, and
+jq's own `scan`, `join`, `from_entries`, `with_entries`, `del`, `delpaths` and
+`pick`) and native Rust filters (`@csv`, `@tsv` and `tostream`, native for speed
+and for byte-level work, and the ones below). `run_query_with_vars` — the one place
+a jq program is compiled, and the Merge tool's too — chains them after jaq's own.
+They were checked against jq 1.8.1's output, and the cases are in the module's
+tests, so they hold on a machine without jq. What still differs is the list of
+known issues (§10).
 
-Three of jaq's own are replaced (`jq_ext/json_text.rs`; the compiler is handed
-jaq-json's without them, as the first filter of a name is the one called):
+A definition in the prelude takes the place of one of jaq's of the same name and
+number of arguments, but only for what is written after it: jaq's `with_entries`
+calls the `from_entries` that was there when it was written, so it is written again
+below the new one. Of jaq's native filters, those that are written again here are
+left out of the list the compiler is handed, as the first filter of a name is the
+one called, and a definition of jaq-json's (`tonumber`) is left out too, as a
+definition is found before a native filter.
 
-- **`fromjson`** reads exactly one value, as jq's does. jaq's read a sequence, and
+- **`fromjson`** (`jq_ext/json_text.rs`) reads exactly one value, as jq's does.
+  jaq's read a sequence, and
   on text it could not read answered with an error and tried the same place
   again, for ever: `"abc" | fromjson` and `"abc" | tonumber` never ended, the
   worker thread was lost with them and the memory grew by a gigabyte a second.
@@ -166,6 +173,28 @@ jaq-json's without them, as the first filter of a name is the one called):
   `.5`, `1e3`, `nan`, not `" 5"`), not `fromjson` and a look at the type.
 - **`tojson`** stops at the depth jq stops at when it prints, 256 levels, and
   writes `<skipped: too deep>` for what is below.
+- **`@base64d`** (`jq_ext/base64.rs`) decodes as jq does: a missing `=` at the end
+  is no error (a JWT segment has none, and jaq's refused it), the first `=` ends
+  the text, and what is not UTF-8 becomes one U+FFFD for each broken sequence,
+  as jq's own reader of UTF-8 takes it.
+- **`delpaths`**, and `del` with it (`jq_ext/paths.rs`, called by the prelude as
+  `_delpaths`): the paths are sorted, and everything one level names is deleted
+  in one pass, as jq does it. jaq deleted them one after the other, so `del(.a[0],
+  .a[1])` took the wrong item, `del(.[1,2])` failed on the item that was no longer
+  there, and a key taken out moved the last key into its place.
+
+Assignments cannot be mended from outside jaq. `=`, `|=` and the rest call
+`map_index` of jaq-json's `Val` for every step of a path, and that is where a
+value put into `null` (which is what is under every key that is not there yet), or
+past the end of an array, was an error. `third_party/jaq-json` is jaq-json 2.0.3
+with that function, and its sibling for slices, changed: `null` becomes the object
+or the array that the key or the index asks for, an index past the end makes the
+array longer with `null`s (as far as 16,777,215; jq's 536,870,911 would be eight
+gigabytes), a key of an object that is not text is an error, and the key that
+`|= empty` takes out leaves the others where they are. It is a path dependency of
+`crates/query`, and the workspace `exclude`s it, so that formatting, clippy and the
+tests of the workspace leave it alone; its `JSONQUERY.md` lists the changes and
+says how to compare it with the original.
 
 A program can make a value as deep as it likes, and jaq writes one as text by
 recursion, a kilobyte of stack for each level: a thread's 2 MiB ended the process

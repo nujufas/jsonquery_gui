@@ -953,7 +953,6 @@ mod tests {
             r#"$ENV | type"#,
             r#"[.members[0] | leaf_paths]"#,
             r#".members | toarray"#,
-            r#"{} | .a.b.c = 1"#,
         ] {
             assert!(
                 !team(Kind::Jq, query).is_ok(),
