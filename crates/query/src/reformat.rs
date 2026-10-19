@@ -109,7 +109,8 @@ impl Writer<'_> {
                 self.out.push(',');
             }
             self.line(depth + 1);
-            self.string(key);
+            // (A repeated member that a tool kept as a key of its own is written as its name.)
+            self.string(jsonquery_core::duplicates::plain_key(key));
             self.out.push(':');
             if self.options.indent != Indent::Minified {
                 self.out.push(' ');
@@ -293,6 +294,34 @@ mod tests {
         assert_eq!(
             render_with(&value, Indent::Minified, false, false),
             "[1e+5,2e+5,3e-2]"
+        );
+    }
+
+    #[test]
+    fn a_repeated_member_that_a_tool_kept_as_a_key_of_its_own_is_written_under_its_name() {
+        use jsonquery_core::duplicates::repeated_key;
+        let mut members = serde_json::Map::new();
+        for (key, n) in [("a", 1), ("b", 2), ("a", 2), ("a", 3)] {
+            members.insert(repeated_key(key, n), json!(n));
+        }
+        // ("b" is the second member of its name only if it is marked: it is the first.)
+        let value = Value::Object(members);
+        assert_eq!(
+            render_with(&value, Indent::Spaces(2), false, false),
+            "{\n  \"a\": 1,\n  \"b\": 2,\n  \"a\": 2,\n  \"a\": 3\n}"
+        );
+        assert_eq!(
+            render_with(&value, Indent::Minified, false, false),
+            r#"{"a":1,"b":2,"a":2,"a":3}"#
+        );
+        // Written out, it reads back as the document with the last member of each key.
+        let back = parse(&render_with(&value, Indent::Minified, false, false));
+        assert_eq!(back, json!({"a": 3, "b": 2}));
+        // A value that is a string with the mark in it is left alone: only keys are names.
+        let odd = json!({"k": "a\u{fdd0}2"});
+        assert_eq!(
+            render_with(&odd, Indent::Minified, false, false),
+            format!("{{\"k\":\"a{}2\"}}", '\u{fdd0}')
         );
     }
 

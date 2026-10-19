@@ -197,6 +197,12 @@ difference, numbers are compared by value with their exact digits, and arrays
 are aligned by content, so an inserted element is one change rather than a
 change to every element after it.
 
+A key that an object has more than once is valid JSON, and its members are
+compared one by one: the first with the first, the second with the second, and
+one the other lacks is a red or a green line with a blank across. **Changes**
+names a member after the first `/name#2`; **Patch** leaves those out, as a JSON
+Pointer cannot say which of several members of a name it means, and says how many.
+
 Each difference has two arrows between the sides, one over the other, at its first
 line: press one and the document it points at takes what the other has there, as a
 file-comparison tool's "copy to left/right" does; the comparison runs again and the

@@ -8,13 +8,13 @@
 //! user lets the tools take (`FileLimits::tools`, 128 MB unless they changed it).
 
 use std::ops::Range;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context};
-use jsonquery_core::{Content, Document, DocumentSource};
+use jsonquery_core::{Content, Document, DocumentSource, DuplicateKeys};
 use jsonquery_query::diff::{self, Change, Side, SideBySide, TooLong};
 use jsonquery_query::reformat::{self, Indent};
 use jsonquery_query::{patch, schema};
@@ -73,11 +73,13 @@ impl Input {
         match self {
             Input::Text(text) => {
                 let doc = jsonquery_core::load_text(text)?;
+                let repeated = doc.duplicate_keys.clone();
                 let (root, read) = in_memory(doc, limits)?;
                 Ok(Loaded {
                     held: Held::Owned(root),
                     bytes: text.len() as u64,
                     read,
+                    repeated,
                 })
             }
             Input::File(path) => {
@@ -86,12 +88,14 @@ impl Input {
                 let doc = jsonquery_core::load_with(path, limits.load_for_tools())
                     .with_context(|| path.display().to_string())?;
                 let bytes = doc.byte_len;
+                let repeated = doc.duplicate_keys.clone();
                 let (root, read) =
                     in_memory(doc, limits).with_context(|| path.display().to_string())?;
                 Ok(Loaded {
                     held: Held::Owned(root),
                     bytes,
                     read,
+                    repeated,
                 })
             }
             Input::Document(doc) => {
@@ -102,9 +106,58 @@ impl Input {
                     held: Held::Shared(doc.clone()),
                     bytes: doc.byte_len,
                     read: Duration::ZERO,
+                    repeated: doc.duplicate_keys.clone(),
                 })
             }
         }
+    }
+}
+
+impl Input {
+    /// [`Input::load`] for Diff, which has to have every member of an object that repeats a
+    /// key, each after the first under a key of its own (see `jsonquery_core::duplicates`).
+    /// The document open in the main window was read with the last member only: it is read
+    /// again from its file when that is the same as it was; otherwise it is what it is, and
+    /// says in `repeated` what it lacks.
+    fn load_keeping_repeats(&self, limits: &FileLimits) -> anyhow::Result<Loaded> {
+        match self {
+            Input::Text(text) => {
+                let doc = jsonquery_core::load_text_keeping_repeats(text)?;
+                let (root, read) = in_memory(doc, limits)?;
+                Ok(Loaded {
+                    held: Held::Owned(root),
+                    bytes: text.len() as u64,
+                    read,
+                    repeated: DuplicateKeys::default(),
+                })
+            }
+            Input::File(path) => Self::from_file_keeping_repeats(path, limits),
+            Input::Document(doc) => {
+                if let DocumentSource::File(path) = &doc.source {
+                    let unchanged = std::fs::metadata(path).is_ok_and(|m| m.len() == doc.byte_len);
+                    if !doc.is_lazy() && !doc.duplicate_keys.is_empty() && unchanged {
+                        if let Ok(again) = Self::from_file_keeping_repeats(path, limits) {
+                            return Ok(again);
+                        }
+                    }
+                }
+                self.load(limits)
+            }
+        }
+    }
+
+    fn from_file_keeping_repeats(path: &Path, limits: &FileLimits) -> anyhow::Result<Loaded> {
+        // Parsed, whatever the tools are allowed to take (see `Input::load`).
+        let doc = jsonquery_core::load_keeping_repeats(path, limits.load_for_tools())
+            .with_context(|| path.display().to_string())?;
+        let bytes = doc.byte_len;
+        let (root, read) = in_memory(doc, limits).with_context(|| path.display().to_string())?;
+        Ok(Loaded {
+            held: Held::Owned(root),
+            bytes,
+            read,
+            repeated: DuplicateKeys::default(),
+        })
     }
 }
 
@@ -169,6 +222,9 @@ struct Loaded {
     bytes: u64,
     /// Reading and parsing it.
     read: Duration,
+    /// The keys that its text repeats, of which the value has the last only (none for a
+    /// document that was read with every member: see [`Input::load_keeping_repeats`]).
+    repeated: DuplicateKeys,
 }
 
 pub enum Job {
@@ -284,6 +340,16 @@ pub struct Compared {
     pub view: Result<SideBySide, TooLong>,
     /// The document a move changed, to put back in its box.
     pub moved: Option<Moved>,
+    /// How many of the differences the patch leaves out, as it cannot name them: those in a
+    /// member of a repeated key that is not the first (see `jsonquery_query::diff`).
+    pub unaddressed: usize,
+    /// The keys that the text of each document repeats and that were not compared as
+    /// members — Left, then Right: only the last member of each was. This is so only for
+    /// the document that is open in the main window, which was read that way and is not
+    /// to be read again from its file. (None for a document that a move changed: what was
+    /// written out has each key once.) Boxed: an outcome is as big as its biggest, and
+    /// clippy says so past a size.
+    pub repeats: Box<[DuplicateKeys; 2]>,
     pub elapsed: Duration,
 }
 
@@ -291,6 +357,9 @@ pub struct Compared {
 pub struct Moved {
     pub into: Side,
     pub text: Arc<str>,
+    /// How many members the text had that are not in what was written out, because
+    /// their key came again later in the object.
+    pub dropped: usize,
 }
 
 impl Compared {
@@ -351,11 +420,12 @@ fn run_job(job: Job, cancel: &AtomicBool, limits: &FileLimits) -> anyhow::Result
             edit,
         } => {
             check_size(&[&left, &right], limits)?;
-            let first = left.load(limits).context("Left")?;
-            let second = right.load(limits).context("Right")?;
+            let first = left.load_keeping_repeats(limits).context("Left")?;
+            let second = right.load_keeping_repeats(limits).context("Right")?;
             stop_if_cancelled(cancel)?;
             let merged: Value;
             let (mut before, mut after) = (first.held.value(), second.held.value());
+            let mut repeats = [first.repeated.clone(), second.repeated.clone()];
             let mut moved = None;
             // One document changed: by moving differences into it from the other, or by
             // changing a line of it.
@@ -399,9 +469,12 @@ fn run_job(job: Job, cancel: &AtomicBool, limits: &FileLimits) -> anyhow::Result
                     Side::Left => before = &merged,
                     Side::Right => after = &merged,
                 }
+                // The document is written out from the tree, which has each key once.
+                let gone = std::mem::take(&mut repeats[usize::from(into == Side::Right)]);
                 moved = Some(Moved {
                     into,
                     text: text.into(),
+                    dropped: gone.dropped,
                 });
             }
             let compared =
@@ -418,6 +491,8 @@ fn run_job(job: Job, cancel: &AtomicBool, limits: &FileLimits) -> anyhow::Result
                 patch: patch.into(),
                 view: compared.view,
                 moved,
+                unaddressed: found.unaddressed,
+                repeats: Box::new(repeats),
                 elapsed: start.elapsed(),
             }))
         }
@@ -997,6 +1072,261 @@ mod tests {
              {\"op\": \"remove\", \"path\": \"/b/1\"},\n  \
              {\"op\": \"add\", \"path\": \"/c\", \"value\": true}\n]"
         );
+    }
+
+    fn compared(left: Input, right: Input) -> Compared {
+        let Ok(Outcome::Diff(d)) = go(Job::Diff {
+            left,
+            right,
+            take: None,
+            edit: None,
+        }) else {
+            panic!("should compare")
+        };
+        d
+    }
+
+    /// The repeats of a document as (where, key, times).
+    fn repeated(found: &DuplicateKeys) -> Vec<(&str, &str, usize)> {
+        found
+            .listed
+            .iter()
+            .map(|r| (r.path.as_str(), r.key.as_str(), r.times))
+            .collect()
+    }
+
+    /// The paths of the changes, with their kinds.
+    fn changes_of(d: &Compared) -> Vec<(&'static str, &str)> {
+        d.changes
+            .iter()
+            .map(|c| {
+                let kind = match c.kind {
+                    jsonquery_query::diff::ChangeKind::Added => "added",
+                    jsonquery_query::diff::ChangeKind::Removed => "removed",
+                    jsonquery_query::diff::ChangeKind::Changed => "changed",
+                };
+                (kind, c.path.as_str())
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_members_of_a_repeated_key_are_compared_in_order_and_the_extra_ones_are_differences() {
+        use jsonquery_query::diff::Mark;
+        // nujufas/jsonquery_gui#1: a key that an object has more than once is valid JSON,
+        // and was compared by its last member, with nothing said. Now the first member is
+        // compared with the first, the second with the second, and the one the other lacks
+        // is removed (or added).
+        let d = compared(
+            text(r#"{"a": 1, "b": 2, "a": 3, "a": 4}"#),
+            text(r#"{"a": 1, "b": 2, "a": 9}"#),
+        );
+        assert!(!d.equal);
+        assert_eq!(changes_of(&d), [("changed", "/a#2"), ("removed", "/a#3")]);
+        assert_eq!((d.added, d.removed, d.changed), (0, 1, 1));
+        // A JSON Pointer cannot name the second `a` or the third: the patch has neither.
+        assert_eq!(&*d.patch, "[]");
+        assert_eq!(d.unaddressed, 2);
+        // Nothing is hidden: the document is what its text says.
+        assert!(d.repeats.iter().all(DuplicateKeys::is_empty));
+        // Side by side: every member is there, and the one Right lacks is a blank on its side.
+        let view = d.view.as_ref().expect("laid out");
+        assert_eq!((view.left_lines, view.right_lines), (6, 5));
+        let lines: Vec<(Mark, Option<&str>, Option<&str>)> = view
+            .rows
+            .iter()
+            .map(|r| (r.mark, r.left.as_deref(), r.right.as_deref()))
+            .collect();
+        assert_eq!(
+            lines,
+            [
+                (Mark::Same, Some("{"), Some("{")),
+                (Mark::Same, Some("  \"a\": 1,"), Some("  \"a\": 1,")),
+                (Mark::Same, Some("  \"b\": 2,"), Some("  \"b\": 2,")),
+                (Mark::Changed, Some("  \"a\": 3,"), Some("  \"a\": 9")),
+                (Mark::Removed, Some("  \"a\": 4"), None),
+                (Mark::Same, Some("}"), Some("}")),
+            ]
+        );
+        assert_eq!(view.rows[4].path.as_deref(), Some("/a#3"));
+        // The same repeats in both are the same.
+        let d = compared(
+            text(r#"{"a": 1, "a": 2, "a": 3}"#),
+            text(r#"{"a": 1, "a": 2, "a": 3}"#),
+        );
+        assert!(d.equal);
+        assert_eq!(d.unaddressed, 0);
+        // And a member that only Right has is added.
+        let d = compared(text(r#"{"a": 1}"#), text(r#"{"a": 1, "a": 1}"#));
+        assert_eq!(changes_of(&d), [("added", "/a#2")]);
+    }
+
+    #[test]
+    fn the_repeats_of_the_issue_are_differences_and_the_patch_keeps_to_what_it_can_name() {
+        let d = compared(
+            text(
+                r#"{"service": "orders-api", "regions": ["eu"], "owner": {"team": "p"},
+                    "regions": ["eu"], "owner": {"team": "p"}, "regions": ["eu"],
+                    "owner": {"team": "p"}}"#,
+            ),
+            text(r#"{"service": "orddders-api", "regions": ["eu", "us"], "owner": {"team": "p"}}"#),
+        );
+        assert_eq!(
+            changes_of(&d),
+            [
+                ("changed", "/service"),
+                ("added", "/regions/1"),
+                ("removed", "/regions#2"),
+                ("removed", "/owner#2"),
+                ("removed", "/regions#3"),
+                ("removed", "/owner#3"),
+            ]
+        );
+        assert_eq!(d.unaddressed, 4);
+        // The patch is the two it can say: the second and third of a name are not in it.
+        assert!(d.patch.contains("\"path\": \"/service\""), "{}", d.patch);
+        assert!(d.patch.contains("\"path\": \"/regions/1\""), "{}", d.patch);
+        assert!(!d.patch.contains('#'), "{}", d.patch);
+        assert_eq!(d.patch.lines().count(), 4, "{}", d.patch);
+        // No mark of a repeat comes out anywhere that is text.
+        let view = d.view.as_ref().expect("laid out");
+        assert!(view
+            .rows
+            .iter()
+            .flat_map(|r| [&r.left, &r.right])
+            .flatten()
+            .all(|line| !line.contains('\u{fdd0}')));
+        assert!(d.changes.iter().all(|c| !c.path.contains('\u{fdd0}')));
+    }
+
+    #[test]
+    fn a_file_keeps_its_repeated_members_too_and_so_does_the_open_document_if_its_file_is_there() {
+        let json = r#"{"k": 1, "k": 2}"#;
+        let file = temp_dir("repeats").into_file("a.json");
+        std::fs::write(&file, json).unwrap();
+        let d = compared(Input::File(file.to_path_buf()), text(r#"{"k": 1}"#));
+        assert_eq!(changes_of(&d), [("removed", "/k#2")]);
+        assert!(d.repeats.iter().all(DuplicateKeys::is_empty));
+        // The document open in the main window was read with the last member only; its file
+        // is read again.
+        let open = Arc::new(jsonquery_core::load(&file).unwrap());
+        assert_eq!(open.duplicate_keys.keys, 1);
+        let d = compared(text(r#"{"k": 1}"#), Input::Document(open.clone()));
+        assert_eq!(changes_of(&d), [("added", "/k#2")]);
+        assert!(d.repeats.iter().all(DuplicateKeys::is_empty));
+        // …unless the file is not the one that was read (it was written to since).
+        std::fs::write(&file, r#"{"k": 1, "k": 2, "k": 3}"#).unwrap();
+        let d = compared(text(r#"{"k": 1}"#), Input::Document(open));
+        assert_eq!(
+            repeated(&d.repeats[1]),
+            [("", "k", 2)],
+            "said, not compared"
+        );
+        assert_eq!(changes_of(&d), [("changed", "/k")]);
+    }
+
+    #[test]
+    fn an_open_document_that_cannot_be_read_again_says_what_is_not_compared() {
+        // Typed or pasted into the main window: there is no file to read it from again.
+        let open = Arc::new(jsonquery_core::load_text(r#"{"k": 1, "k": 2}"#).unwrap());
+        let d = compared(text(r#"{"k": 2}"#), Input::Document(open));
+        assert!(d.equal, "the last member is what is compared");
+        assert_eq!(repeated(&d.repeats[1]), [("", "k", 2)]);
+        assert!(d.repeats[0].is_empty());
+    }
+
+    #[test]
+    fn a_move_into_an_open_document_that_was_read_without_its_repeats_says_what_it_leaves_out() {
+        // (Typed into the main window, so it cannot be read again, and what it has is its last members.)
+        let open =
+            Arc::new(jsonquery_core::load_text(r#"{"a": 1, "a": 2, "a": 3, "b": 1}"#).unwrap());
+        let first: Range<u32> = 0..1;
+        let go = |into: Side| {
+            let Ok(Outcome::Diff(d)) = go(Job::Diff {
+                left: Input::Document(open.clone()),
+                right: text(r#"{"a": 3, "b": 5}"#),
+                take: Some(Take {
+                    changes: vec![first.clone()],
+                    into,
+                }),
+                edit: None,
+            }) else {
+                panic!("should compare")
+            };
+            d
+        };
+        // Into the open document: it is written out with each key once, so 2 members are gone
+        // from it, and its repeats are no longer a thing to say.
+        let d = go(Side::Left);
+        let moved = d.moved.as_ref().expect("the left document was changed");
+        assert_eq!(moved.dropped, 2);
+        assert!(d.repeats[0].is_empty());
+        // Into the other one: the open document is as it was, and still says what it lacks.
+        let d = go(Side::Right);
+        assert_eq!(d.moved.as_ref().expect("changed").dropped, 0);
+        assert_eq!(repeated(&d.repeats[0]), [("", "a", 3)]);
+    }
+
+    #[test]
+    fn a_move_keeps_the_repeated_members_of_the_document_it_changes() {
+        let left = r#"{"a": 1, "a": 2, "b": 1}"#;
+        let right = r#"{"a": 1, "b": 5}"#;
+        // The differences: the second a (0, only Left has it) and b (1).
+        // Into the left one what Right has for b: Left keeps both of its a.
+        let d = compared_after_moving(left, right, 1..2, Side::Left);
+        let moved = d.moved.expect("the left document was changed");
+        assert_eq!(moved.dropped, 0);
+        assert_eq!(
+            moved.text.lines().filter(|l| l.contains("\"a\"")).count(),
+            2
+        );
+        assert_eq!(
+            serde_json::from_str::<Value>(&moved.text).unwrap(),
+            json!({"a": 2, "b": 5}),
+            "(read by anything that takes the last member)"
+        );
+        assert!(!moved.text.contains('\u{fdd0}'));
+        assert!(d.repeats.iter().all(DuplicateKeys::is_empty));
+        // Into the right one what Left has for the second a: Right gets it, after the first.
+        let d = compared_after_moving(left, right, 0..1, Side::Right);
+        let moved = d.moved.expect("the right document was changed");
+        assert_eq!(
+            &*moved.text, "{\n  \"a\": 1,\n  \"a\": 2,\n  \"b\": 5\n}",
+            "the two members are in the order they are in the left document"
+        );
+        // And Left taking the removal of its second a takes it out of the document.
+        let d = compared_after_moving(left, right, 0..1, Side::Left);
+        let moved = d.moved.expect("the left document was changed");
+        assert_eq!(
+            moved.text.lines().filter(|l| l.contains("\"a\"")).count(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_line_typed_over_a_repeated_member_changes_that_member() {
+        let (left, right) = (r#"{"a": 1, "a": 2, "b": 1}"#, r#"{"a": 1, "a": 2, "b": 1}"#);
+        let put = Fragment::Members(vec![("a".to_owned(), json!(7))]);
+        let d =
+            compared_after_typing(left, right, typed(Side::Left, &["a\u{fdd0}2"], put)).unwrap();
+        let moved = d.moved.as_ref().expect("the left document was changed");
+        assert_eq!(moved.dropped, 0);
+        let lines: Vec<&str> = moved.text.lines().collect();
+        assert_eq!(
+            lines,
+            ["{", "  \"a\": 1,", "  \"a\": 7,", "  \"b\": 1", "}"]
+        );
+        assert_eq!(changes_of(&d), [("changed", "/a#2")]);
+        // Taking the line out takes that member out and no other.
+        let nothing = Fragment::Members(Vec::new());
+        let d = compared_after_typing(left, right, typed(Side::Right, &["a\u{fdd0}2"], nothing))
+            .unwrap();
+        let moved = d.moved.as_ref().expect("the right document was changed");
+        assert_eq!(
+            moved.text.lines().filter(|l| l.contains("\"a\"")).count(),
+            1
+        );
+        assert_eq!(changes_of(&d), [("removed", "/a#2")]);
     }
 
     /// A comparison of `left` and `right` that first moves `changes` into `into`.

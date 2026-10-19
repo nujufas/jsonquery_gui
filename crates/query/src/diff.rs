@@ -4,6 +4,15 @@
 //! document to the second, and as the RFC 6902 JSON Patch that does it (see
 //! [`crate::patch`] for applying one).
 //!
+//! A key that an object has more than once is valid JSON, and the tree a tool works on has one
+//! member to a key. A document that a tool read with `jsonquery_core::duplicates::keep_repeats`
+//! has them all, each after the first under a key of its own, and is compared member by member:
+//! the first `regions` of one document with the first of the other, the second with the second;
+//! a member that the other has no match for is a removal or an addition. The patch cannot say
+//! those — a JSON Pointer names no one of several members with the same key — so it leaves them
+//! out ([`Diff::unaddressed`]), and the list of changes calls a member after the first
+//! `/regions#2`.
+//!
 //! What counts as a difference is what JSON itself says: the members of an
 //! object have no order, so a document with its keys sorted is the same
 //! document, and numbers are compared by value (`1`, `1.0` and `10e-1` are one
@@ -16,11 +25,13 @@
 //! line by line, with what differs marked — what a viewer like Beyond Compare
 //! shows (see [`view`]).
 
+use std::borrow::Cow;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::ops::Range;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use jsonquery_core::duplicates::MARK;
 use serde_json::{Number, Value};
 
 use crate::patch::escape;
@@ -104,8 +115,12 @@ pub struct Diff {
     pub removed: usize,
     pub changed: usize,
     /// The RFC 6902 operations that turn the first document into the second,
-    /// when applied one after the other. There is one for every difference.
+    /// when applied one after the other. There is one for every difference, but
+    /// those [`Diff::unaddressed`] counts.
     pub operations: Vec<Value>,
+    /// How many of the differences the operations leave out: those in a member of a repeated
+    /// key that is not the first (see the top of this page), which a JSON Pointer cannot name.
+    pub unaddressed: usize,
 }
 
 impl Diff {
@@ -115,7 +130,7 @@ impl Diff {
 
     /// The two documents are the same.
     pub fn is_empty(&self) -> bool {
-        self.operations.is_empty()
+        self.total() == 0
     }
 
     /// The operations as a JSON Patch document.
@@ -207,6 +222,12 @@ fn run<'a>(
     if let Some(edit) = &edit {
         changes(edit, &mut String::new(), &mut result);
         operations(edit, &mut String::new(), &mut result.operations);
+        // What is said of a member that is not the first of its key cannot be said in a patch.
+        let all = result.operations.len();
+        result
+            .operations
+            .retain(|op| !op["path"].as_str().is_some_and(|path| path.contains(MARK)));
+        result.unaddressed = all - result.operations.len();
     }
     Ok((result, edit))
 }
@@ -554,6 +575,16 @@ fn common_elements(
     Ok(stay)
 }
 
+/// A JSON Pointer as a person reads it: a repeated key that is not the first of its name
+/// is that name, `#` and the number of the member (`/regions#2`).
+pub(crate) fn shown_path(path: &str) -> Cow<'_, str> {
+    if path.contains(MARK) {
+        Cow::Owned(path.replace(MARK, "#"))
+    } else {
+        Cow::Borrowed(path)
+    }
+}
+
 /// Add `edit`'s differences to `out.changes`, in document order. `path` is the
 /// pointer to the value `edit` is about, and is left as it was found.
 fn changes(edit: &Edit<'_>, path: &mut String, out: &mut Diff) {
@@ -613,7 +644,7 @@ fn record(
     if out.changes.len() < MAX_CHANGES {
         out.changes.push(Change {
             kind,
-            path: path.to_owned(),
+            path: shown_path(path).into_owned(),
             before: before.map(summarize),
             after: after.map(summarize),
         });
@@ -750,6 +781,118 @@ mod tests {
             .iter()
             .map(|c| (c.kind, c.path.as_str()))
             .collect()
+    }
+
+    /// A document read the way a tool that keeps every member of a repeated key reads it.
+    fn kept(text: &str) -> Value {
+        jsonquery_core::load_text_keeping_repeats(text)
+            .unwrap()
+            .tree()
+            .unwrap()
+            .clone()
+    }
+
+    #[test]
+    fn repeated_members_are_compared_the_first_with_the_first_and_so_on() {
+        let d = run(
+            &kept(r#"{"a": 1, "b": 2, "a": 3, "a": 4}"#),
+            &kept(r#"{"a": 1, "b": 2, "a": 9}"#),
+        );
+        assert_eq!(
+            listed(&d),
+            [(ChangeKind::Changed, "/a#2"), (ChangeKind::Removed, "/a#3")]
+        );
+        assert_eq!((d.added, d.removed, d.changed), (0, 1, 1));
+        // The same ones, the other way round: added, not removed.
+        let d = run(
+            &kept(r#"{"a": 1, "b": 2, "a": 9}"#),
+            &kept(r#"{"a": 1, "b": 2, "a": 3, "a": 4}"#),
+        );
+        assert_eq!(
+            listed(&d),
+            [(ChangeKind::Changed, "/a#2"), (ChangeKind::Added, "/a#3")]
+        );
+        // Nothing to tell apart: the same document.
+        assert!(run(&kept(r#"{"a": 1, "a": 2}"#), &kept(r#"{"a": 1, "a": 2}"#)).is_empty());
+        // Where the members are in the text does not matter, as the order of an object's
+        // members does not.
+        assert!(run(
+            &kept(r#"{"a": 1, "b": 0, "a": 2}"#),
+            &kept(r#"{"b": 0, "a": 1, "a": 2}"#)
+        )
+        .is_empty());
+        // The first of two is not the second of the other.
+        let d = run(&kept(r#"{"a": 1, "a": 2}"#), &kept(r#"{"a": 2, "a": 1}"#));
+        assert_eq!(
+            listed(&d),
+            [(ChangeKind::Changed, "/a"), (ChangeKind::Changed, "/a#2")]
+        );
+    }
+
+    #[test]
+    fn a_repeated_member_deep_inside_is_named_by_its_path() {
+        let d = run(
+            &kept(r#"{"x": [{"k": 1}, {"o": {"k": 1, "k": 2}}]}"#),
+            &kept(r#"{"x": [{"k": 1}, {"o": {"k": 1}}]}"#),
+        );
+        assert_eq!(listed(&d), [(ChangeKind::Removed, "/x/1/o/k#2")]);
+        // A repeated member that is a whole object is one change, its inside is in it.
+        let d = run(
+            &kept(r#"{"a": {"p": 1}, "a": {"p": 1}}"#),
+            &kept(r#"{"a": {"p": 1}}"#),
+        );
+        assert_eq!(listed(&d), [(ChangeKind::Removed, "/a#2")]);
+        assert_eq!(d.changes[0].before.as_deref(), Some("{\"p\":1}"));
+    }
+
+    #[test]
+    fn the_patch_leaves_out_what_a_pointer_cannot_name_and_says_how_much() {
+        let d = run(
+            &kept(r#"{"a": 1, "a": 2, "b": 1, "c": {"k": 1, "k": 2}}"#),
+            &kept(r#"{"a": 1, "a": 5, "b": 2, "c": {"k": 1}}"#),
+        );
+        assert_eq!(
+            d.total(),
+            3,
+            "the second a changed, b changed, the second k went"
+        );
+        assert_eq!(d.unaddressed, 2);
+        assert_eq!(d.operations.len(), 1);
+        assert_eq!(d.operations[0]["path"], "/b");
+        // Only repeated members differ: there are differences, and no operations.
+        let d = run(&kept(r#"{"a": 1, "a": 2}"#), &kept(r#"{"a": 1}"#));
+        assert!(!d.is_empty());
+        assert!(d.operations.is_empty());
+        assert_eq!(d.unaddressed, 1);
+        // A document that repeats nothing has none that are left out.
+        assert_eq!(
+            run(&parse(r#"{"a": 1}"#), &parse(r#"{"a": 2}"#)).unaddressed,
+            0
+        );
+        // A difference in the first member of a key is in the patch, under the key.
+        let d = run(&kept(r#"{"a": 1, "a": 2}"#), &kept(r#"{"a": 9, "a": 2}"#));
+        assert_eq!(d.operations.len(), 1);
+        assert_eq!(
+            (d.operations[0]["path"].as_str(), d.unaddressed),
+            (Some("/a"), 0)
+        );
+    }
+
+    #[test]
+    fn no_mark_of_a_repeat_is_in_what_is_said_of_a_difference() {
+        let d = run(
+            &kept(r#"{"a": {"k": 1, "k": 2}, "a": [1]}"#),
+            &kept(r#"{"b": {"k": 1, "k": 2}, "b": [1]}"#),
+        );
+        let text = format!("{:?}", d.changes);
+        assert!(!text.contains('\u{fdd0}'), "{text}");
+        // The values in a change show as JSON does, a repeated key by its name.
+        assert!(
+            d.changes
+                .iter()
+                .any(|c| c.after.as_deref() == Some(r#"{"k":1,"k":2}"#)),
+            "{text}"
+        );
     }
 
     #[test]

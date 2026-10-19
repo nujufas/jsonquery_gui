@@ -380,7 +380,7 @@ impl<'a> Gen<'_> {
             return Err(Stop::TooLong);
         }
         let comma = if on_left { at.comma.0 } else { at.comma.1 };
-        let path: Arc<str> = path.into();
+        let path: Arc<str> = super::shown_path(path).as_ref().into();
         let change = Some(self.next_change());
         for line in lines_of(value, at.depth, at.key, comma) {
             if on_left {
@@ -406,7 +406,7 @@ impl<'a> Gen<'_> {
     ) -> Done {
         let left = lines_of(before, at.depth, at.key, at.comma.0);
         let right = lines_of(after, at.depth, at.key, at.comma.1);
-        let path: Option<Arc<str>> = differs.then(|| path.into());
+        let path: Option<Arc<str>> = differs.then(|| super::shown_path(path).as_ref().into());
         let change = differs.then(|| self.next_change());
         let (mut left, mut right) = (left.into_iter(), right.into_iter());
         loop {
@@ -693,9 +693,11 @@ fn array_items<'a>(x: &'a [Value], y: &'a [Value], edit: Option<&'a Edit<'a>>) -
 
 /// `"name": `, which a member's first line begins with.
 fn member_prefix(key: &str) -> String {
+    // (A repeated member that a tool kept as a key of its own shows as its name.)
+    let name = jsonquery_core::duplicates::plain_key(key);
     format!(
         "{}: ",
-        reformat::render(&Value::String(key.to_owned()), &Options::default())
+        reformat::render(&Value::String(name.to_owned()), &Options::default())
     )
 }
 
@@ -817,6 +819,65 @@ mod tests {
                 mark: Mark::Changed
             }]
         );
+    }
+
+    /// A document read the way a tool that keeps every member of a repeated key reads it.
+    fn kept(text: &str) -> Value {
+        jsonquery_core::load_text_keeping_repeats(text)
+            .unwrap()
+            .tree()
+            .unwrap()
+            .clone()
+    }
+
+    #[test]
+    fn the_members_of_a_repeated_key_are_all_lines_and_the_ones_the_other_lacks_are_blanks() {
+        let v = view(
+            &kept(r#"{"a": 1, "b": 2, "a": 3, "a": 4}"#),
+            &kept(r#"{"a": 1, "b": 2, "a": 9}"#),
+        );
+        assert_eq!(
+            shown(&v),
+            [
+                row(Mark::Same, "{", "{"),
+                row(Mark::Same, "  \"a\": 1,", "  \"a\": 1,"),
+                row(Mark::Same, "  \"b\": 2,", "  \"b\": 2,"),
+                row(Mark::Changed, "  \"a\": 3,", "  \"a\": 9"),
+                row(Mark::Removed, "  \"a\": 4", "-"),
+                row(Mark::Same, "}", "}"),
+            ]
+        );
+        assert_eq!((v.left_lines, v.right_lines), (6, 5));
+        assert_eq!(v.rows[3].path.as_deref(), Some("/a#2"));
+        assert_eq!(v.rows[4].path.as_deref(), Some("/a#3"));
+        // On the other side: blanks on the left, the members of Right that Left lacks.
+        let v = view(
+            &kept(r#"{"a": 1}"#),
+            &kept(r#"{"a": 1, "x": 0, "a": 2, "a": 3}"#),
+        );
+        assert_eq!(
+            shown(&v),
+            [
+                row(Mark::Same, "{", "{"),
+                row(Mark::Same, "  \"a\": 1", "  \"a\": 1,"),
+                row(Mark::Added, "-", "  \"x\": 0,"),
+                row(Mark::Added, "-", "  \"a\": 2,"),
+                row(Mark::Added, "-", "  \"a\": 3"),
+                row(Mark::Same, "}", "}"),
+            ]
+        );
+        // A repeated member that is an object is all of its lines, as any member is.
+        let v = view(
+            &kept(r#"{"o": {"p": 1}, "o": {"p": 2}}"#),
+            &kept(r#"{"o": {"p": 1}}"#),
+        );
+        assert_eq!(v.left_lines, 8);
+        assert!(v
+            .rows
+            .iter()
+            .flat_map(|r| [&r.left, &r.right])
+            .flatten()
+            .all(|line| !line.contains('\u{fdd0}')));
     }
 
     #[test]

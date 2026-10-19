@@ -15,7 +15,13 @@
 //! (see `MAX_LINE_CHARS`) are not edited, as typing over them would lose what is not shown.
 //! The worker makes the change in the document ([`apply`]) as it is — an object's members
 //! stay in the order they have there, a number is as it was written — and compares again.
+//!
+//! A key that an object has more than once is a key of its own for each member after the
+//! first (`jsonquery_core::duplicates`), which the lines do not show: a line is the member
+//! of its name that it is by how many lines of that name are above it in its object. The
+//! members that are the same key may stay so: what is typed over one of them can keep its name.
 
+use jsonquery_core::duplicates::{plain_key, repeated_key};
 use jsonquery_query::diff::{Side, MAX_LINE_CHARS};
 use serde_json::{Map, Value};
 
@@ -205,7 +211,12 @@ pub fn place_of(lines: &[&str], at: usize) -> Result<Place, Why> {
         }
         let (_, this_text) = split(this).ok_or(Why::Structure)?;
         path.push(match within {
-            Within::Object => Step::Key(name_of(body(this_text)).ok_or(Why::Structure)?),
+            Within::Object => {
+                let name = name_of(body(this_text)).ok_or(Why::Structure)?;
+                let member =
+                    1 + members_named_before(lines, holders[level - 1], line_at, level, &name);
+                Step::Key(repeated_key(&name, member))
+            }
             _ => Step::Index(elements_before(lines, holders[level - 1], line_at, level)),
         });
     }
@@ -217,7 +228,7 @@ pub fn place_of(lines: &[&str], at: usize) -> Result<Place, Why> {
         Some(opening) => Part::Opens(opening),
     };
     let others = match (within, holders.last()) {
-        (Within::Object, Some(&holder)) => members_but(lines, holder, at, depth),
+        (Within::Object, Some(&holder)) => members_but(lines, holder, at, depth, name_of(own)),
         _ => Vec::new(),
     };
     Ok(Place {
@@ -228,9 +239,35 @@ pub fn place_of(lines: &[&str], at: usize) -> Result<Place, Why> {
     })
 }
 
+/// How many members of the object that opens on line `holder` are called `name` and come
+/// before line `at`, whose members are at depth `level`.
+fn members_named_before(
+    lines: &[&str],
+    holder: usize,
+    at: usize,
+    level: usize,
+    name: &str,
+) -> usize {
+    lines[holder + 1..at]
+        .iter()
+        .filter(|line| {
+            split(line).is_some_and(|(depth, text)| {
+                depth == level && name_of(body(text)).is_some_and(|other| other == name)
+            })
+        })
+        .count()
+}
+
 /// The names of the members of the object that opens on line `holder`, whose members are at
-/// `depth`, but the one on line `except`.
-fn members_but(lines: &[&str], holder: usize, except: usize, depth: usize) -> Vec<String> {
+/// `depth`, but the one on line `except` and the others that have the name `own` (a key may be
+/// in an object more than once: what is typed over one of them can keep its name).
+fn members_but(
+    lines: &[&str],
+    holder: usize,
+    except: usize,
+    depth: usize,
+    own: Option<String>,
+) -> Vec<String> {
     let mut names = Vec::new();
     for (at, line) in lines.iter().enumerate().skip(holder + 1) {
         let Some((level, text)) = split(line) else {
@@ -240,7 +277,7 @@ fn members_but(lines: &[&str], holder: usize, except: usize, depth: usize) -> Ve
             break;
         }
         if level == depth && at != except && !is_cut(line) {
-            names.extend(name_of(body(text)));
+            names.extend(name_of(body(text)).filter(|name| Some(name) != own.as_ref()));
         }
     }
     names
@@ -386,6 +423,15 @@ fn replace(
     if !members.contains_key(key) {
         return Err("the document is not as it was when it was compared".to_owned());
     }
+    // What is typed with the name of the member that is replaced is that member, whichever of
+    // the members of that name it is.
+    let put: Vec<(String, Value)> = put
+        .iter()
+        .map(|(name, value)| {
+            let name = if name == plain_key(key) { key } else { name };
+            (name.to_owned(), value.clone())
+        })
+        .collect();
     if let Some((name, _)) = put
         .iter()
         .find(|(name, _)| name != key && members.contains_key(name))
@@ -407,6 +453,8 @@ fn rename(members: &mut Map<String, Value>, key: &str, name: &str) -> Result<(),
     if !members.contains_key(key) {
         return Err("the document is not as it was when it was compared".to_owned());
     }
+    // The same name is the same member: it stays the one it is.
+    let name = if name == plain_key(key) { key } else { name };
     if name != key && members.contains_key(name) {
         return Err(taken(name));
     }
@@ -459,6 +507,129 @@ mod tests {
             within,
             others: others.iter().map(|name| (*name).to_owned()).collect(),
         }
+    }
+
+    /// A document that repeats keys, as a Diff reads it: every member is in the tree.
+    fn repeating() -> Value {
+        jsonquery_core::load_text_keeping_repeats(
+            r#"{"a": 1, "b": {"k": 1, "k": 2}, "a": [3], "a": 4}"#,
+        )
+        .unwrap()
+        .tree()
+        .unwrap()
+        .clone()
+    }
+
+    #[test]
+    fn a_repeated_member_is_found_by_how_many_of_its_name_are_above_it() {
+        let value = repeating();
+        let text = lines(&value);
+        assert_eq!(
+            text,
+            [
+                "{",
+                "  \"a\": 1,",
+                "  \"b\": {",
+                "    \"k\": 1,",
+                "    \"k\": 2",
+                "  },",
+                "  \"a\": [",
+                "    3",
+                "  ],",
+                "  \"a\": 4",
+                "}"
+            ],
+            "the lines show every member by its name"
+        );
+        let lines = borrowed(&text);
+        let path = |at: usize| place_of(&lines, at).unwrap().path;
+        assert_eq!(path(1), [key("a")]);
+        assert_eq!(path(3), [key("b"), key("k")]);
+        assert_eq!(path(4), [key("b"), key("k\u{fdd0}2")]);
+        assert_eq!(path(6), [key("a\u{fdd0}2")]);
+        assert_eq!(path(7), [key("a\u{fdd0}2"), Step::Index(0)]);
+        assert_eq!(path(9), [key("a\u{fdd0}3")]);
+        // The name that the line has is not one that is taken, though others have it.
+        let opens = place_of(&lines, 6).unwrap();
+        assert_eq!(opens.part, Part::Opens('['));
+        assert_eq!(opens.others, ["b"]);
+        assert_eq!(place_of(&lines, 2).unwrap().others, ["a", "a", "a"]);
+    }
+
+    #[test]
+    fn what_is_typed_over_a_repeated_member_may_keep_its_name_and_may_not_take_another_members() {
+        let value = repeating();
+        let text = lines(&value);
+        let lines = borrowed(&text);
+        let third = place_of(&lines, 9).unwrap();
+        // `a` over the third `a`: that is allowed, it is the name it has.
+        assert_eq!(
+            parse(&third, "  \"a\": 7"),
+            Ok(Fragment::Members(vec![("a".to_owned(), json!(7))]))
+        );
+        // `b` is taken by another member.
+        assert!(parse(&third, "  \"b\": 7")
+            .unwrap_err()
+            .contains("already is a member"));
+        // The name of a line that opens something is changed the same way.
+        let second = place_of(&lines, 6).unwrap();
+        assert_eq!(
+            parse(&second, "  \"a\": ["),
+            Ok(Fragment::Rename("a".to_owned()))
+        );
+        assert!(parse(&second, "  \"b\": [").is_err());
+    }
+
+    #[test]
+    fn a_line_typed_over_changes_the_member_it_is_and_keeps_the_names_of_the_rest() {
+        let edit = |step: &str, fragment: Fragment| Edit {
+            into: Side::Left,
+            path: vec![key(step)],
+            fragment,
+        };
+        let names =
+            |value: &Value| -> Vec<String> { value.as_object().unwrap().keys().cloned().collect() };
+        let put = |value: Value| Fragment::Members(vec![("a".to_owned(), value)]);
+        // Typed over the second a, with the name a.
+        let done = apply(repeating(), &edit("a\u{fdd0}2", put(json!(9)))).unwrap();
+        assert_eq!(names(&done), ["a", "b", "a\u{fdd0}2", "a\u{fdd0}3"]);
+        assert_eq!(
+            (done["a"].clone(), done["a\u{fdd0}2"].clone()),
+            (json!(1), json!(9))
+        );
+        // The first one is replaced the same way.
+        let done = apply(repeating(), &edit("a", put(json!(0)))).unwrap();
+        assert_eq!(names(&done), ["a", "b", "a\u{fdd0}2", "a\u{fdd0}3"]);
+        assert_eq!(done["a"], 0);
+        // Taking a line out takes that member and no other.
+        let done = apply(
+            repeating(),
+            &edit("a\u{fdd0}2", Fragment::Members(Vec::new())),
+        )
+        .unwrap();
+        assert_eq!(names(&done), ["a", "b", "a\u{fdd0}3"]);
+        // A rename to the name it has is no change; to another name, it is that.
+        let done = apply(
+            repeating(),
+            &edit("a\u{fdd0}3", Fragment::Rename("a".to_owned())),
+        )
+        .unwrap();
+        assert_eq!(names(&done), ["a", "b", "a\u{fdd0}2", "a\u{fdd0}3"]);
+        let done = apply(
+            repeating(),
+            &edit("a\u{fdd0}2", Fragment::Rename("z".to_owned())),
+        )
+        .unwrap();
+        assert_eq!(names(&done), ["a", "b", "z", "a\u{fdd0}3"]);
+        // A name that another member has is refused, as before.
+        assert!(apply(
+            repeating(),
+            &edit("a\u{fdd0}2", Fragment::Rename("b".to_owned()))
+        )
+        .is_err());
+        // Written out, the document has its members in order, each under its name.
+        let text = render(&apply(repeating(), &edit("a\u{fdd0}3", put(json!("x")))).unwrap());
+        assert!(text.ends_with("  \"a\": \"x\"\n}"), "{text}");
     }
 
     #[test]

@@ -7,6 +7,7 @@ use anyhow::{anyhow, Context, Result};
 use memmap2::Mmap;
 use serde_json::Value;
 
+use crate::duplicates::{self, DuplicateKeys};
 use crate::lazy::{LazyTree, Node};
 use crate::tree::{PathSegment, ValueKind};
 use crate::view::ValueView;
@@ -111,6 +112,11 @@ pub struct Document {
     /// Number of top-level values found in the source (>1 means the file was
     /// NDJSON / concatenated JSON and got wrapped into a single array root).
     pub top_level_values: usize,
+    /// The keys that an object of the text had more than once, of which only the
+    /// last is in a parsed tree. Empty for a document that was not read from text
+    /// (a merge, a patch) and for one that is kept as its file (its text is as it
+    /// was written, and is not parsed).
+    pub duplicate_keys: DuplicateKeys,
 }
 
 impl Document {
@@ -129,6 +135,7 @@ impl Document {
             parse_time,
             content: Content::Tree(root),
             top_level_values: 1,
+            duplicate_keys: DuplicateKeys::default(),
         }
     }
 
@@ -178,6 +185,7 @@ impl Document {
             parse_time,
             top_level_values: tree.top_level_values(),
             content: Content::Lazy(Box::new(tree)),
+            duplicate_keys: DuplicateKeys::default(),
         }
     }
 }
@@ -259,6 +267,19 @@ pub fn load(path: impl AsRef<Path>) -> Result<Document> {
 /// app's settings can change them from what [`load`] uses).
 pub fn load_with(path: impl AsRef<Path>, limits: LoadLimits) -> Result<Document> {
     load_limited(path.as_ref(), limits, map_file)
+}
+
+/// [`load_with`] for a tool that needs every member of an object that repeats a key, not
+/// the last only (see [`duplicates::keep_repeats`]): the document is read again from the file
+/// if, and only if, it has such a key, and a file that is kept as itself is as it was.
+pub fn load_keeping_repeats(path: impl AsRef<Path>, limits: LoadLimits) -> Result<Document> {
+    let path = path.as_ref();
+    let doc = load_with(path, limits)?;
+    if doc.duplicate_keys.is_empty() {
+        return Ok(doc);
+    }
+    let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    load_bytes_keeping_repeats(&bytes, DocumentSource::File(path.to_path_buf()))
 }
 
 /// [`load_with`] with the way of mapping a file as a parameter too, so that a
@@ -372,12 +393,14 @@ fn load_file(
         return Ok(Document::lazy_from(source, tree, start.elapsed()));
     }
     let (root, top_level_values) = parse_bytes(&bytes)?;
+    let parse_time = start.elapsed();
     Ok(Document {
         source,
         byte_len: bytes.len() as u64,
-        parse_time: start.elapsed(),
+        parse_time,
         content: Content::Tree(root),
         top_level_values,
+        duplicate_keys: duplicates::find(&bytes),
     })
 }
 
@@ -436,7 +459,37 @@ pub fn load_bytes(bytes: &[u8], source: DocumentSource) -> Result<Document> {
         parse_time,
         content: Content::Tree(root),
         top_level_values,
+        duplicate_keys: duplicates::find(bytes),
     })
+}
+
+/// [`load_bytes`] for a tool that needs every member of an object that repeats a key, not the
+/// last only: the first member of a key is as it is and each one after it has a key of its
+/// own, so that the tree has them all in the order of the text ([`duplicates::keep_repeats`];
+/// [`duplicates::plain_key`] gives a key's name). [`Document::duplicate_keys`] says which
+/// there were.
+pub fn load_bytes_keeping_repeats(bytes: &[u8], source: DocumentSource) -> Result<Document> {
+    let start = Instant::now();
+    let (kept, found) = duplicates::keep_repeats(bytes);
+    let (root, top_level_values) = match parse_bytes(&kept) {
+        Ok(parsed) => parsed,
+        // A mistake is told as it is in the text that was given: the other has longer lines.
+        Err(_) => parse_bytes(bytes)?,
+    };
+    Ok(Document {
+        source,
+        byte_len: bytes.len() as u64,
+        parse_time: start.elapsed(),
+        content: Content::Tree(root),
+        top_level_values,
+        duplicate_keys: found,
+    })
+}
+
+/// [`load_text`] that keeps every member of a key that is repeated (see
+/// [`load_bytes_keeping_repeats`]).
+pub fn load_text_keeping_repeats(text: &str) -> Result<Document> {
+    load_bytes_keeping_repeats(text.as_bytes(), DocumentSource::Pasted)
 }
 
 /// Parse JSON typed or pasted directly into the app (as opposed to opening a
@@ -538,6 +591,134 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn a_document_says_which_keys_the_parse_dropped() {
+        let text = r#"{"a": 1, "b": {"x": 1, "x": 2}, "a": 3}"#;
+        let expected = |doc: &Document| {
+            let listed: Vec<_> = doc
+                .duplicate_keys
+                .listed
+                .iter()
+                .map(|r| (r.path.as_str(), r.key.as_str(), r.times))
+                .collect();
+            assert_eq!(listed, [("/b", "x", 2), ("", "a", 2)]);
+            assert_eq!(
+                (doc.duplicate_keys.keys, doc.duplicate_keys.dropped),
+                (2, 2)
+            );
+        };
+        // typed or pasted: the last one is the one that is kept
+        let doc = load_text(text).unwrap();
+        assert_eq!(doc.tree(), Some(&json!({"a": 3, "b": {"x": 2}})));
+        expected(&doc);
+        expected(&load_bytes(text.as_bytes(), DocumentSource::Pasted).unwrap());
+        // a file
+        let dir = Scratch::new("repeats");
+        let path = dir.write("repeats.json", text);
+        let doc = load(&path).unwrap();
+        assert!(!doc.is_lazy());
+        expected(&doc);
+        let mut open = File::open(&path).unwrap();
+        let _ = open.seek(SeekFrom::Start(3));
+        expected(&load_open_file(&open, DocumentSource::Pasted, u64::MAX).unwrap());
+        // one that is not read as text has none to tell of, and nor has one that is
+        // kept as its file (which is as it was written)
+        assert!(load_via(&path, 1, map_file)
+            .unwrap()
+            .duplicate_keys
+            .is_empty());
+        let built =
+            Document::from_value(json!({"a": 1}), DocumentSource::Pasted, 8, Duration::ZERO);
+        assert!(built.duplicate_keys.is_empty());
+        // a document without repeats says nothing
+        assert!(load_text(r#"{"a": 1, "b": 2}"#)
+            .unwrap()
+            .duplicate_keys
+            .is_empty());
+        // several values in a row are one array
+        let doc = load_text("{\"k\": 1}\n{\"k\": 1, \"k\": 2}\n").unwrap();
+        assert_eq!(doc.duplicate_keys.listed[0].path, "/1");
+    }
+
+    fn keys_of(doc: &Document) -> Vec<String> {
+        doc.tree()
+            .and_then(Value::as_object)
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect()
+    }
+
+    #[test]
+    fn a_document_read_keeping_repeats_has_every_member_in_the_order_of_the_text() {
+        let text = r#"{"a": 1, "b": 2, "a": 3, "a": 4}"#;
+        let doc = load_text_keeping_repeats(text).unwrap();
+        assert_eq!(keys_of(&doc), ["a", "b", "a\u{fdd0}2", "a\u{fdd0}3"]);
+        assert_eq!(doc.tree().unwrap()["a\u{fdd0}3"], 4);
+        // It is the size of the text that was given, and says what it has.
+        assert_eq!(doc.byte_len, text.len() as u64);
+        assert_eq!(
+            (doc.duplicate_keys.keys, doc.duplicate_keys.dropped),
+            (1, 2)
+        );
+        assert!(matches!(doc.source, DocumentSource::Pasted));
+        // Without repeats it is what load_text makes.
+        let plain = load_text_keeping_repeats(r#"{"a": 1, "b": {"a": 2}}"#).unwrap();
+        assert_eq!(
+            plain.tree(),
+            load_text(r#"{"a": 1, "b": {"a": 2}}"#).unwrap().tree()
+        );
+        assert!(plain.duplicate_keys.is_empty());
+        // Several values in a row are one array, whatever they repeat.
+        let doc = load_text_keeping_repeats("{\"k\": 1, \"k\": 2}\n{\"k\": 3}\n").unwrap();
+        assert_eq!(doc.top_level_values, 2);
+        assert_eq!(doc.tree().unwrap()[0]["k\u{fdd0}2"], 2);
+        assert_eq!(doc.duplicate_keys.listed[0].path, "/0");
+    }
+
+    #[test]
+    fn text_that_is_not_json_is_told_as_it_is_in_the_text_that_was_given() {
+        // (The text that is parsed has longer lines where a key was repeated: the column
+        // of the mistake would be another.)
+        let text = "{\"abc\": 1, \"abc\": 2, \"abc\": 3, @}";
+        let said = |result: Result<Document>| format!("{:#}", result.err().expect("not JSON"));
+        assert_eq!(said(load_text_keeping_repeats(text)), said(load_text(text)));
+        assert!(
+            said(load_text(text)).contains("column 32"),
+            "{}",
+            said(load_text(text))
+        );
+    }
+
+    #[test]
+    fn a_file_is_read_again_keeping_repeats_only_if_it_has_them() {
+        let dir = Scratch::new("keeping");
+        let repeats = dir.write("repeats.json", r#"{"k": 1, "k": 2}"#);
+        let doc = load_keeping_repeats(&repeats, LoadLimits::default()).unwrap();
+        assert_eq!(keys_of(&doc), ["k", "k\u{fdd0}2"]);
+        assert_eq!(doc.duplicate_keys.keys, 1);
+        assert!(matches!(&doc.source, DocumentSource::File(p) if *p == repeats));
+        assert_eq!(doc.byte_len, 16);
+        let plain = dir.write("plain.json", r#"{"k": 1}"#);
+        let doc = load_keeping_repeats(&plain, LoadLimits::default()).unwrap();
+        assert_eq!(keys_of(&doc), ["k"]);
+        // One that is kept as itself is as it is (it is not parsed).
+        let lazy = LoadLimits {
+            lazy_threshold: 1,
+            ..LoadLimits::default()
+        };
+        assert!(load_keeping_repeats(&repeats, lazy).unwrap().is_lazy());
+        // What is not there is an error that says so.
+        let missing = dir.0.join("none.json");
+        assert!(format!(
+            "{:#}",
+            load_keeping_repeats(&missing, LoadLimits::default())
+                .err()
+                .unwrap()
+        )
+        .contains("none.json"));
     }
 
     #[test]

@@ -20,6 +20,7 @@
 use std::path::{Path, PathBuf};
 
 use eframe::egui::{self, Align, Color32, Key, Layout, Modifiers, Rect, RichText};
+use jsonquery_core::DuplicateKeys;
 use jsonquery_query::diff::{Change, ChangeKind, Side, MAX_ROWS};
 
 use super::jobs::{Compared, Job, Take};
@@ -62,9 +63,10 @@ pub(super) struct Diff {
     /// A move that is on the worker: where in the view it was (the place in the
     /// list that the difference that follows it takes), and into which document.
     moving: Option<Move>,
-    /// A move that has been made and not yet announced: into which document, and
-    /// whether it was lines that were picked.
-    moved: Option<(Side, bool)>,
+    /// A move that has been made and not yet announced: into which document,
+    /// whether it was lines that were picked, and how many repeated members of that
+    /// document the move left out of what it wrote.
+    moved: Option<(Side, bool, usize)>,
     /// A line that was typed over, which is on the worker.
     editing: Option<Editing>,
     /// One that has been made and not yet announced.
@@ -80,6 +82,8 @@ struct Editing {
     side: Side,
     line: usize,
     deleted: bool,
+    /// How many repeated members of the document what was written left out.
+    dropped: usize,
 }
 
 impl Default for Diff {
@@ -128,11 +132,13 @@ impl Diff {
         // A move, or a line that was typed over, has changed one of the documents: its box
         // has the new text.
         if let Some(moved) = self.run.outcome().and_then(|c| c.moved.as_ref()) {
-            let (text, into) = (moved.text.clone(), moved.into);
+            let (text, into, dropped) = (moved.text.clone(), moved.into, moved.dropped);
             self.operand_of(into).set_moved(text);
             match editing {
-                Some(editing) => self.edited = Some(editing),
-                None => self.moved = Some((into, moving.as_ref().is_some_and(|m| m.picked))),
+                Some(editing) => self.edited = Some(Editing { dropped, ..editing }),
+                None => {
+                    self.moved = Some((into, moving.as_ref().is_some_and(|m| m.picked), dropped));
+                }
             }
         }
         // What was typed over, or moved, is looked at where it was: the view does not go on
@@ -386,12 +392,15 @@ impl Diff {
         let mut save = None;
         let mut typed = None;
         let copied_path = egui::CentralPanel::default()
-            .show(ui, |ui| match self.page {
-                Page::Documents => {
-                    self.documents(ui, env);
-                    None
+            .show(ui, |ui| {
+                self.repeats_notice(ui);
+                match self.page {
+                    Page::Documents => {
+                        self.documents(ui, env);
+                        None
+                    }
+                    _ => self.result(ui, &mut take, &mut save, &mut typed),
                 }
-                _ => self.result(ui, &mut take, &mut save, &mut typed),
             })
             .inner;
         if let Some(path) = copied_path {
@@ -435,9 +444,10 @@ impl Diff {
             } else {
                 format!("Changed line {} of the {to} document", editing.line)
             };
-            env.shared.say(Tool::Diff, said, false);
+            env.shared
+                .say(Tool::Diff, said + &left_out(editing.dropped), false);
         }
-        if let Some((side, picked)) = self.moved.take() {
+        if let Some((side, picked, dropped)) = self.moved.take() {
             let to = match side {
                 Side::Left => "left",
                 Side::Right => "right",
@@ -447,8 +457,11 @@ impl Diff {
             } else {
                 "the difference"
             };
-            env.shared
-                .say(Tool::Diff, format!("Moved {what} to the {to}"), false);
+            env.shared.say(
+                Tool::Diff,
+                format!("Moved {what} to the {to}{}", left_out(dropped)),
+                false,
+            );
         }
 
         // Not `?`: with no patch yet, or nothing pressed, `request` (Compare,
@@ -495,6 +508,28 @@ impl Diff {
         }
     }
 
+    /// Over every page: what was compared says that a document repeats keys that were not
+    /// compared as members — the document open in the main window, when it could not be
+    /// read again from its file — in a line for each that does, since what the comparison
+    /// has of it is not all of what is in its box. One line, cut off where it is too long:
+    /// the tooltip has all of it.
+    fn repeats_notice(&self, ui: &mut egui::Ui) {
+        let Some(compared) = self.run.outcome() else {
+            return;
+        };
+        let color = tint(ui.visuals(), Tint::Warn);
+        for (name, found) in ["Left", "Right"].into_iter().zip(compared.repeats.iter()) {
+            if found.is_empty() {
+                continue;
+            }
+            ui.add(
+                egui::Label::new(RichText::new(repeats_summary(name, found)).color(color))
+                    .truncate(),
+            )
+            .on_hover_text(repeats_tip(found));
+        }
+    }
+
     fn start(&mut self) -> Option<Request> {
         let (left, right) = (self.left.input()?, self.right.input()?);
         let (gen, cancel) = self.run.start();
@@ -523,6 +558,7 @@ impl Diff {
             side: typed.edit.into,
             line: typed.line,
             deleted: typed.edit.deletes(),
+            dropped: 0,
         });
         Some(Request::Job {
             tool: Tool::Diff,
@@ -608,12 +644,17 @@ impl Diff {
                     ui.label("The documents are the same");
                 }
                 (Page::Changes, _) => copied_path = changes_list(ui, compared),
-                (Page::Patch, _) => preview_box(
-                    ui,
-                    "diff_patch",
-                    &compared.patch_preview.text,
-                    compared.patch_preview.truncated,
-                ),
+                (Page::Patch, _) => {
+                    if compared.unaddressed > 0 {
+                        ui.weak(unaddressed_note(compared.unaddressed));
+                    }
+                    preview_box(
+                        ui,
+                        "diff_patch",
+                        &compared.patch_preview.text,
+                        compared.patch_preview.truncated,
+                    );
+                }
                 (Page::Documents, _) => {}
             },
         );
@@ -695,6 +736,102 @@ fn counts(compared: &Compared) -> String {
         }
     }
     parts.join(" · ")
+}
+
+/// How many repeated keys a line about a document names, before "and … more".
+const NAMED: usize = 3;
+/// How many a tooltip lists.
+const LISTED: usize = 25;
+/// The most characters of the name of a key that a line shows.
+const NAME_WIDTH: usize = 30;
+/// What the line about a document that repeats keys says when it is pointed at.
+const REPEATS_EXPLAINED: &str = "An object with a key more than once is read as having the last \
+    one, in the place of the first. The others are not compared, and a move or an edit writes \
+    the document without them.";
+
+/// Where a repeated key is, as a person reads it: "regions", or "owner/team" for one in an
+/// object that is not the document itself.
+fn repeat_place(found: &jsonquery_core::Repeated) -> String {
+    let mut place = String::new();
+    for step in found.path.split('/').skip(1) {
+        place.push_str(&step.replace("~1", "/").replace("~0", "~"));
+        place.push('/');
+    }
+    place + &found.key
+}
+
+/// `text` cut to `max` characters, with an ellipsis where it was.
+fn shortened(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_owned();
+    }
+    let mut cut: String = text.chars().take(max.saturating_sub(1)).collect();
+    cut.push('…');
+    cut
+}
+
+/// A repeated key and how many times it came: "regions ×3".
+fn repeated_key(found: &jsonquery_core::Repeated) -> String {
+    format!("{} ×{}", repeat_place(found), found.times)
+}
+
+/// The line over the comparison for a document that repeats keys: which, and that only
+/// the last member of each is what was compared. The effect comes first, so that a line
+/// that is cut off loses names and not that.
+fn repeats_summary(name: &str, found: &DuplicateKeys) -> String {
+    let named: Vec<String> = found
+        .listed
+        .iter()
+        .take(NAMED)
+        .map(|r| shortened(&repeated_key(r), NAME_WIDTH))
+        .collect();
+    let more = found.keys.saturating_sub(named.len());
+    let and_more = if more > 0 {
+        format!(" and {more} more")
+    } else {
+        String::new()
+    };
+    let (what, which) = if found.keys == 1 {
+        ("a repeated key", "the last")
+    } else {
+        ("repeated keys", "the last of each")
+    };
+    format!(
+        "⚠ {name} has {what} — only {which} is compared: {}{and_more}",
+        named.join(", ")
+    )
+}
+
+/// The tooltip of that line: the keys, and what becomes of the others.
+fn repeats_tip(found: &DuplicateKeys) -> String {
+    let mut lines: Vec<String> = found.listed.iter().take(LISTED).map(repeated_key).collect();
+    let more = found.keys.saturating_sub(lines.len());
+    if more > 0 {
+        lines.push(format!("…and {more} more"));
+    }
+    lines.push(String::new());
+    lines.push(REPEATS_EXPLAINED.to_owned());
+    lines.join("\n")
+}
+
+/// What the patch page says when the patch leaves out differences.
+fn unaddressed_note(count: usize) -> String {
+    format!(
+        "The patch leaves out {count} change{} to a repeated key (a member after the first): \
+         a JSON Pointer cannot say which of several members of a name it means. Changes has {}.",
+        if count == 1 { "" } else { "s" },
+        if count == 1 { "it" } else { "them" }
+    )
+}
+
+/// What the status bar adds to a move that wrote a document out without members
+/// that its keys repeated.
+fn left_out(dropped: usize) -> String {
+    match dropped {
+        0 => String::new(),
+        1 => " (1 repeated member dropped)".to_owned(),
+        n => format!(" ({n} repeated members dropped)"),
+    }
 }
 
 fn tag(kind: ChangeKind) -> &'static str {
@@ -892,8 +1029,138 @@ pub(super) mod tests {
             },
             view: Ok(SideBySide::default()),
             moved: None,
+            unaddressed: 0,
+            repeats: Box::default(),
             elapsed: Duration::ZERO,
         }
+    }
+
+    fn repeats_of(text: &str) -> DuplicateKeys {
+        jsonquery_core::load_text(text).unwrap().duplicate_keys
+    }
+
+    #[test]
+    fn a_document_that_repeats_keys_is_told_by_their_names_and_how_often() {
+        // The keys of nujufas/jsonquery_gui#1.
+        let found = repeats_of(
+            r#"{"regions": [], "owner": {}, "flag": null, "regions": [], "owner": {},
+                "flag": null, "regions": [], "owner": {}, "flag": null}"#,
+        );
+        assert_eq!(
+            repeats_summary("Left", &found),
+            "⚠ Left has repeated keys — only the last of each is compared: regions ×3, owner ×3, flag ×3"
+        );
+        let one = repeats_of(r#"{"a": 1, "a": 2}"#);
+        assert_eq!(
+            repeats_summary("Right", &one),
+            "⚠ Right has a repeated key — only the last is compared: a ×2"
+        );
+        // Where it is, when it is not in the document itself; and what is left over.
+        let deep = repeats_of(
+            r#"{"o": {"t/u": [{"k": 1, "k": 2}]}, "a": 1, "a": 2, "b": 1, "b": 2, "c": 1, "c": 2}"#,
+        );
+        assert_eq!(
+            repeats_summary("Left", &deep),
+            "⚠ Left has repeated keys — only the last of each is compared: o/t/u/0/k ×2, a ×2, b ×2 and 1 more"
+        );
+    }
+
+    #[test]
+    fn the_tip_lists_them_and_says_what_becomes_of_the_others() {
+        let found = repeats_of(r#"{"a": 1, "a": 2, "b": 1, "b": 2}"#);
+        let tip = repeats_tip(&found);
+        assert!(tip.starts_with("a ×2\nb ×2\n\n"), "{tip}");
+        assert!(
+            tip.contains("the last one, in the place of the first"),
+            "{tip}"
+        );
+        assert!(tip.contains("a move or an edit writes the document without them"));
+        // A long list is cut, and says by how much.
+        let mut text = String::from("{");
+        for n in 0..40 {
+            text.push_str(&format!("\"k{n}\": 1, \"k{n}\": 2, "));
+        }
+        text.push_str("\"z\": 0}");
+        let tip = repeats_tip(&repeats_of(&text));
+        assert_eq!(tip.lines().filter(|l| l.ends_with("×2")).count(), LISTED);
+        assert!(tip.contains("…and 15 more"), "{tip}");
+    }
+
+    #[test]
+    fn a_name_that_is_too_long_is_cut_off_in_the_line_and_whole_in_the_tip() {
+        let long = "k".repeat(300);
+        let found = repeats_of(&format!(r#"{{"{long}": 1, "{long}": 2}}"#));
+        let line = repeats_summary("Left", &found);
+        assert!(line.chars().count() < 120, "{}", line.chars().count());
+        assert!(line.contains("kkk…"), "{line}");
+        assert!(repeats_tip(&found).contains(&long));
+        assert_eq!(shortened("abcdef", 6), "abcdef");
+        assert_eq!(shortened("abcdefg", 6), "abcde…");
+        assert_eq!(shortened("é😀éé😀é", 4), "é😀é…");
+    }
+
+    #[test]
+    fn the_patch_page_says_what_the_patch_leaves_out() {
+        assert_eq!(
+            unaddressed_note(1),
+            "The patch leaves out 1 change to a repeated key (a member after the first): a JSON \
+             Pointer cannot say which of several members of a name it means. Changes has it."
+        );
+        assert!(unaddressed_note(3).contains("3 changes"));
+        assert!(unaddressed_note(3).ends_with("Changes has them."));
+    }
+
+    #[test]
+    fn a_move_says_how_many_repeated_members_it_left_out() {
+        assert_eq!(left_out(0), "");
+        assert_eq!(left_out(1), " (1 repeated member dropped)");
+        assert_eq!(left_out(6), " (6 repeated members dropped)");
+    }
+
+    #[test]
+    fn a_line_typed_over_in_a_document_that_repeats_keys_is_announced_with_what_it_took_out() {
+        let mut diff = Diff::default();
+        diff.left.set_text("[1]");
+        diff.right.set_text("[2]");
+        let gen = match diff.start() {
+            Some(Request::Job { gen, .. }) => gen,
+            _ => panic!("should start"),
+        };
+        diff.editing = Some(Editing {
+            side: Side::Left,
+            line: 3,
+            deleted: false,
+            dropped: 0,
+        });
+        let mut answer = compared(0, 0, 0);
+        answer.moved = Some(Moved {
+            into: Side::Left,
+            text: Arc::from("[\n  2\n]"),
+            dropped: 5,
+        });
+        diff.done(gen, Ok(answer));
+        let edited = diff.edited.expect("the typed line is announced");
+        assert_eq!((edited.line, edited.dropped), (3, 5));
+        assert_eq!(diff.moved, None, "it was not a move");
+    }
+
+    #[test]
+    fn a_move_into_a_document_that_repeats_keys_is_announced_with_what_it_took_out() {
+        let mut diff = Diff::default();
+        diff.left.set_text("[1]");
+        diff.right.set_text("[2]");
+        let gen = match diff.start() {
+            Some(Request::Job { gen, .. }) => gen,
+            _ => panic!("should start"),
+        };
+        let mut answer = compared(0, 0, 0);
+        answer.moved = Some(Moved {
+            into: Side::Left,
+            text: Arc::from("[\n  2\n]"),
+            dropped: 4,
+        });
+        diff.done(gen, Ok(answer));
+        assert_eq!(diff.moved, Some((Side::Left, false, 4)));
     }
 
     #[test]
@@ -1028,6 +1295,7 @@ pub(super) mod tests {
         answer.moved = Some(Moved {
             into: Side::Left,
             text: Arc::from("[\n  2\n]"),
+            dropped: 0,
         });
         diff.done(gen, Ok(answer));
     }
@@ -1049,7 +1317,7 @@ pub(super) mod tests {
             Some("orders.json (changed)")
         );
         assert!(diff.doc(Side::Left).can_save && diff.doc(Side::Left).changed);
-        assert_eq!(diff.moved, Some((Side::Left, false)));
+        assert_eq!(diff.moved, Some((Side::Left, false, 0)));
     }
 
     #[test]

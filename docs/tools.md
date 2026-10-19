@@ -245,6 +245,29 @@ tabs in the command row:
 **Copy patch** and **Save patch…** are at the right of the command row, in every
 view, and take the whole patch.
 
+### A key that an object has more than once
+
+JSON allows an object to have the same key more than once (`{"a": 1, "a": 2}`),
+and the rest of the app reads that as the last member only. Diff keeps every
+member and compares them in order: the first `a` of Left with the first of
+Right, the second with the second. Each member is a line of its column, and a
+member the other document has no match for is a removal or an addition — a red
+or a green line with a blank across. **Changes** calls a member after the first
+`/a#2`, `/a#3`, and the right-click menu of its line copies that.
+
+The **Patch** cannot say those: a JSON Pointer has no way to name one of several
+members with the same key, so the patch leaves out the changes in them and the
+Patch view says how many. (Documents that differ only there are different, and
+the patch is `[]`.) Moving a difference, or typing over a line, keeps the
+members of the document it changes — it is written out with each member as it
+was, under its name.
+
+One case is read the old way: the document **open in the main window** is
+compared as that window has it, the last member of a key, unless Diff can read
+its file again (a file that is still as it was is). A document that was typed or
+pasted into the main window has no file: a line over the page says which keys
+it repeats and that only the last member of each is compared.
+
 ### Moving a difference
 
 A difference can be moved from one document into the other, so that the two come
