@@ -7,7 +7,10 @@
 //!   SQL-style `IN`, `INDEX` and `JOIN`, and `fromstream` and `truncate_stream`.
 //! - **Native filters** ([`funs`]): `tostream`, and `@csv` and `@tsv`. They are
 //!   native for speed (`tostream`) or because the work is byte shuffling that
-//!   jq code does badly (`@csv`, `@tsv`).
+//!   jq code does badly (`@csv`, `@tsv`). `fromjson`, `tonumber` and `tojson` are
+//!   native too, and take the place of jaq's (`json_text.rs` says why): of two
+//!   filters of a name the first found is the one called, so [`replaces_fun`] and
+//!   [`replaces_def`] name what the compiler is not handed of jaq-json's.
 //!
 //! [`crate::run_query_with_vars`] is the one place a jq program is compiled, so
 //! the Merge tool's filter gets all of them too.
@@ -21,6 +24,7 @@ use jaq_core::native::Fun;
 use jaq_core::DataT;
 use jaq_json::Val;
 
+mod json_text;
 mod tabular;
 mod tostream;
 
@@ -37,7 +41,21 @@ pub fn defs() -> impl Iterator<Item = Def<&'static str>> {
 /// The native filters.
 pub fn funs<D: for<'a> DataT<V<'a> = Val>>() -> impl Iterator<Item = Fun<D>> {
     let [csv, tsv] = tabular::funs::<D>();
-    [csv, tsv, tostream::fun::<D>()].into_iter()
+    let [fromjson, tonumber, tojson] = json_text::funs::<D>();
+    [csv, tsv, tostream::fun::<D>(), fromjson, tonumber, tojson].into_iter()
+}
+
+/// Whether jaq-json's native filter `name` taking `arity` arguments is written again
+/// in [`funs`], and is to be left out of the list handed to the compiler: the first
+/// filter of a name in that list is the one that is called.
+pub fn replaces_fun(name: &str, arity: usize) -> bool {
+    json_text::replaces_fun(name, arity)
+}
+
+/// Whether jaq-json's definition (in jq) of `name` is written again in [`funs`], and
+/// is to be left out of the definitions: a definition is found before a native filter.
+pub fn replaces_def(name: &str) -> bool {
+    json_text::replaces_def(name)
 }
 
 #[cfg(test)]
@@ -73,6 +91,14 @@ mod tests {
 
     fn parse(text: &str) -> Value {
         serde_json::from_str(text).unwrap_or_else(|e| panic!("{text}: {e}"))
+    }
+
+    /// `work` on a thread made for running programs: the values some tests make are
+    /// deeper than the stack of a test's own thread can free.
+    fn on_a_query_thread<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> T {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        crate::spawn_query_thread("test", move || sender.send(work()).unwrap());
+        receiver.recv().expect("the thread ends with an answer")
     }
 
     /// `filter` over `input` (JSON text) outputs exactly `expected` (JSON text,
@@ -367,6 +393,337 @@ mod tests {
         gives("1", "def IN(s): \"mine\"; IN(2)", &[r#""mine""#]);
         gives("1", "def tostream: \"mine\"; tostream", &[r#""mine""#]);
         gives("[1]", "def @csv: \"mine\"; @csv", &[r#""mine""#]);
+    }
+
+    /// How many outputs `filter` has over `input` (JSON text), looking at no more than
+    /// `most` of them: a stream that never ends is told by there being that many.
+    fn outputs_up_to(input: &str, filter: &str, most: usize) -> usize {
+        let program = crate::Program::compile(filter, &[]).expect("the filter compiles");
+        program
+            .run_vals(crate::to_val(&parse(input)), Vec::new())
+            .take(most)
+            .count()
+    }
+
+    /// `fromjson` and `tonumber` over text that is not JSON never ended: each answered
+    /// with an error, and again, for ever, with the app's worker thread (the one that
+    /// runs every query) busy and its memory growing by a gigabyte a second.
+    #[test]
+    fn text_that_is_not_json_is_one_error_not_an_endless_stream_of_them() {
+        for filter in ["fromjson", "tonumber", "toboolean"] {
+            for input in [
+                r#""abc""#,
+                r#""N/A""#,
+                r#""""#,
+                r#"" ""#,
+                r#""[1,""#,
+                r#""{""#,
+                r#""tru""#,
+                r#""\"a""#,
+                r#""<html>""#,
+                r#""1 2""#,
+                r#""null null""#,
+            ] {
+                assert_eq!(outputs_up_to(input, filter, 1000), 1, "{input} | {filter}");
+            }
+        }
+        // what was typed in the query box to get round it works too, now
+        gives(r#"["1","x","2"]"#, "[.[] | tonumber?]", &["[1,2]"]);
+        gives(
+            r#"["1","x","2"]"#,
+            "[.[] | try tonumber catch -1]",
+            &["[1,-1,2]"],
+        );
+        gives(r#""abc""#, r#"try fromjson catch "bad""#, &[r#""bad""#]);
+        gives(r#""abc""#, "(tonumber? // 0)", &["0"]);
+    }
+
+    #[test]
+    #[rustfmt::skip]
+    fn fromjson_reads_one_value_of_json_text() {
+        // (what jq 1.8.1 gives for each)
+        gives(r#""null""#, "fromjson", &["null"]);
+        gives(r#""true""#, "fromjson", &["true"]);
+        gives(r#""[1,2]""#, "fromjson", &["[1,2]"]);
+        gives(r#""[ 1 , 2 ]""#, "fromjson", &["[1,2]"]);
+        gives(r#""{\"a\":[1,{\"b\":null}]}""#, "fromjson", &[r#"{"a":[1,{"b":null}]}"#]);
+        gives(r#""{\"a\":1,\"a\":2}""#, "fromjson", &[r#"{"a":2}"#]);
+        gives(r#"" 1 ""#, "fromjson", &["1"]);
+        gives(r#""\r\n1\r\n""#, "fromjson", &["1"]);
+        gives(r#""\"\\u00e9\"""#, "fromjson", &[r#""é""#]);
+        gives(r#""\"\\ud83d\\ude00\"""#, "fromjson", &[r#""😀""#]);
+        gives(r#""[]""#, "fromjson", &["[]"]);
+        gives(r#""{}""#, "fromjson", &["{}"]);
+        gives(r#""100000000000000000000""#, "fromjson", &["100000000000000000000"]);
+        gives(r#""123456789012345678901234567890""#, "fromjson", &["123456789012345678901234567890"]);
+        gives(r#""0.1""#, "fromjson", &["0.1"]);
+        gives(r#""1.50""#, "fromjson", &["1.50"]);
+        gives(r#""[1,[2,[3]]]""#, "fromjson | flatten", &["[1,2,3]"]);
+        gives(r#"["1","[2]"]"#, "map(fromjson)", &["[1,[2]]"]);
+        gives(r#""[1]""#, "fromjson | tojson", &[r#""[1]""#]);
+        // as many values as there are, not one of them
+        gives(r#"[1,{"a":"b"}]"#, "tojson | fromjson", &[r#"[1,{"a":"b"}]"#]);
+    }
+
+    /// Where jq fails: no text, two values, half a value, something else.
+    #[test]
+    fn fromjson_fails_where_jq_fails() {
+        for text in [
+            "",
+            " ",
+            "\n",
+            "abc",
+            "N/A",
+            "n/a",
+            "hello world",
+            "<html>",
+            "tru",
+            "truee",
+            "nul",
+            "True",
+            "NULL",
+            "undefined",
+            "None",
+            "-",
+            "+",
+            ".",
+            ",",
+            ":",
+            "[",
+            "]",
+            "{",
+            "}",
+            "\"",
+            "\\",
+            "'a'",
+            "{'a':1}",
+            "{a:1}",
+            "[1,]",
+            "[,1]",
+            "[1 2]",
+            "[1,2",
+            "1,2]",
+            "{\"a\":1,}",
+            "{\"a\"}",
+            "{\"a\":}",
+            "{\"a\":1 \"b\":2}",
+            "\"a",
+            "a\"",
+            "\"\\q\"",
+            "\"\\x41\"",
+            "\"\\ud83d\"",
+            "\"a\nb\"",
+            "0x10",
+            "1_000",
+            "--1",
+            "1-",
+            "1e",
+            "1e+",
+            "e1",
+            "1 2",
+            "1\n2",
+            "[1] [2]",
+            "\"a\" \"b\"",
+            "null null",
+            "true false",
+            "[1,2,3]x",
+            "x[1,2,3]",
+            "٣",
+        ] {
+            let input = Value::String(text.to_owned());
+            assert!(run(&input, "fromjson").is_err(), "{text:?}");
+        }
+        for input in ["1", "null", "true", "[1]", r#"{"a":1}"#] {
+            assert_eq!(outputs_up_to(input, "fromjson", 10), 1, "{input}");
+            fails(input, "fromjson");
+        }
+        assert_eq!(
+            error_of("1", "fromjson"),
+            "number (1) only strings can be parsed"
+        );
+        assert_eq!(
+            error_of("null", "fromjson"),
+            "null (null) only strings can be parsed"
+        );
+    }
+
+    #[test]
+    fn the_error_of_a_fromjson_says_what_text_it_was_about() {
+        let message = error_of(r#""abc""#, "fromjson");
+        assert!(message.ends_with("(while parsing 'abc')"), "{message}");
+        // a long text is quoted from its start, not all of it
+        let long = Value::String(format!("x{}", "y".repeat(1_000_000)));
+        let message = run(&long, "fromjson").unwrap_err();
+        assert!(message.len() < 200, "{}", message.len());
+        assert!(message.ends_with("...')"), "{message}");
+    }
+
+    #[test]
+    fn fromjson_refuses_text_nested_deeper_than_it_can_read() {
+        let nest = |n: usize| Value::String(format!("{}{}", "[".repeat(n), "]".repeat(n)));
+        assert_eq!(run(&nest(1000), "fromjson | length"), Ok(vec![json!(1)]));
+        let message = run(&nest(1001), "fromjson").unwrap_err();
+        assert!(
+            message.starts_with("Exceeds depth limit for parsing"),
+            "{message}"
+        );
+        // not read at all: it is far more than a stack has room for
+        assert!(run(&nest(3_000_000), "fromjson").is_err());
+        assert!(run(&Value::String("{\"a\":".repeat(3_000_000)), "fromjson").is_err());
+        // brackets inside a string, or a comment, are not a nest
+        let in_a_string = Value::String(format!("[\"{}\"]", "[".repeat(3_000_000)));
+        assert_eq!(run(&in_a_string, "fromjson | length"), Ok(vec![json!(1)]));
+    }
+
+    /// What `tonumber` takes is what jq's takes (compared with jq 1.8.1 on 4,121 strings
+    /// made of the parts of a number).
+    #[test]
+    #[rustfmt::skip]
+    fn tonumber_reads_what_jq_reads() {
+        gives(r#""1""#, "tonumber", &["1"]);
+        gives(r#""-1""#, "tonumber", &["-1"]);
+        gives(r#""007""#, "tonumber", &["7"]);
+        gives(r#""+5""#, "tonumber", &["5"]);
+        gives(r#""5.""#, "tonumber", &["5"]);
+        gives(r#"".5""#, "tonumber", &["0.5"]);
+        gives(r#""-.5""#, "tonumber", &["-0.5"]);
+        gives(r#""1.50""#, "tonumber", &["1.50"]);
+        gives(r#""0.1""#, "tonumber", &["0.1"]);
+        gives(r#""123456789012345678901234567890""#, "tonumber", &["123456789012345678901234567890"]);
+        gives(r#""9223372036854775808""#, "tonumber", &["9223372036854775808"]);
+        gives(r#""1e3""#, "tonumber == 1000", &["true"]);
+        gives(r#""1E3""#, "tonumber == 1000", &["true"]);
+        gives(r#""1.5e-2""#, "tonumber == 0.015", &["true"]);
+        gives(r#""1.e2""#, "tonumber == 100", &["true"]);
+        gives(r#"".5e1""#, "tonumber == 5", &["true"]);
+        gives(r#""nan""#, "tonumber | isnan", &["true"]);
+        gives(r#""-NaN""#, "tonumber | isnan", &["true"]);
+        gives(r#""Infinity""#, "tonumber == infinite", &["true"]);
+        gives(r#""-inf""#, "tonumber == -infinite", &["true"]);
+        gives(r#""infinity""#, "tonumber | isinfinite", &["true"]);
+        gives("5", "tonumber", &["5"]);
+        gives("1.5", "tonumber", &["1.5"]);
+        gives(r#"["1","2.5","-3"]"#, "map(tonumber) | add", &["0.5"]);
+        gives(r#"{"n":"42"}"#, ".n | tonumber + 1", &["43"]);
+        gives(r#""12""#, "tonumber | type", &[r#""number""#]);
+        // a number that is a text of a number, to be compared as one
+        gives(r#"["10","9","100"]"#, "map(tonumber) | sort", &["[9,10,100]"]);
+    }
+
+    #[test]
+    fn tonumber_fails_where_jq_fails() {
+        for text in [
+            "", " ", "-", "+", ".", "-.", "e5", ".e1", "1e", "1e+", "1e1.5", "ee1", "1.5.5", "..5",
+            "--1", "+-1", "1-", "0x10", "1_000", "1,5", "1 0", " 1", "1 ", "\t1", "1\n", "\u{a0}1",
+            "٣", "１", "−1", "null", "true", "[1]", "{}", "\"1\"", "nanx", "infinit", "abc", "N/A",
+            "5%", "$5", "5px", "1/2", "1e1e1",
+        ] {
+            let input = Value::String(text.to_owned());
+            assert!(run(&input, "tonumber").is_err(), "{text:?}");
+        }
+        for input in ["null", "true", "[1]", r#"{"a":1}"#, "[]"] {
+            fails(input, "tonumber");
+        }
+    }
+
+    /// Worded as jq words it (it cuts the text shorter).
+    #[test]
+    fn the_error_of_a_tonumber_is_worded_as_jq_words_it() {
+        assert_eq!(
+            error_of(r#""abc""#, "tonumber"),
+            r#"string ("abc") cannot be parsed as a number"#
+        );
+        assert_eq!(
+            error_of("null", "tonumber"),
+            "null (null) cannot be parsed as a number"
+        );
+        assert_eq!(
+            error_of("[1]", "tonumber"),
+            "array ([1]) cannot be parsed as a number"
+        );
+        assert_eq!(
+            error_of(r#"{"a":1}"#, "tonumber"),
+            r#"object ({"a":1}) cannot be parsed as a number"#
+        );
+        assert_eq!(
+            error_of(r#"" 5""#, "tonumber"),
+            r#"string (" 5") cannot be parsed as a number"#
+        );
+        let message = error_of(&format!("\"{}\"", "x".repeat(10_000)), "tonumber");
+        assert!(message.len() < 100, "{message}");
+    }
+
+    #[test]
+    fn toboolean_reads_json_that_is_a_boolean() {
+        gives(r#""true""#, "toboolean", &["true"]);
+        gives(r#""false""#, "toboolean", &["false"]);
+        gives("true", "toboolean", &["true"]);
+        fails(r#""abc""#, "toboolean");
+        fails(r#""1""#, "toboolean");
+        fails(r#""[true]""#, "toboolean");
+    }
+
+    #[test]
+    #[rustfmt::skip]
+    fn tojson_writes_a_value_on_one_line() {
+        gives("null", "tojson", &[r#""null""#]);
+        gives(r#"[1,"a",null,{"b":[true]}]"#, "tojson", &[r#""[1,\"a\",null,{\"b\":[true]}]""#]);
+        gives(r#""é\n""#, "tojson", &[r#""\"é\\n\"""#]);
+        gives(r#"{"b":1,"a":2}"#, "tojson", &[r#""{\"b\":1,\"a\":2}""#]);
+        gives("100000000000000000000", "tojson", &[r#""100000000000000000000""#]);
+        gives("1.50", "tojson", &[r#""1.50""#]);
+        gives(r#"[1,[2]]"#, "@json", &[r#""[1,[2]]""#]);
+        gives(r#"{"a":[1]}"#, "tojson | fromjson", &[r#"{"a":[1]}"#]);
+        gives(r#"{"a":[1]}"#, r#""x\(. | tojson)""#, &[r#""x{\"a\":[1]}""#]);
+    }
+
+    /// A program makes a value as deep as it likes, and `tojson` of it stops where jq
+    /// does. Run on a thread for the work, for such a value is deeper than the stack of
+    /// a test thread can free.
+    #[test]
+    fn tojson_of_a_value_nested_deeper_than_jq_prints_is_cut_as_jq_cuts_it() {
+        let lengths = on_a_query_thread(|| {
+            let len = |filter: &str| {
+                run(&Value::Null, filter).map(|outputs| outputs[0].as_u64().expect("a length"))
+            };
+            // (lengths of jq 1.8.1's `tojson`: 256 arrays round a number are all
+            // there, 257 are not)
+            [
+                len("reduce range(256) as $i (1; [.]) | tojson | length"),
+                len("reduce range(257) as $i (1; [.]) | tojson | length"),
+                len("reduce range(300) as $i (1; [.]) | tojson | length"),
+                len("reduce range(5000) as $i ([]; [.]) | tojson | length"),
+                len("reduce range(50000) as $i ([]; [.]) | tojson | length"),
+                len("reduce range(257) as $i (1; {a: .}) | tojson | length"),
+                len("reduce range(50000) as $i (1; {a: .}) | tojson | length"),
+                len(r#"reduce range(50000) as $i ([]; [.]) | "\(tojson | length)" | length"#),
+            ]
+        });
+        assert_eq!(
+            lengths,
+            [
+                Ok(513),
+                Ok(533),
+                Ok(533),
+                Ok(533),
+                Ok(533),
+                Ok(1561),
+                Ok(1561),
+                Ok(3)
+            ]
+        );
+    }
+
+    #[test]
+    fn a_text_is_cut_where_it_is_too_deep_and_says_so() {
+        let text = on_a_query_thread(|| {
+            run(&Value::Null, "reduce range(1000) as $i (1; [.]) | tojson")
+                .map(|outputs| outputs[0].as_str().expect("text").to_owned())
+        })
+        .unwrap();
+        assert!(text.contains("<skipped: too deep>"), "{}", &text[..600]);
+        assert!(text.starts_with("[[[[") && text.ends_with("]]]]"));
+        assert!(!text.contains("1]"));
     }
 
     #[test]

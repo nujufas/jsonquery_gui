@@ -216,6 +216,41 @@ pub fn run_query_with_vars(
     Ok(count)
 }
 
+/// The stack, in bytes, of a thread that runs jq programs. A program can make a value
+/// as deep as it likes, and jaq walks it by recursion: writing one as text takes about
+/// a kilobyte of stack for each level, so the 2 MiB a thread is given by default ends
+/// the process at about 1,800 levels. This is room in the address space; the memory
+/// is taken as the stack is used.
+pub const QUERY_STACK_BYTES: usize = 256 << 20;
+
+/// Start a thread, called `name`, to run `work` on, with [`QUERY_STACK_BYTES`] of stack
+/// (or the default one, on a machine that will not give so much).
+pub fn spawn_query_thread(
+    name: &str,
+    work: impl FnOnce() + Send + 'static,
+) -> std::thread::JoinHandle<()> {
+    use std::sync::{Arc, Mutex};
+
+    /// What a try at starting the thread runs: the work, if the other try has not
+    /// taken it.
+    fn body<W: FnOnce() + Send + 'static>(work: Arc<Mutex<Option<W>>>) -> impl FnOnce() + Send {
+        move || {
+            let taken = work.lock().ok().and_then(|mut work| work.take());
+            if let Some(work) = taken {
+                work();
+            }
+        }
+    }
+    // Whichever try starts a thread runs the work; the other is never started.
+    let work = Arc::new(Mutex::new(Some(work)));
+    let thread = || std::thread::Builder::new().name(name.to_owned());
+    thread()
+        .stack_size(QUERY_STACK_BYTES)
+        .spawn(body(work.clone()))
+        .or_else(|_| thread().spawn(body(work)))
+        .expect("a thread can be started")
+}
+
 /// A jq program, compiled, which can be run on any number of inputs: what the
 /// query box makes of its text once, and what a query over a very large file
 /// runs for each of the values it reads from it.
@@ -232,13 +267,15 @@ impl Program {
             path: (),
         };
 
+        // What jq_ext writes again (`fromjson`, `tonumber`, `tojson`) is left out of
+        // jaq-json's: of two filters of a name, the first found would be the one called.
         let defs = jaq_core::defs()
             .chain(jaq_std::defs())
-            .chain(jaq_json::defs())
+            .chain(jaq_json::defs().filter(|def| !jq_ext::replaces_def(def.name)))
             .chain(jq_ext::defs());
         let funs = jaq_core::funs()
             .chain(jaq_std::funs())
-            .chain(jaq_json::funs())
+            .chain(jaq_json::funs().filter(|fun| !jq_ext::replaces_fun(fun.0, fun.1.len())))
             .chain(jq_ext::funs());
 
         let loader = Loader::new(defs);
@@ -377,6 +414,23 @@ mod tests {
         )
         .unwrap();
         assert_eq!((items, errors), (vec![json!(1)], 1));
+    }
+
+    /// A program makes a value as deep as it likes, and the 2 MiB of stack a thread has
+    /// by default ends the process at about 1,800 levels of it written as text. The
+    /// thread the app runs queries on has room for a great many more.
+    #[test]
+    fn a_thread_for_queries_has_room_for_a_value_as_deep_as_a_program_makes_it() {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let handle = spawn_query_thread("jq-test", move || {
+            let deep = (0..20_000).fold(Val::Null, |inner, _| std::iter::once(inner).collect());
+            let name = std::thread::current().name().map(str::to_owned);
+            sender.send((name, deep.to_string().len())).unwrap();
+        });
+        let (name, written) = receiver.recv().expect("the work ran");
+        handle.join().unwrap();
+        assert_eq!(name.as_deref(), Some("jq-test"));
+        assert_eq!(written, 2 * 20_000 + "null".len());
     }
 
     #[test]

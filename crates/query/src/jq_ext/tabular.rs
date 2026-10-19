@@ -109,7 +109,7 @@ fn escape(out: &mut Vec<u8>, text: &[u8]) {
 
 /// A value as jq names it in an error: its type, then its JSON cut short —
 /// `object ({"b":[1,2,3...)`.
-fn describe(val: &Val) -> String {
+pub(super) fn describe(val: &Val) -> String {
     let kind = match val {
         Val::Null => "null",
         Val::Bool(_) => "boolean",

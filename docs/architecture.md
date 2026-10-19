@@ -153,6 +153,27 @@ in the module's tests, so they hold on a machine without jq. Still missing:
 `$ENV`, `input`, `leaf_paths`, `toarray`, and assignments that create several
 missing levels at once (`{} | .a.b.c = 1`).
 
+Three of jaq's own are replaced (`jq_ext/json_text.rs`; the compiler is handed
+jaq-json's without them, as the first filter of a name is the one called):
+
+- **`fromjson`** reads exactly one value, as jq's does. jaq's read a sequence, and
+  on text it could not read answered with an error and tried the same place
+  again, for ever: `"abc" | fromjson` and `"abc" | tonumber` never ended, the
+  worker thread was lost with them and the memory grew by a gigabyte a second.
+  The reader calls itself once for every array inside another, so text nested
+  more than 1,000 levels deep (jq: 10,000) is refused before it is read.
+- **`tonumber`** is what jq's is, a number made of the parts of one (`+5`, `007`,
+  `.5`, `1e3`, `nan`, not `" 5"`), not `fromjson` and a look at the type.
+- **`tojson`** stops at the depth jq stops at when it prints, 256 levels, and
+  writes `<skipped: too deep>` for what is below.
+
+A program can make a value as deep as it likes, and jaq writes one as text by
+recursion, a kilobyte of stack for each level: a thread's 2 MiB ended the process
+at about 1,800 levels. So a result is shown down to 127 levels, as deep as a
+document can be (`convert::from_val`, which then cuts what is below, as jq does at
+256), and the threads that run queries are started with 256 MiB of stack
+(`jsonquery_query::spawn_query_thread`: address space, used as it is needed).
+
 ## 4. Concurrency model
 
 The UI thread never touches the file or the query engines directly — it

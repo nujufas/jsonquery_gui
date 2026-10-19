@@ -277,13 +277,16 @@ pub enum Event {
 
 /// Spawn the worker thread. `wake` is called after every event is sent so
 /// the (otherwise idle, redraw-on-demand) egui context repaints promptly.
+///
+/// The thread has a stack made for running jq programs, which can make values as deep
+/// as they like (`jsonquery_query::QUERY_STACK_BYTES`).
 pub fn spawn(
     cmd_rx: Receiver<Command>,
     evt_tx: Sender<Event>,
     limits: FileLimits,
     wake: impl Fn() + Send + 'static,
 ) {
-    std::thread::spawn(move || {
+    jsonquery_query::spawn_query_thread("worker", move || {
         let mut limits = limits;
         for cmd in cmd_rx {
             match cmd {
@@ -1600,6 +1603,101 @@ mod tests {
                 _ => panic!("expected the query's events"),
             }
         }
+    }
+
+    /// What the worker answers for the query `text` over `doc`, as `query_items`
+    /// does, on a worker that is already running (and so, if a query kept it, the
+    /// next one would not be answered).
+    fn ask(
+        commands: &Sender<Command>,
+        events: &Receiver<Event>,
+        doc: &Arc<Document>,
+        text: &str,
+        gen: u64,
+    ) -> (Vec<Value>, Vec<String>) {
+        commands
+            .send(Command::Query {
+                doc: doc.clone(),
+                text: text.to_owned(),
+                engine: jsonquery_query::Kind::Jq,
+                gen,
+                cancel: Arc::new(AtomicBool::new(false)),
+            })
+            .unwrap();
+        let (mut items, mut errors) = (Vec::new(), Vec::new());
+        loop {
+            match events.recv_timeout(WAIT).unwrap_or_else(|_| {
+                panic!("`{text}` was not answered: the worker is busy with it, or gone")
+            }) {
+                Event::QueryItem { value, .. } => items.push(value),
+                Event::QueryItemError { error, .. } => errors.push(error),
+                Event::QueryDone { .. } => return (items, errors),
+                Event::QueryError { error, .. } => {
+                    errors.push(error);
+                    return (items, errors);
+                }
+                _ => panic!("expected the query's events"),
+            }
+        }
+    }
+
+    /// `tonumber` of text that is not a number, and `fromjson` of text that is not
+    /// JSON, answered with an error for ever, and the worker, which is one thread and
+    /// runs every query there is, was never free again. A value nested deeper than the
+    /// stack of an ordinary thread can write ended the process. Neither does.
+    #[test]
+    fn a_query_that_cannot_read_a_number_or_that_makes_a_very_deep_value_is_answered() {
+        let doc = Arc::new(jsonquery_core::load_text(r#"{"n":"abc","k":[1,2]}"#).unwrap());
+        let (commands, events) = start_worker();
+        for (text, text_of_the_error) in [
+            (
+                ".n | tonumber",
+                "string (\"abc\") cannot be parsed as a number",
+            ),
+            (".n | fromjson", "(while parsing 'abc')"),
+            (".n | toboolean", "(while parsing 'abc')"),
+        ] {
+            let (items, errors) = ask(&commands, &events, &doc, text, 1);
+            assert!(items.is_empty(), "{text}: {items:?}");
+            assert_eq!(errors.len(), 1, "{text}: {errors:?}");
+            assert!(errors[0].contains(text_of_the_error), "{text}: {errors:?}");
+        }
+        // What a query typed to get round it gives.
+        let (items, errors) = ask(&commands, &events, &doc, "[.n, .k[]] | map(tonumber?)", 2);
+        assert_eq!((items, errors), (vec![serde_json::json!([1, 2])], vec![]));
+
+        // 50,000 arrays, one in the next: shown as far as a document can be nested,
+        // written as far as jq writes it, and written in full as text without the app
+        // ending. (Free of the value it was, like its text, on the worker's stack.)
+        let (items, errors) = ask(
+            &commands,
+            &events,
+            &doc,
+            "reduce range(50000) as $i ([]; [.])",
+            3,
+        );
+        assert!(errors.is_empty(), "{errors:?}");
+        let mut levels = 0;
+        let mut inside = &items[0];
+        while let Value::Array(items) = inside {
+            levels += 1;
+            inside = &items[0];
+        }
+        assert_eq!(levels, 127);
+        assert_eq!(inside, &serde_json::json!("<skipped: too deep>"));
+        let (items, errors) = ask(
+            &commands,
+            &events,
+            &doc,
+            r#"reduce range(50000) as $i ([]; [.]) | (tojson | length), ("\(.)" | length)"#,
+            4,
+        );
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(items, [serde_json::json!(533), serde_json::json!(100_002)]);
+
+        // The worker is still there for the next query.
+        let (items, _) = ask(&commands, &events, &doc, ".n", 5);
+        assert_eq!(items, [serde_json::json!("abc")]);
     }
 
     #[test]
