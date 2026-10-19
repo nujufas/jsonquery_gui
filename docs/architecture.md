@@ -379,6 +379,27 @@ the one it needs on the UI thread (`Tools::use_limit`). The interface is watched
 by `App::note_interface` each frame, and written once it has stopped changing for
 0.6 s, and from `eframe::App::on_exit`.
 
+## 10. Known issues
+
+The jq programs that do not run here as they run in jq (the engine is jaq, plus
+`jq_ext`) are data, `jsonquery_query::known_issues` (`known_issues.rs`, and the list
+itself in `known_issues/list.rs`): each issue is a line, the programs that show it with
+what jq 1.8.1 gives and what this engine gives, and sometimes a workaround. Three
+things are made from it:
+
+- **The About window's *Known issues* section** (`app/issues_view.rs`): a header, under
+  the links, that opens the list (the issues that are not `minor`, a line each, with
+  the first example in a tooltip). The window is made wider and then as tall as the
+  list needs, as the Settings window is for its *Advanced* limits, and goes back when
+  the list is closed.
+- **`docs/known-issues.md`**: all of them, with every example, written by
+  `known_issues::markdown()` (`JSONQUERY_WRITE_DOCS=1 cargo test -p jsonquery_gui
+  the_known_issues_page` writes it again; the same test fails when it is out of date).
+- **The tests**, which run every example and workaround against the engine, and look at
+  the first thousand results of one that never finishes. When an upgrade or a fix makes
+  a program behave like jq, its test fails and names the entry to take out of
+  `list.rs`.
+
 ## Scaling beyond in-memory
 
 A parsed document takes about twelve times the size of its file for records of a

@@ -758,7 +758,7 @@ fn with_arrows(ui: &egui::Ui, text: &str) -> egui::WidgetText {
 
 /// Wrapped prose with `inline code` and *emphasis* (see
 /// `content::parse_inline`).
-fn prose(ui: &mut egui::Ui, text: &str) -> egui::Response {
+pub(crate) fn prose(ui: &mut egui::Ui, text: &str) -> egui::Response {
     let body = egui::TextStyle::Body.resolve(ui.style());
     let mono = egui::FontId::monospace(body.size * 0.95);
     let code_bg = ui.visuals().code_bg_color;

@@ -12,6 +12,7 @@ use jsonquery_core::{
 use jsonquery_query::OutputFormat;
 use serde_json::Value;
 
+use self::issues_view::IssuesView;
 use self::satellites::{Leaving, Satellite};
 use crate::dock::{Central, Dock, Pane};
 use crate::pane_header;
@@ -25,6 +26,7 @@ use crate::tutorial::{LoadRequest, Tutorial};
 use crate::worker::{self, Command, CopyTarget, Event, SearchRoot};
 use crate::x11_alert::X11Alert;
 
+mod issues_view;
 mod satellites;
 
 /// Bounded live-preview cap (Architecture §7): the results tree never holds
@@ -2974,17 +2976,21 @@ fn info_viewport_id() -> egui::ViewportId {
 /// big enough for what it says, and not smaller. All of it has to fit in the
 /// smallest (a text that wraps takes more height the narrower the window is), and
 /// a test draws it there.
-const INFO_SIZE: [f32; 2] = [380.0, 300.0];
-const INFO_MIN_SIZE: [f32; 2] = [320.0, 300.0];
+const INFO_SIZE: [f32; 2] = [380.0, 330.0];
+const INFO_MIN_SIZE: [f32; 2] = [320.0, 330.0];
 
 /// The (i) info window: license, source, website, issues/contact, privacy and
-/// known limitations. A second native window rather than a tooltip/popup — same
+/// known limitations, and under a header that opens it, the known issues with jq
+/// programs (`issues_view.rs`). A second native window rather than a tooltip/popup — same
 /// shape as `Tutorial` — so its hyperlinks are ordinary click targets
 /// instead of having to survive inside a hover region.
 #[derive(Default)]
 struct InfoWindow {
     open: bool,
     icon: Option<Arc<egui::IconData>>,
+    /// The *Known issues* section: whether its list is open, and the window's size
+    /// for it.
+    issues: IssuesView,
 }
 
 impl InfoWindow {
@@ -2994,6 +3000,7 @@ impl InfoWindow {
             ctx.send_viewport_cmd_to(info_viewport_id(), egui::ViewportCommand::Focus);
         } else {
             self.open = true;
+            self.issues.reset();
         }
     }
 
@@ -3033,17 +3040,33 @@ impl InfoWindow {
         let mut close = false;
         ctx.show_viewport_immediate(info_viewport_id(), builder, |ui, _class| {
             close = ui.ctx().input(|i| i.viewport().close_requested());
-            info_window_frame(ui);
+            self.window_frame(ui);
         });
         if close {
             self.open = false;
         }
     }
-}
 
-/// One frame of the info window's content.
-fn info_window_frame(ui: &mut egui::Ui) {
-    egui::CentralPanel::default().show(ui, info_window_contents);
+    /// One frame of the window's content: the links and the limitations, and under
+    /// them the *Known issues*, which scroll if they are more than the window holds.
+    fn window_frame(&mut self, ui: &mut egui::Ui) {
+        egui::CentralPanel::default().show(ui, |ui| {
+            let shown = egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .min_scrolled_height(0.0)
+                .show(ui, |ui| {
+                    info_window_contents(ui);
+                    ui.add_space(6.0);
+                    self.issues.show(ui)
+                });
+            self.issues.fit_window(
+                ui.ctx(),
+                shown.inner,
+                shown.content_size.y,
+                shown.inner_rect.height(),
+            );
+        });
+    }
 }
 
 fn info_window_contents(ui: &mut egui::Ui) {

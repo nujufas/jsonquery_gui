@@ -5399,7 +5399,12 @@ fn all_the_about_window_says_fits_where_it_opens_and_in_the_smallest_it_can_be()
         let about = Satellite::About.viewport_id();
         // The last thing in it is drawn at all (a widget wholly outside the window
         // is not), and nothing reaches past the window's edge.
-        for last in ["More in the README", "Known limitations:", "Website:"] {
+        for last in [
+            issues_header().as_str(),
+            "More in the README",
+            "Known limitations:",
+            "Website:",
+        ] {
             assert!(
                 w.rect_in(about, last).is_some(),
                 "{size:?}: {last:?} is drawn"
@@ -5418,6 +5423,441 @@ fn all_the_about_window_says_fits_where_it_opens_and_in_the_smallest_it_can_be()
             "it does not open smaller than it can be"
         )
     };
+}
+
+// ---- the known issues in the About window -----------------------------------------
+//
+// Under the links the About window has a header, *Known issues (N)*, which opens the
+// list of what runs differently here than in jq (`jsonquery_query::known_issues`).
+// The window is made wider and then taller to hold the list, and goes back to the
+// size it had when the list is closed, as the Settings window does with its
+// Advanced limits.
+
+use jsonquery_query::known_issues;
+
+/// What a line of markup is drawn as: its spans, without the marks.
+fn plain(markup: &str) -> String {
+    use jsonquery_query::tutorial::{parse_inline, Span};
+    parse_inline(markup)
+        .into_iter()
+        .map(|span| match span {
+            Span::Text(s) | Span::Code(s) | Span::Emph(s) => s,
+        })
+        .collect()
+}
+
+/// The text of the header that opens the list.
+fn issues_header() -> String {
+    format!("Known issues ({})", known_issues::count())
+}
+
+/// A pass of the About window, `size` big on a screen of `monitor`, as the window
+/// manager tells it.
+fn about_pass(w: &mut Windows, size: egui::Vec2, monitor: egui::Vec2, events: Vec<egui::Event>) {
+    let info = egui::ViewportInfo {
+        inner_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+        monitor_size: Some(monitor),
+        ..Default::default()
+    };
+    w.pass_sized(Satellite::About.viewport_id(), info, events, size);
+}
+
+/// A click in the About window, and the passes after it (the list slides open or
+/// shut in a twelfth of a second).
+fn about_click(w: &mut Windows, at: egui::Pos2, size: egui::Vec2, monitor: egui::Vec2) {
+    let button = |pressed| egui::Event::PointerButton {
+        pos: at,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    about_pass(w, size, monitor, vec![egui::Event::PointerMoved(at)]);
+    about_pass(w, size, monitor, vec![button(true)]);
+    about_pass(w, size, monitor, vec![button(false)]);
+    for _ in 0..12 {
+        about_pass(w, size, monitor, Vec::new());
+    }
+}
+
+/// The sizes the About window was asked to be, in order.
+fn about_sizes_asked(w: &Windows) -> Vec<egui::Vec2> {
+    w.commands_in(Satellite::About.viewport_id())
+        .into_iter()
+        .filter_map(|command| match command {
+            egui::ViewportCommand::InnerSize(size) => Some(size),
+            _ => None,
+        })
+        .collect()
+}
+
+/// An About window opened and drawn at the size it opens with, on a screen of
+/// `monitor`; and where its header is.
+fn about_with_issues_at(size: egui::Vec2, monitor: egui::Vec2) -> (Windows, egui::Pos2) {
+    let mut w = Windows::new();
+    w.open_satellite(Satellite::About);
+    for _ in 0..4 {
+        about_pass(&mut w, size, monitor, Vec::new());
+    }
+    assert!(
+        about_sizes_asked(&w).is_empty(),
+        "no size is asked for by looking"
+    );
+    let header = w
+        .rect_in(Satellite::About.viewport_id(), &issues_header())
+        .expect("the header of the known issues is drawn");
+    (w, header.center())
+}
+
+const INFO_OPENING: egui::Vec2 = egui::vec2(INFO_SIZE[0], INFO_SIZE[1]);
+const BIG_SCREEN: egui::Vec2 = egui::vec2(1920.0, 1080.0);
+
+/// Every line of the list the window shows, as drawn: the titles of the groups and
+/// the issues that are not minor.
+fn listed_lines() -> Vec<String> {
+    known_issues::GROUPS
+        .iter()
+        .flat_map(|group| {
+            std::iter::once(group.title.to_owned())
+                .chain(group.main().map(|issue| plain(issue.text)))
+        })
+        .collect()
+}
+
+#[test]
+fn the_about_window_has_a_known_issues_header_under_the_links_and_it_starts_closed() {
+    let (w, _) = about_with_issues_at(INFO_OPENING, BIG_SCREEN);
+    let about = Satellite::About.viewport_id();
+    let header = w.rect_in(about, &issues_header()).expect("the header");
+    let limitations = w
+        .rect_in(about, "More in the README")
+        .expect("the last link");
+    assert!(
+        limitations.max.y < header.min.y,
+        "under the links: {limitations:?} {header:?}"
+    );
+    assert!(
+        header.min.x >= 0.0 && header.max.x <= INFO_OPENING.x && header.max.y <= INFO_OPENING.y,
+        "and in the window where it opens: {header:?}"
+    );
+    // Closed: none of the list is drawn.
+    for line in listed_lines() {
+        assert!(w.rect_in(about, &line).is_none(), "{line:?} is not drawn");
+    }
+    assert!(!w.drew_in(about, |t| t.contains("smaller ones")));
+}
+
+#[test]
+fn the_header_counts_the_issues_there_are_and_says_nothing_else_of_them() {
+    assert_eq!(
+        issues_header(),
+        format!("Known issues ({})", known_issues::count())
+    );
+    assert!(known_issues::count() >= 20, "{}", known_issues::count());
+}
+
+#[test]
+fn opening_the_known_issues_makes_the_window_wider_and_then_taller_and_closing_them_puts_it_back() {
+    let (mut w, header) = about_with_issues_at(INFO_OPENING, BIG_SCREEN);
+    let about = Satellite::About.viewport_id();
+
+    // Wider first: a line of the list is long, and wraps into many in a narrow window.
+    about_click(&mut w, header, INFO_OPENING, BIG_SCREEN);
+    let asked = about_sizes_asked(&w);
+    assert_eq!(
+        asked,
+        [egui::vec2(640.0, INFO_OPENING.y)],
+        "as tall as it was"
+    );
+
+    // The window manager gives it that width; it is then as tall as the list needs.
+    let wide = asked[0];
+    for _ in 0..6 {
+        about_pass(&mut w, wide, BIG_SCREEN, Vec::new());
+    }
+    let asked = about_sizes_asked(&w);
+    assert_eq!(asked.len(), 2, "{asked:?}");
+    assert_eq!(asked[1].x, 640.0, "as wide as it is");
+    assert!(
+        asked[1].y > INFO_OPENING.y + 200.0 && asked[1].y <= BIG_SCREEN.y * 0.9,
+        "taller, and on the screen: {asked:?}"
+    );
+
+    // Given the room, the whole list is there, with a line about the rest.
+    let tall = asked[1];
+    for _ in 0..4 {
+        about_pass(&mut w, tall, BIG_SCREEN, Vec::new());
+    }
+    for line in listed_lines() {
+        assert!(w.rect_in(about, &line).is_some(), "{line:?} is drawn");
+    }
+    let rest = format!(
+        "{} smaller ones, and more examples, in the full list",
+        known_issues::minor_count()
+    );
+    assert!(w.rect_in(about, &rest).is_some(), "{:?}", w.shapes.len());
+    for (text, rect) in text_rects(&w.shapes[&about]) {
+        assert!(
+            rect.min.x >= 0.0 && rect.max.x <= tall.x && rect.max.y <= tall.y,
+            "{text:?} is inside the window: {rect:?}"
+        );
+    }
+    assert_eq!(
+        about_sizes_asked(&w).len(),
+        2,
+        "asked for twice, and no more"
+    );
+
+    // Closing the list asks for the size the window had.
+    let header = w
+        .rect_in(about, &issues_header())
+        .expect("the header")
+        .center();
+    about_click(&mut w, header, tall, BIG_SCREEN);
+    let asked = about_sizes_asked(&w);
+    assert_eq!(asked.len(), 3, "{asked:?}");
+    assert_eq!(asked[2], INFO_OPENING, "back to what it was");
+    assert!(
+        w.rect_in(about, &listed_lines()[0]).is_none(),
+        "and the list is gone"
+    );
+}
+
+#[test]
+fn a_window_that_is_big_enough_for_the_known_issues_is_not_resized() {
+    let (size, monitor) = (egui::vec2(900.0, 1400.0), egui::vec2(1920.0, 1600.0));
+    let (mut w, header) = about_with_issues_at(size, monitor);
+    about_click(&mut w, header, size, monitor);
+    let about = Satellite::About.viewport_id();
+    for line in listed_lines() {
+        assert!(w.rect_in(about, &line).is_some(), "{line:?} is drawn");
+    }
+    assert!(
+        about_sizes_asked(&w).is_empty(),
+        "{:?}",
+        about_sizes_asked(&w)
+    );
+    let header = w.rect_in(about, &issues_header()).unwrap().center();
+    about_click(&mut w, header, size, monitor);
+    assert!(about_sizes_asked(&w).is_empty(), "nor when it is closed");
+}
+
+#[test]
+fn a_window_that_is_wide_enough_is_only_made_taller_for_the_known_issues() {
+    let (size, monitor) = (egui::vec2(700.0, INFO_OPENING.y), BIG_SCREEN);
+    let (mut w, header) = about_with_issues_at(size, monitor);
+    about_click(&mut w, header, size, monitor);
+    for _ in 0..4 {
+        about_pass(&mut w, size, monitor, Vec::new());
+    }
+    let asked = about_sizes_asked(&w);
+    assert_eq!(asked.len(), 1, "{asked:?}");
+    assert_eq!(asked[0].x, 700.0, "as wide as it was");
+    assert!(asked[0].y > size.y + 200.0, "{asked:?}");
+}
+
+#[test]
+fn the_known_issues_do_not_make_the_window_taller_than_the_screen_has_room_for() {
+    let monitor = egui::vec2(1920.0, 500.0);
+    let (mut w, header) = about_with_issues_at(INFO_OPENING, monitor);
+    about_click(&mut w, header, INFO_OPENING, monitor);
+    let wide = egui::vec2(640.0, INFO_OPENING.y);
+    for _ in 0..6 {
+        about_pass(&mut w, wide, monitor, Vec::new());
+    }
+    let asked = about_sizes_asked(&w);
+    assert_eq!(asked.len(), 2, "{asked:?}");
+    assert!(
+        (asked[1].y - 450.0).abs() < 0.5,
+        "nine tenths of the screen's height: {asked:?}"
+    );
+}
+
+#[test]
+fn a_narrow_screen_is_not_asked_for_a_window_wider_than_it_has_room_for() {
+    let monitor = egui::vec2(500.0, 1080.0);
+    let (mut w, header) = about_with_issues_at(INFO_OPENING, monitor);
+    about_click(&mut w, header, INFO_OPENING, monitor);
+    let asked = about_sizes_asked(&w);
+    assert_eq!(asked.len(), 1, "{asked:?}");
+    assert!(
+        (asked[0].x - 450.0).abs() < 0.5,
+        "nine tenths of the width: {asked:?}"
+    );
+}
+
+#[test]
+fn closing_the_list_before_it_is_open_in_full_puts_the_window_back_too() {
+    let (mut w, header) = about_with_issues_at(INFO_OPENING, BIG_SCREEN);
+    let button = |pressed| egui::Event::PointerButton {
+        pos: header,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    // Opened, and closed again at once: before the window has the width it was asked for.
+    about_pass(
+        &mut w,
+        INFO_OPENING,
+        BIG_SCREEN,
+        vec![egui::Event::PointerMoved(header)],
+    );
+    about_pass(&mut w, INFO_OPENING, BIG_SCREEN, vec![button(true)]);
+    about_pass(&mut w, INFO_OPENING, BIG_SCREEN, vec![button(false)]);
+    assert_eq!(about_sizes_asked(&w).len(), 1);
+    about_pass(&mut w, INFO_OPENING, BIG_SCREEN, vec![button(true)]);
+    about_pass(&mut w, INFO_OPENING, BIG_SCREEN, vec![button(false)]);
+    for _ in 0..12 {
+        about_pass(&mut w, INFO_OPENING, BIG_SCREEN, Vec::new());
+    }
+    let asked = about_sizes_asked(&w);
+    assert_eq!(asked.len(), 2, "{asked:?}");
+    assert_eq!(asked[1], INFO_OPENING, "back to what it was");
+}
+
+#[test]
+fn a_line_of_the_known_issues_shows_an_example_when_it_is_hovered() {
+    let (mut w, header) = about_with_issues_at(INFO_OPENING, BIG_SCREEN);
+    let about = Satellite::About.viewport_id();
+    about_click(&mut w, header, INFO_OPENING, BIG_SCREEN);
+    let wide = egui::vec2(640.0, INFO_OPENING.y);
+    for _ in 0..6 {
+        about_pass(&mut w, wide, BIG_SCREEN, Vec::new());
+    }
+    let tall = about_sizes_asked(&w)[1];
+    for _ in 0..4 {
+        about_pass(&mut w, tall, BIG_SCREEN, Vec::new());
+    }
+
+    let issue = known_issues::GROUPS[0]
+        .main()
+        .next()
+        .expect("a first issue");
+    let line = w.rect_in(about, &plain(issue.text)).expect("its line");
+    let example = &issue.examples[0];
+    let (program, result) = (
+        example.program(),
+        plain(&format!(
+            "jq: {} — here: {}",
+            example.jq,
+            example.here.describe()
+        )),
+    );
+    about_pass(
+        &mut w,
+        tall,
+        BIG_SCREEN,
+        vec![egui::Event::PointerMoved(line.center())],
+    );
+    assert!(!w.drew_in(about, |t| t == program), "not at once");
+    for _ in 0..90 {
+        about_pass(&mut w, tall, BIG_SCREEN, Vec::new());
+    }
+    // The program, and what jq and this app give for it: two lines.
+    let (program_rect, result_rect) = (
+        w.rect_in(about, &program).expect("the program"),
+        w.rect_in(about, &result).expect("what it gives"),
+    );
+    assert!(
+        program_rect.max.y <= result_rect.min.y + 1.0
+            && result_rect.max.y - program_rect.min.y < 60.0,
+        "{program_rect:?} {result_rect:?}"
+    );
+    // (It is a hover: nothing was asked of the window.)
+    assert_eq!(about_sizes_asked(&w).len(), 2);
+}
+
+#[test]
+fn the_smaller_issues_are_counted_with_a_link_to_the_page_that_lists_them() {
+    let (mut w, header) = about_with_issues_at(INFO_OPENING, BIG_SCREEN);
+    let about = Satellite::About.viewport_id();
+    about_click(&mut w, header, INFO_OPENING, BIG_SCREEN);
+    let wide = egui::vec2(640.0, INFO_OPENING.y);
+    for _ in 0..6 {
+        about_pass(&mut w, wide, BIG_SCREEN, Vec::new());
+    }
+    let tall = about_sizes_asked(&w)[1];
+    for _ in 0..4 {
+        about_pass(&mut w, tall, BIG_SCREEN, Vec::new());
+    }
+    let rest = format!(
+        "{} smaller ones, and more examples, in the full list",
+        known_issues::minor_count()
+    );
+    // The page's address is written out here, not taken from the constants.
+    assert_eq!(known_issues::PAGE, "docs/known-issues.md");
+    let link = w.text_in(about, &rest).expect("the link");
+    assert!(w.opened.is_empty());
+    about_click(&mut w, link, tall, BIG_SCREEN);
+    assert_eq!(
+        w.opened,
+        ["https://github.com/nujufas/jsonquery_gui/blob/master/docs/known-issues.md"]
+    );
+}
+
+#[test]
+fn the_known_issues_of_a_window_inside_the_main_window_open_without_asking_for_a_size() {
+    // No real windows (the layout tests, embedded viewports): a size asked for would
+    // be the main window's.
+    let mut h = Harness::new();
+    h.app.info_window.open_or_focus(&h.ctx);
+    h.settle();
+    // The window is a small one, and the header is below what it shows: scroll to it.
+    let title = rect_of(&h, "jsonquery gui v0.5.1");
+    h.pointer(title.center().x, title.center().y + 60.0);
+    h.frame_with(vec![egui::Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Point,
+        delta: egui::vec2(0.0, -400.0),
+        phase: egui::TouchPhase::Move,
+        modifiers: egui::Modifiers::NONE,
+    }]);
+    h.settle();
+    let header = text_rect(&h, &issues_header())
+        .unwrap_or_else(|| panic!("the header is drawn: {:?}", h.texts()));
+    h.click(header.center().x, header.center().y);
+    h.settle();
+    // And the list, which is under it, is below what the small window shows.
+    h.frame_with(vec![egui::Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Point,
+        delta: egui::vec2(0.0, -400.0),
+        phase: egui::TouchPhase::Move,
+        modifiers: egui::Modifiers::NONE,
+    }]);
+    h.settle();
+    assert!(
+        known_issues::GROUPS
+            .iter()
+            .any(|group| is_drawn(&h, group.title)),
+        "the list is open: {:?}",
+        h.texts()
+    );
+    assert!(
+        !h.commands
+            .iter()
+            .any(|c| matches!(c, egui::ViewportCommand::InnerSize(_))),
+        "{:?}",
+        h.commands
+    );
+}
+
+#[test]
+fn opening_the_about_window_again_finds_the_known_issues_closed() {
+    // (A window with room for the list, so that nothing has to be resized.)
+    let (size, monitor) = (egui::vec2(900.0, 1400.0), egui::vec2(1920.0, 1600.0));
+    let (mut w, header) = about_with_issues_at(size, monitor);
+    let about = Satellite::About.viewport_id();
+    about_click(&mut w, header, size, monitor);
+    assert!(w.rect_in(about, &listed_lines()[0]).is_some(), "open");
+
+    w.app().info_window.close();
+    w.open_satellite(Satellite::About);
+    for _ in 0..4 {
+        about_pass(&mut w, size, monitor, Vec::new());
+    }
+    assert!(w.rect_in(about, &issues_header()).is_some());
+    assert!(
+        w.rect_in(about, &listed_lines()[0]).is_none(),
+        "closed again"
+    );
 }
 
 #[test]

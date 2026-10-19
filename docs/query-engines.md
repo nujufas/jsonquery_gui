@@ -11,7 +11,7 @@ might be worth adding next.
 - **JSON Pointer** (`crates/query/src/json_pointer.rs`, `JsonPointerEngine`) — RFC 6901 via `serde_json::Value::pointer`.
 - **JSONPath** (`crates/query/src/jsonpath.rs`, `JsonPathEngine`) — RFC 9535 via [jsonpath-rust](https://crates.io/crates/jsonpath-rust).
 - **JMESPath** (`crates/query/src/jmespath_engine.rs`, `JmesPathEngine`) — via the [jmespath](https://crates.io/crates/jmespath) crate.
-- **jq** (`crates/query/src/jq.rs`, `JaqEngine`) — via the embedded [jaq](https://github.com/01mf02/jaq), plus the builtins jaq lacks (`@csv`, `@tsv`, `IN`, `INDEX`, `JOIN`, `tostream`, `fromstream`, `truncate_stream`: `crates/query/src/jq_ext.rs`) and its own `fromjson`, `tonumber` and `tojson`, which read and write as jq's do and stop at the first thing they cannot read (`jq_ext/json_text.rs`).
+- **jq** (`crates/query/src/jq.rs`, `JaqEngine`) — via the embedded [jaq](https://github.com/01mf02/jaq), plus the builtins jaq lacks (`@csv`, `@tsv`, `IN`, `INDEX`, `JOIN`, `tostream`, `fromstream`, `truncate_stream`: `crates/query/src/jq_ext.rs`) and its own `fromjson`, `tonumber` and `tojson`, which read and write as jq's do and stop at the first thing they cannot read (`jq_ext/json_text.rs`). Where it still differs from jq 1.8: [Known issues](known-issues.md).
 
 A `jsonquery_query::Kind` enum (`crates/query/src/lib.rs`) ties each
 dialect's id to its engine and adds `Kind::detect(query_text)` —

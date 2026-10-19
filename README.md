@@ -13,7 +13,8 @@ patches and validates documents too. Built in Rust with
 - **Four query dialects, one box** — [jq](https://jqlang.github.io/jq/) (via
   embedded [jaq](https://github.com/01mf02/jaq)), JSON Pointer (RFC 6901),
   JSONPath (RFC 9535), and JMESPath. Pick one from the toolbar or let the app
-  auto-detect it from what you type.
+  auto-detect it from what you type. jaq is not jq, and a few programs run
+  differently: see [Known issues](docs/known-issues.md).
 - **Inline autocomplete** — as-you-type suggestions for each dialect's
   built-in functions (with a short doc string) and for the loaded document's
   own keys and array indices — type `.` or `[` to see what's there, with a
@@ -230,6 +231,12 @@ point inside the schema.
 
 ## Known limitations
 
+- **A few jq programs run differently** — jq is run by
+  [jaq](https://github.com/01mf02/jaq), a re-implementation of it: some builtins
+  and forms of syntax are missing, and some results differ from jq 1.8's.
+  [Known issues](docs/known-issues.md) lists them, each with an example and, where
+  there is one, a way round; the ⓘ window has the same list under **Known
+  issues**, and opens wider to show it.
 - **Drag-and-drop doesn't work on native Wayland** — a gap in
   [`winit`](https://github.com/rust-windowing/winit) (`eframe`'s windowing
   library), which only implements OS-level file drop on Windows, macOS, and

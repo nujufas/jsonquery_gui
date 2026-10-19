@@ -28,6 +28,7 @@ pub mod jq;
 mod jq_ext;
 pub mod json_pointer;
 pub mod jsonpath;
+pub mod known_issues;
 pub mod lazy;
 pub mod merge;
 pub mod output;

@@ -193,7 +193,7 @@ impl App {
                     ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Focus);
                 }
             }
-            Satellite::About => info_window_frame(ui),
+            Satellite::About => self.info_window.window_frame(ui),
             Satellite::Settings => {
                 if let Some(settings) =
                     self.settings_window

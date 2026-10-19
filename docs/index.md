@@ -4,6 +4,7 @@ A native desktop tool for querying and browsing large JSON files — fast to
 open, fast to scroll, fast to query. This page covers the problem and goals;
 [Architecture](architecture.md) covers how it's built,
 [Query Engines](query-engines.md) covers the supported query dialects,
+[Known issues](known-issues.md) lists where jq programs run differently here,
 [Tutorial](tutorial.md) documents the built-in lessons window, and
 [Settings](settings.md) covers the limits on file sizes, and what the app
 remembers of how you left it.
@@ -94,6 +95,9 @@ is in [Architecture](architecture.md).
 - **[Query Engines](query-engines.md)** — jq, JSON Pointer, JSONPath, and
   JMESPath, picked via an auto-detecting query-bar toggle, plus the wider
   landscape surveyed for what to add next.
+- **[Known issues](known-issues.md)** — the jq programs that fail or give
+  another result than jq 1.8.1 does, each with an example and, where there is one, a
+  way round. The same list is in the app, under ⓘ.
 - **[Tools](tools.md)** — the 🛠 window, which can be docked in the main window as
   tabs beside Json Query: merging several JSON files with a jq filter, formatting,
   diffing, patching (RFC 6902 / 7386) and validating against a JSON Schema.
