@@ -8258,3 +8258,511 @@ fn a_place_the_file_cannot_say_is_a_window() {
     assert!(!is_drawn(&h, tools::QUERY_TAB));
     forget_settings(&file);
 }
+
+// The right-click menu of the text: Cut, Copy, Paste and Select All where a text can be typed,
+// Copy and Select All where it is only shown, and Copy on the lines of a list.
+
+/// Whether the menu of a box that can be typed in is open.
+fn typed_menu_is_open(h: &Harness) -> bool {
+    ["Cut", "Copy", "Paste", "Select All"]
+        .iter()
+        .all(|item| is_drawn(h, item))
+}
+
+/// A point on the first line of the text drawn that has `part` in it (a text of many lines is
+/// drawn as one).
+fn inside_text(h: &Harness, part: &str) -> egui::Pos2 {
+    let (_, rect) = text_rects(&h.shapes)
+        .into_iter()
+        .find(|(t, _)| t.contains(part))
+        .unwrap_or_else(|| panic!("a text with {part:?} is drawn: {:?}", h.texts()));
+    rect.min + egui::vec2(8.0, 6.0)
+}
+
+/// Whether the menu of a text that is only shown is open.
+fn shown_menu_is_open(h: &Harness) -> bool {
+    is_drawn(h, "Copy") && is_drawn(h, "Select All") && !is_drawn(h, "Cut") && !is_drawn(h, "Paste")
+}
+
+#[test]
+fn the_query_box_has_the_menu_and_it_acts_on_the_box() {
+    let mut h = Harness::new();
+    h.app.query_text = ".members[].name".to_owned();
+    h.settle();
+    let at = h.query_box().center();
+    h.right_click(at.x, at.y);
+    assert!(typed_menu_is_open(&h), "{:?}", h.texts());
+
+    // Select All, then Copy: the query is on the clipboard.
+    press(&mut h, "Select All");
+    assert!(!is_drawn(&h, "Paste"), "the menu closes");
+    h.right_click(at.x, at.y);
+    press(&mut h, "Copy");
+    assert_eq!(h.copied.last().map(String::as_str), Some(".members[].name"));
+
+    // Paste asks the window for the clipboard, and the box takes what comes.
+    h.right_click(at.x, at.y);
+    press(&mut h, "Paste");
+    assert!(h.commands.contains(&egui::ViewportCommand::RequestPaste));
+    h.frame_with(vec![egui::Event::Paste("zzz".to_owned())]);
+    h.settle();
+    assert_eq!(
+        h.app.query_text, "zzz",
+        "what was selected is replaced by what is pasted"
+    );
+}
+
+#[test]
+fn the_source_field_has_the_menu() {
+    let mut h = Harness::new();
+    let at = center_of(&h, "URL or local path…");
+    h.right_click(at.x, at.y);
+    assert!(typed_menu_is_open(&h), "{:?}", h.texts());
+}
+
+#[test]
+fn the_paste_area_has_the_menu() {
+    let mut h = Harness::new();
+    let at = center_of(&h, "Paste JSON here…");
+    h.right_click(at.x, at.y);
+    assert!(typed_menu_is_open(&h), "{:?}", h.texts());
+}
+
+#[test]
+fn the_text_boxes_of_the_tools_have_the_menu() {
+    for (tool, hint) in [
+        (Tool::Format, "Paste JSON here, or drop a file"),
+        (Tool::Diff, "Paste JSON here, or drop a file"),
+        (Tool::Patch, "Paste the patch, or drop a file"),
+        (Tool::Validate, "Paste the JSON Schema, or drop a file"),
+    ] {
+        let mut h = Harness::new();
+        open_tool(&mut h, tool);
+        let at = center_of(&h, hint);
+        h.right_click(at.x, at.y);
+        assert!(typed_menu_is_open(&h), "{tool:?}: {:?}", h.texts());
+    }
+    // Merge has the filter (which starts as the first of the presets, `add`).
+    let mut h = Harness::new();
+    open_tool(&mut h, Tool::Merge);
+    let at = center_of(&h, "add");
+    h.right_click(at.x, at.y);
+    assert!(typed_menu_is_open(&h), "{:?}", h.texts());
+}
+
+#[test]
+fn a_box_of_a_tool_cuts_what_is_selected() {
+    let mut h = diff_with(r#"{"a":1}"#, r#"{"a":2}"#);
+    let at = center_of(&h, r#"{"a":1}"#);
+    h.right_click(at.x, at.y);
+    press(&mut h, "Select All");
+    h.right_click(at.x, at.y);
+    press(&mut h, "Cut");
+    assert!(h.commands.contains(&egui::ViewportCommand::RequestCut));
+    h.frame_with(vec![egui::Event::Cut]);
+    h.settle();
+    assert_eq!(h.copied.last().map(String::as_str), Some(r#"{"a":1}"#));
+    assert!(
+        is_drawn(&h, "Paste JSON here, or drop a file"),
+        "the box is empty: {:?}",
+        h.texts()
+    );
+}
+
+#[test]
+fn the_text_view_of_the_results_has_the_menu_to_copy_and_select_all() {
+    let mut h = Harness::new();
+    load(&mut h, PEOPLE);
+    run_and_wait(&mut h, ".[] | .name");
+    h.app.results_view = ViewMode::Text;
+    wait_for(&mut h, "the text view", |h| {
+        !h.app.results_text_pending && !h.app.results_text_dirty
+    });
+    let at = inside_text(&h, "Ada");
+    h.right_click(at.x, at.y);
+    assert!(shown_menu_is_open(&h), "{:?}", h.texts());
+
+    press(&mut h, "Select All");
+    h.right_click(at.x, at.y);
+    press(&mut h, "Copy");
+    assert_eq!(
+        h.copied.last().map(String::as_str),
+        Some("[\n  \"Ada\",\n  \"Linus, L.\"\n]")
+    );
+}
+
+#[test]
+fn the_text_view_of_the_source_has_the_menu() {
+    let mut h = Harness::new();
+    let file = temp_json("people.json", PEOPLE);
+    h.app.open_file(file.to_path_buf());
+    wait_for(&mut h, "the file", |h| h.app.doc.is_some());
+    h.app.source_view = ViewMode::Text;
+    wait_for(&mut h, "the text view", |h| {
+        !h.app.source_text_pending && !h.app.source_text_dirty
+    });
+    let at = inside_text(&h, "Ada");
+    h.right_click(at.x, at.y);
+    assert!(shown_menu_is_open(&h), "{:?}", h.texts());
+}
+
+#[test]
+fn an_error_in_the_status_bar_is_copied_with_a_right_click() {
+    let mut h = Harness::new();
+    h.app.query_error = Some("expected value at line 1".to_owned());
+    h.settle();
+    let at = center_of(&h, "Query error: expected value at line 1");
+    h.right_click(at.x, at.y);
+    press(&mut h, "Copy");
+    assert_eq!(
+        h.copied.last().map(String::as_str),
+        Some("Query error: expected value at line 1")
+    );
+}
+
+#[test]
+fn a_line_of_the_side_by_side_view_copies_its_text() {
+    let mut h = diff_with(r#"{"a":1,"b":2}"#, r#"{"a":1,"b":3}"#);
+    press(&mut h, "Side by side");
+    wait_for(&mut h, "the comparison", |h| is_drawn(h, "Changes (1)"));
+
+    // A line that is the same on both sides: one Copy.
+    let same = center_of(&h, "  \"a\": 1,");
+    h.right_click(same.x, same.y);
+    assert!(is_drawn(&h, "Copy line"), "{:?}", h.texts());
+    assert!(!is_drawn(&h, "Copy path") && !is_drawn(&h, "Move to the left"));
+    press(&mut h, "Copy line");
+    assert_eq!(h.copied.last().map(String::as_str), Some("  \"a\": 1,"));
+
+    // One that differs: each side's line, and the path, and the moves.
+    let right = h
+        .texts()
+        .into_iter()
+        .find(|(t, _)| t == "  \"b\": 3")
+        .expect("the changed line is drawn")
+        .1;
+    h.right_click(right.x + 4.0, right.y + 4.0);
+    for item in [
+        "Move to the left",
+        "Move to the right",
+        "Copy path",
+        "Copy left line",
+        "Copy right line",
+    ] {
+        assert!(is_drawn(&h, item), "{item}: {:?}", h.texts());
+    }
+    press(&mut h, "Copy right line");
+    assert_eq!(h.copied.last().map(String::as_str), Some("  \"b\": 3"));
+}
+
+#[test]
+fn a_change_in_the_list_copies_its_path_or_its_line() {
+    let mut h = diff_with(r#"{"a":1,"b":2}"#, r#"{"a":1,"b":3}"#);
+    press(&mut h, "Changes");
+    wait_for(&mut h, "the comparison", |h| is_drawn(h, "Changes (1)"));
+    let row = center_of(&h, "/b");
+    h.right_click(row.x, row.y);
+    assert!(is_drawn(&h, "Copy path") && is_drawn(&h, "Copy line"));
+    press(&mut h, "Copy line");
+    assert_eq!(
+        h.copied.last().map(String::as_str),
+        Some("Changed /b  2 → 3")
+    );
+    h.right_click(row.x, row.y);
+    press(&mut h, "Copy path");
+    assert_eq!(h.copied.last().map(String::as_str), Some("/b"));
+}
+
+#[test]
+fn a_problem_in_the_list_copies_its_path_message_or_line() {
+    let mut h = Harness::new();
+    open_tool(&mut h, Tool::Validate);
+    h.app
+        .tools
+        .fill(Tool::Validate, "Document", r#"{"age":"old"}"#);
+    h.app.tools.fill(
+        Tool::Validate,
+        "Schema",
+        r#"{"properties":{"age":{"type":"integer"}}}"#,
+    );
+    h.settle();
+    press(&mut h, "Validate");
+    wait_for(&mut h, "the problems", |h| is_drawn(h, "/age"));
+    let row = center_of(&h, "/age");
+    h.right_click(row.x, row.y);
+    assert!(
+        is_drawn(&h, "Copy path") && is_drawn(&h, "Copy message") && is_drawn(&h, "Copy problem")
+    );
+    press(&mut h, "Copy path");
+    assert_eq!(h.copied.last().map(String::as_str), Some("/age"));
+    h.right_click(row.x, row.y);
+    press(&mut h, "Copy problem");
+    let line = h.copied.last().cloned().unwrap_or_default();
+    assert!(
+        line.starts_with("/age: ") && line.ends_with("[type]"),
+        "{line:?}"
+    );
+    h.right_click(row.x, row.y);
+    press(&mut h, "Copy message");
+    let message = h.copied.last().cloned().unwrap_or_default();
+    assert!(
+        !message.is_empty() && !message.starts_with('/') && line.contains(&message),
+        "{message:?}"
+    );
+
+    // A problem with the whole document has no path to copy: the item is there, and does nothing.
+    h.app.tools.fill(Tool::Validate, "Document", "{}");
+    h.app
+        .tools
+        .fill(Tool::Validate, "Schema", r#"{"type":"array"}"#);
+    h.settle();
+    press(&mut h, "Validate");
+    wait_for(&mut h, "the problem", |h| is_drawn(h, "(document)"));
+    let whole = center_of(&h, "(document)");
+    let before = h.copied.len();
+    h.right_click(whole.x, whole.y);
+    press(&mut h, "Copy path");
+    assert_eq!(h.copied.len(), before, "there is nothing to copy");
+}
+
+#[test]
+fn a_find_result_copies_its_path_or_its_line() {
+    let mut h = Harness::new();
+    load(&mut h, PEOPLE);
+    h.app.show_find_list(
+        vec![vec![
+            PathSegment::Index(0),
+            PathSegment::Key("name".to_owned()),
+        ]],
+        None,
+    );
+    h.settle();
+    let row = h
+        .texts()
+        .into_iter()
+        .find(|(t, _)| t.starts_with("[Source]"))
+        .expect("the hit is listed")
+        .1;
+    h.right_click(row.x + 8.0, row.y + 4.0);
+    press(&mut h, "Copy path");
+    assert_eq!(h.copied.last().map(String::as_str), Some(".[0].name"));
+    h.right_click(row.x + 8.0, row.y + 4.0);
+    press(&mut h, "Copy line");
+    let line = h.copied.last().cloned().unwrap_or_default();
+    assert!(
+        line.starts_with("[Source]  .[0].name   "),
+        "the line as it is listed: {line:?}"
+    );
+}
+
+#[test]
+fn the_about_window_copies_the_version_and_the_links() {
+    // The window's contents are drawn on their own, frame by frame.
+    let ctx = egui::Context::default();
+    let copied = std::rc::Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
+    let kept = copied.clone();
+    let mut frame = |events: Vec<egui::Event>| {
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(380.0, 330.0),
+            )),
+            events,
+            ..Default::default()
+        };
+        let mut output = ctx.run_ui(input, info_window_contents);
+        output.textures_delta.clear();
+        for command in &output.platform_output.commands {
+            if let egui::OutputCommand::CopyText(text) = command {
+                kept.borrow_mut().push(text.clone());
+            }
+        }
+        text_rects(&output.shapes)
+    };
+    for _ in 0..3 {
+        frame(Vec::new());
+    }
+    let click = |frame: &mut dyn FnMut(Vec<egui::Event>) -> Vec<(String, egui::Rect)>,
+                 at: egui::Pos2,
+                 button: egui::PointerButton| {
+        for pressed in [true, false] {
+            frame(vec![
+                egui::Event::PointerMoved(at),
+                egui::Event::PointerButton {
+                    pos: at,
+                    button,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ]);
+        }
+        frame(Vec::new())
+    };
+    let version = format!("jsonquery gui v{}", env!("CARGO_PKG_VERSION"));
+    for (shown, item, copies) in [
+        (version.as_str(), "Copy", version.clone()),
+        ("GitHub", "Copy link", REPO_URL.to_owned()),
+        (
+            "MIT",
+            "Copy link",
+            format!("{REPO_URL}/blob/master/LICENSE"),
+        ),
+        (
+            "Privacy policy",
+            "Copy link",
+            format!("{REPO_URL}/blob/master/PRIVACY.md"),
+        ),
+    ] {
+        let texts = frame(Vec::new());
+        let (_, rect) = texts
+            .iter()
+            .find(|(t, _)| t == shown)
+            .unwrap_or_else(|| panic!("{shown:?} is drawn"))
+            .clone();
+        let texts = click(&mut frame, rect.center(), egui::PointerButton::Secondary);
+        let (_, entry) = texts
+            .iter()
+            .find(|(t, _)| t == item)
+            .unwrap_or_else(|| panic!("the menu of {shown:?} has {item:?}: {texts:?}"))
+            .clone();
+        click(&mut frame, entry.center(), egui::PointerButton::Primary);
+        assert_eq!(copied.borrow().last(), Some(&copies), "{shown}");
+    }
+}
+
+#[test]
+fn the_menu_of_the_line_being_typed_over_does_not_end_the_typing() {
+    let mut h = two_with_b();
+    let line = center_of(&h, "  \"b\": 2");
+    h.double_click(line.x, line.y);
+    let editing = "Editing line 3 of Left: Enter puts it in, Esc puts it back";
+    assert!(is_drawn(&h, editing), "{:?}", h.texts());
+
+    // The field's menu is a text box's, and the path of the line; moving is not for a line
+    // that is being typed over.
+    h.right_click(line.x, line.y);
+    assert!(typed_menu_is_open(&h), "{:?}", h.texts());
+    assert!(is_drawn(&h, "Copy path"), "{:?}", h.texts());
+    assert!(!is_drawn(&h, "Move to the left") && !is_drawn(&h, "Copy left line"));
+    assert!(
+        is_drawn(&h, editing),
+        "the menu opened and the line is still typed over"
+    );
+
+    // The press on an item takes the focus from the field: the typing goes on.
+    press(&mut h, "Select All");
+    assert!(is_drawn(&h, editing), "{:?}", h.texts());
+    h.right_click(line.x, line.y);
+    press(&mut h, "Copy");
+    assert!(is_drawn(&h, editing), "{:?}", h.texts());
+    let copied = h.copied.last().cloned().unwrap_or_default();
+    assert!(copied.contains("\"b\": 2"), "{copied:?}");
+    // …and Esc puts the line back as it was.
+    h.key(egui::Key::Escape, egui::Modifiers::NONE);
+    assert!(!is_drawn(&h, editing), "{:?}", h.texts());
+    assert_eq!(h.app.tools.box_text(Tool::Diff, "Left"), r#"{"a":1,"b":2}"#);
+}
+
+#[test]
+fn a_click_elsewhere_with_the_menu_of_the_field_open_ends_the_typing() {
+    let mut h = two_with_b();
+    let line = center_of(&h, "  \"b\": 2");
+    h.double_click(line.x, line.y);
+    h.right_click(line.x, line.y);
+    assert!(typed_menu_is_open(&h));
+    // A click that is on no item of the menu, and on nothing else that takes it.
+    h.click(line.x, 700.0);
+    h.settle();
+    assert!(!typed_menu_is_open(&h), "{:?}", h.texts());
+    assert!(
+        !is_drawn_containing(&h, "Editing line"),
+        "the typing is over: {:?}",
+        h.texts()
+    );
+}
+
+#[test]
+fn the_text_view_runs_a_long_line_on_and_does_not_wrap_it() {
+    let mut h = Harness::new();
+    load(&mut h, PEOPLE);
+    run_and_wait(&mut h, ".[0].name");
+    h.app.results_view = ViewMode::Text;
+    wait_for(&mut h, "the text view", |h| {
+        !h.app.results_text_pending && !h.app.results_text_dirty
+    });
+    // (the cache is what the view shows: a long line stands in for a long result)
+    h.app.results_text_cache = format!("\"{}\"", "word ".repeat(400));
+    h.settle();
+    let (_, rect) = text_rects(&h.shapes)
+        .into_iter()
+        .find(|(t, _)| t.contains("word word"))
+        .expect("the line is drawn");
+    assert!(
+        rect.width() > h.screen.x && rect.height() < 30.0,
+        "one row, as wide as the line is: {rect:?}"
+    );
+}
+
+#[test]
+fn the_find_field_has_the_menu() {
+    let mut h = Harness::new();
+    load(&mut h, PEOPLE);
+    h.app.open_search_dialog(PanelKind::Source);
+    h.settle();
+    let at = center_of(&h, "text to find…");
+    h.right_click(at.x, at.y);
+    assert!(typed_menu_is_open(&h), "{:?}", h.texts());
+}
+
+#[test]
+fn the_text_of_a_pasted_document_has_the_menu_of_a_box_that_can_be_typed_in() {
+    let mut h = Harness::new();
+    load(&mut h, PEOPLE);
+    h.app.source_view = ViewMode::Text;
+    h.settle();
+    let at = inside_text(&h, "Ada");
+    h.right_click(at.x, at.y);
+    assert!(typed_menu_is_open(&h), "{:?}", h.texts());
+}
+
+#[test]
+fn a_tool_error_is_text_that_can_be_selected() {
+    // (the colour and the menu of the text are the widgets' own test)
+    let mut h = Harness::new();
+    open_tool(&mut h, Tool::Format);
+    h.app.tools.fill(Tool::Format, "Input", "{not json");
+    h.settle();
+    press(&mut h, "Format");
+    wait_for(&mut h, "the error", |h| {
+        is_drawn_containing(h, "parsing JSON")
+    });
+    let at = inside_text(&h, "parsing JSON");
+    h.right_click(at.x, at.y);
+    assert!(shown_menu_is_open(&h), "{:?}", h.texts());
+}
+
+#[test]
+fn the_result_of_a_tool_is_shown_with_its_long_lines_wrapped() {
+    let mut h = Harness::new();
+    open_tool(&mut h, Tool::Format);
+    let long = "word ".repeat(300);
+    h.app
+        .tools
+        .fill(Tool::Format, "Input", &format!(r#"{{"a":"{long}"}}"#));
+    h.settle();
+    press(&mut h, "Format");
+    // The result is the pretty-printed document, the only text that begins with a line of its own.
+    wait_for(&mut h, "the result", |h| {
+        text_rects(&h.shapes)
+            .iter()
+            .any(|(t, _)| t.starts_with("{\n"))
+    });
+    let (_, rect) = text_rects(&h.shapes)
+        .into_iter()
+        .find(|(t, _)| t.starts_with("{\n"))
+        .expect("the result is drawn");
+    assert!(
+        rect.width() < h.screen.x / 2.0 && rect.height() > 60.0,
+        "the long line is broken at the width of the pane: {rect:?}"
+    );
+}

@@ -8,9 +8,7 @@
 
 use std::path::Path;
 
-use eframe::egui::{
-    self, Align, Color32, Layout, Margin, RichText, Shape, StrokeKind, TextStyle, TextWrapMode,
-};
+use eframe::egui::{self, Align, Color32, Layout, Margin, Shape, StrokeKind, TextStyle};
 
 use super::shared::Run;
 use crate::pane_header;
@@ -157,7 +155,7 @@ pub(super) fn text_box(
         .auto_shrink([false, false])
         .min_scrolled_height(line)
         .show(&mut inner, |ui| {
-            egui::TextEdit::multiline(text)
+            egui::TextEdit::multiline(&mut *text)
                 .id_salt(format!("{id}_edit"))
                 .code_editor()
                 .desired_rows(fitting)
@@ -167,6 +165,7 @@ pub(super) fn text_box(
                 .show(ui)
         })
         .inner;
+    crate::text_menu::attach(&output.response, text, crate::text_menu::Kind::Typed);
 
     let visuals = ui.style().interact(&output.response);
     let stroke = if accent {
@@ -240,11 +239,7 @@ pub(super) fn result_area<T>(
                 .id_salt(format!("{id}_error"))
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
-                    ui.add(
-                        egui::Label::new(RichText::new(error).color(ERROR))
-                            .wrap()
-                            .selectable(true),
-                    );
+                    crate::text_menu::read_message(ui, format!("{id}_error_text"), error, ERROR);
                 });
         }
         None if run.running() => {
@@ -271,11 +266,7 @@ pub(super) fn preview_box(ui: &mut egui::Ui, id: &str, text: &str, truncated: bo
         .id_salt(format!("{id}_preview"))
         .auto_shrink([false, false])
         .show(ui, |ui| {
-            ui.add(
-                egui::Label::new(RichText::new(text).monospace())
-                    .wrap_mode(TextWrapMode::Wrap)
-                    .selectable(true),
-            );
+            crate::text_menu::read_only(ui, format!("{id}_preview_text"), text, true);
         });
 }
 
@@ -348,6 +339,84 @@ pub(super) fn file_name(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every piece of text in `shapes`, with its colour, the family of its font and where.
+    fn texts(
+        shapes: &[egui::epaint::ClippedShape],
+    ) -> Vec<(String, Color32, egui::FontFamily, egui::Pos2)> {
+        fn walk(shape: &Shape, out: &mut Vec<(String, Color32, egui::FontFamily, egui::Pos2)>) {
+            match shape {
+                Shape::Vec(shapes) => shapes.iter().for_each(|s| walk(s, out)),
+                Shape::Text(text) => out.push((
+                    text.galley.text().to_owned(),
+                    text.galley.job.sections[0].format.color,
+                    text.galley.job.sections[0].format.font_id.family.clone(),
+                    text.galley.rect.translate(text.pos.to_vec2()).center(),
+                )),
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        for clipped in shapes {
+            walk(&clipped.shape, &mut out);
+        }
+        out
+    }
+
+    #[test]
+    fn an_error_is_text_in_red_that_has_the_menu_of_a_text_that_is_only_shown() {
+        let ctx = egui::Context::default();
+        let mut run: Run<()> = Run::default();
+        let message = "expected value at line 1 column 2";
+        run.result = Some(Err(message.to_owned()));
+        let mut time = 0.0;
+        let mut frame = |events: Vec<egui::Event>| {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(400.0, 300.0),
+                )),
+                time: Some(time),
+                events,
+                ..Default::default()
+            };
+            time += 1.0 / 60.0;
+            let mut output = ctx.run_ui(input, |ui| {
+                result_area(ui, "t", &run, "hint", |_, _| {});
+            });
+            output.textures_delta.clear();
+            texts(&output.shapes)
+        };
+        for _ in 0..4 {
+            frame(Vec::new());
+        }
+        let shown = frame(Vec::new());
+        let (_, color, family, at) = shown
+            .iter()
+            .find(|(text, _, _, _)| text == message)
+            .unwrap_or_else(|| panic!("the error is drawn: {shown:?}"))
+            .clone();
+        assert_eq!(color, ERROR);
+        // In the font of the window's other text, as the label it replaced was (a message is
+        // not code: in the monospace font it is wider, and breaks at another word).
+        assert_eq!(family, egui::FontFamily::Proportional);
+
+        for pressed in [true, false] {
+            frame(vec![
+                egui::Event::PointerMoved(at),
+                egui::Event::PointerButton {
+                    pos: at,
+                    button: egui::PointerButton::Secondary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ]);
+        }
+        let menu = frame(Vec::new());
+        let has = |item: &str| menu.iter().any(|(text, _, _, _)| text == item);
+        assert!(has("Copy") && has("Select All"), "{menu:?}");
+        assert!(!has("Cut") && !has("Paste"), "{menu:?}");
+    }
 
     #[test]
     fn the_path_column_is_as_wide_as_its_paths_within_limits() {

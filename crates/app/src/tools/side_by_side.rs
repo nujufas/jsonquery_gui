@@ -40,6 +40,7 @@ use jsonquery_query::diff::{Block, Mark, Row, Side, SideBySide};
 use super::line_edit::{self, Edit, Place};
 use super::widgets::{tint, Tint, ERROR};
 use crate::pane_header;
+use crate::text_menu::{self, Kind};
 
 /// Height of a row: a monospace line and a hair.
 const ROW: f32 = 17.0;
@@ -230,6 +231,9 @@ struct Editor {
     seen_at: Option<usize>,
     /// The frames the field has gone without the focus it asked for.
     tries: u8,
+    /// The press on an item of its menu took the focus: that is not the end of the
+    /// editing, unless the menu closes and the focus is not given back.
+    menu_took_focus: bool,
 }
 
 /// A change to a line, typed, for the page to ask the worker to make.
@@ -443,6 +447,7 @@ impl Viewer {
                     had_focus: false,
                     seen_at: None,
                     tries: 0,
+                    menu_took_focus: false,
                 });
             }
             Err(why) => self.refusal = why.said(),
@@ -786,12 +791,20 @@ impl Viewer {
                             if field.secondary_clicked() {
                                 touched.right_clicked = Some(index);
                             }
+                            // (The field's menu is the text box's; what is typed in is not the
+                            // line of the view, so there is no Move or Copy line in it.)
                             if row.mark != Mark::Same {
-                                field.context_menu(|ui| row_menu(ui, row, &mut touched));
+                                text_menu::attach_with(&field, &editor.text, Kind::Typed, |ui| {
+                                    copy_path_item(ui, row, &mut touched);
+                                });
+                            } else {
+                                text_menu::attach(&field, &editor.text, Kind::Typed);
                             }
                         }
                         let block = block_at(&view.blocks, index);
-                        if row.mark != Mark::Same {
+                        if row.mark == Mark::Same {
+                            response.context_menu(|ui| copy_lines(ui, row));
+                        } else {
                             let response = response.on_hover_ui(|ui| {
                                 let path = row.path.as_deref().unwrap_or_default();
                                 ui.label(if path.is_empty() {
@@ -1244,7 +1257,18 @@ fn edit_line(
         editor.tries = 0;
     }
 
-    let ending = if response.lost_focus() {
+    // The press on an item of the field's menu takes the focus from it, and the menu gives
+    // it back with what it does (Cut, Copy, Paste, Select All). Only if it does not, a
+    // frame after the menu has closed, is the editing over.
+    let menu_open = response.context_menu_opened();
+    let menu_closed_without_focus = editor.menu_took_focus && !menu_open && !response.has_focus();
+    if !menu_open {
+        editor.menu_took_focus = false;
+    }
+    let ending = if response.lost_focus() && menu_open {
+        editor.menu_took_focus = true;
+        None
+    } else if response.lost_focus() || menu_closed_without_focus {
         Some(if ui.input(|i| i.key_pressed(Key::Escape)) {
             Ending::Back
         } else {
@@ -1269,7 +1293,8 @@ fn edit_line(
     (ending, caret_at, out.response.response)
 }
 
-/// The menu of a line that is not the same on both sides: move it, or copy its path.
+/// The menu of a line that is not the same on both sides: move it, copy its path, copy its
+/// text.
 fn row_menu(ui: &mut egui::Ui, row: &Row, touched: &mut Touched) {
     for (label, tip, into) in [
         (
@@ -1289,6 +1314,11 @@ fn row_menu(ui: &mut egui::Ui, row: &Row, touched: &mut Touched) {
         }
     }
     ui.separator();
+    copy_path_item(ui, row, touched);
+    copy_lines(ui, row);
+}
+
+fn copy_path_item(ui: &mut egui::Ui, row: &Row, touched: &mut Touched) {
     if ui
         .button("Copy path")
         .on_hover_text("Put the JSON Pointer of this line on the clipboard")
@@ -1297,6 +1327,32 @@ fn row_menu(ui: &mut egui::Ui, row: &Row, touched: &mut Touched) {
         let path = row.path.as_deref().unwrap_or_default();
         touched.menu = Some(Menu::CopyPath(path.to_owned()));
         ui.close();
+    }
+}
+
+/// Copy the text of the line, as the view shows it: one item when it is the same on both
+/// sides, one for each side that has a line otherwise.
+fn copy_lines(ui: &mut egui::Ui, row: &Row) {
+    let sides = [
+        ("left", row.left.as_deref()),
+        ("right", row.right.as_deref()),
+    ];
+    if row.mark == Mark::Same {
+        if let Some(line) = row.left.as_deref().or(row.right.as_deref()) {
+            if ui.button("Copy line").clicked() {
+                ui.ctx().copy_text(line.to_owned());
+                ui.close();
+            }
+        }
+        return;
+    }
+    for (side, line) in sides {
+        if let Some(line) = line {
+            if ui.button(format!("Copy {side} line")).clicked() {
+                ui.ctx().copy_text(line.to_owned());
+                ui.close();
+            }
+        }
     }
 }
 

@@ -77,6 +77,10 @@ A box has four ways in:
 - **Open document** uses the document that is open in the main window (one
   over the limit below is refused: the box says so).
 
+A box has the right-click menu of a text box: **Cut**, **Copy**, **Paste** and
+**Select All**. (Where a result is shown as text, as the Format and Patch results are,
+the menu has **Copy** and **Select All**: the text can be selected, and not changed.)
+
 A file of up to 1 MB is read into the box, where it can be edited. A bigger one
 is not shown (a text box cannot edit that much); the box says so and the file
 is read when the tool runs. The open document is shared, not copied. **Clear**
@@ -230,14 +234,15 @@ tabs in the command row:
   same"), keeping three lines around each difference. Between the two sides each
   difference has two **arrows**, one over the other, at its first line, that move
   it into the document they point at; a click **picks** a line, so that only the
-  lines picked are moved, and the right-click menu of a line has Move and Copy
-  path (see [Moving a difference](#moving-a-difference)). A **double click** puts a
+  lines picked are moved, and the right-click menu of a line has Move, Copy
+  path and Copy line (see [Moving a difference](#moving-a-difference)). A **double click** puts a
   caret in the line, on either side, to **type over it** (see
   [Typing over a line](#typing-over-a-line)). **⏴** and **⏵** in the command row
   move what is picked, and each column has a **Save…** for its document.
 - **Changes** — a list of what was **Added**, **Removed** or **Changed**, each
   with the JSON Pointer to it, and the value (or both values) at the right.
-  Click a row to copy its path; hover for the whole of a long value.
+  Click a row to copy its path; hover for the whole of a long value. The
+  right-click menu of a row has **Copy path** and **Copy line**.
 - **Patch** — the same difference as the RFC 6902 JSON Patch that turns Left
   into Right, one operation to a line (with a space after each colon and
   comma, so a long one wraps).
@@ -414,7 +419,8 @@ The result is the list of problems. Each row has the JSON Pointer of the value
 that is wrong (`(document)` when it is the whole document) and what is wrong
 with it; hover for the keyword that said so (`required`, `minimum`…) and where it
 is in the schema. The status bar says **Valid**, or how many problems there are
-— a thousand at most are listed. **Copy report** copies the list.
+— a thousand at most are listed. **Copy report** copies the list; the right-click
+menu of a row copies its path, its message, or the whole line.
 
 - **Check formats** holds strings to their `format` (`email`, `date-time`,
   `uuid`…). The specification leaves that to the validator in recent drafts;

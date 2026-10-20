@@ -976,10 +976,38 @@ fn change_row(ui: &mut egui::Ui, change: &Change, paths: &PathColumn) -> bool {
         (None, Some(after)) => format!("{path}\nRight: {after}"),
         (None, None) => path.to_owned(),
     };
-    response
+    let response = response
         .on_hover_text(format!("{hover}\n\nClick to copy the path"))
-        .on_hover_cursor(egui::CursorIcon::PointingHand)
-        .clicked()
+        .on_hover_cursor(egui::CursorIcon::PointingHand);
+    // (a click on the path's item is a click on the row: the caller copies it and says so)
+    let mut path_item = false;
+    response.context_menu(|ui| {
+        if ui.button("Copy path").clicked() {
+            path_item = true;
+            ui.close();
+        }
+        if ui.button("Copy line").clicked() {
+            ui.ctx().copy_text(change_text(change));
+            ui.close();
+        }
+    });
+    response.clicked() || path_item
+}
+
+/// A change as the list shows it, on one line, for the clipboard: what kind, where, and
+/// the value or the two values.
+fn change_text(change: &Change) -> String {
+    let path = if change.path.is_empty() {
+        WHOLE
+    } else {
+        change.path.as_str()
+    };
+    let values = match (&change.before, &change.after) {
+        (Some(before), Some(after)) => format!("  {before} → {after}"),
+        (Some(only), None) | (None, Some(only)) => format!("  {only}"),
+        (None, None) => String::new(),
+    };
+    format!("{} {path}{values}", tag(change.kind))
 }
 
 /// An arrow pointing right, drawn rather than typed: the font has no arrows.

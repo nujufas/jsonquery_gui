@@ -206,7 +206,8 @@ fn list(ui: &mut egui::Ui) {
         for issue in group.main() {
             ui.horizontal_top(|ui| {
                 ui.label("•");
-                prose(ui, issue.text).on_hover_ui(|ui| example_tip(ui, issue));
+                let line = prose(ui, issue.text).on_hover_ui(|ui| example_tip(ui, issue));
+                crate::text_menu::copy_only(&line, issue.text);
             });
         }
     }

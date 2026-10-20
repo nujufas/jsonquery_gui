@@ -303,6 +303,24 @@ scroll height up front so the scrollbar stays accurate without ever
 visiting off-screen rows. The cost of one frame is bounded by *viewport
 height*, not document size.
 
+The right-click menu of a text is `crates/app/src/text_menu.rs`, because egui gives
+a text box its keys (Ctrl+C, Ctrl+X, Ctrl+V, Ctrl+A) and no menu. `attach` gives a
+`TextEdit` Cut, Copy, Paste and Select All (Copy and Select All when the text is only
+shown); `copy_only` gives a label or a row of a list the one item Copy. Three
+things in egui had to be worked around, and a change to the menu has to keep them:
+a press of the secondary button puts the caret where it landed and so throws a
+selection away (`keep_selection` puts the range back when the press was inside it);
+a press on a menu item takes the focus from the box, so Cut and Paste give it back
+and then ask the window system for the same event the key makes
+(`ViewportCommand::RequestCut`, `RequestPaste`: it is the only way for a menu to read
+the clipboard); and a menu opened inside an `egui::Popup` closes that popup, so there
+is none in the ⚠ notice. The text views (Results, Source, the previews of the Tools)
+are read-only `TextEdit`s (`text_menu::read_only`; a tool's error message is one in the
+window's own font, `read_message`), not selectable labels, because a label's selection is
+private to egui and cannot be kept through the press either.
+The line a Diff view is typed over in keeps its field while its menu is open
+(`Editor::menu_took_focus`).
+
 ## 6. Results handling
 
 Query results reuse the exact same virtualized tree widget, populated

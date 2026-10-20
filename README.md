@@ -83,6 +83,12 @@ patches and validates documents too. Built in Rust with
 - **Right-click row menus** — copy a node's path or its JSON to the
   clipboard, search from that scope, save just that node to a file, or
   expand a whole subtree at once.
+- **Right-click Cut, Copy and Paste** — every box you can type in (the
+  query, the Source field, the paste area, the boxes of the Tools, a line
+  of Diff being typed over) has a right-click menu of Cut, Copy, Paste and
+  Select All; the Text views, the Tools' results and the error messages
+  have Copy and Select All, and the lines of the Tools' lists copy
+  themselves, or their path.
 - **Save to file** — the whole source document, the whole result set, or a
   single node, independently.
 - **Load however's convenient** — drag-and-drop (several files at once are

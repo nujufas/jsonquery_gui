@@ -20,6 +20,7 @@ use crate::query_highlight;
 use crate::query_suggest::{apply_suggestion, QuerySuggest};
 use crate::settings::{Settings, Store, DEFAULT_WINDOW, MIN_WINDOW};
 use crate::settings_window::SettingsWindow;
+use crate::text_menu;
 use crate::tools::{self, Place, Tools};
 use crate::tree_view::{RowAction, TreeView};
 use crate::tutorial::{LoadRequest, Tutorial};
@@ -1692,6 +1693,7 @@ impl App {
                 .font(egui::TextStyle::Monospace)
                 .hint_text("URL or local path…"),
         );
+        text_menu::attach(&field, &self.source_input, text_menu::Kind::Typed);
         if field.changed() {
             // The field of the other window (the toolbar's, the Source
             // window's) shows the same text, and is redrawn on its own
@@ -1799,7 +1801,8 @@ impl App {
             }
         });
         if let Some(err) = &self.load_error {
-            ui.colored_label(
+            message(
+                ui,
                 egui::Color32::from_rgb(220, 80, 80),
                 format!("Load error: {err}"),
             );
@@ -1842,6 +1845,7 @@ impl App {
                         .desired_width(320.0)
                         .hint_text("text to find…"),
                 );
+                text_menu::attach(&field, &self.search_input, text_menu::Kind::Typed);
                 // Enter and Escape each take the focus out of a single-line
                 // field, which is how they're told apart from other keys.
                 let enter = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
@@ -1941,7 +1945,7 @@ impl App {
                 ui.label("Searching…");
             });
         } else if let Some(err) = &self.search_error {
-            ui.colored_label(red, format!("Search error: {err}"));
+            message(ui, red, format!("Search error: {err}"));
         } else if cursor.is_some_and(|c| c.hits.is_empty()) {
             ui.colored_label(red, "No matches found.");
         } else if let Some((cursor, pos)) = cursor.and_then(|c| Some((c, c.pos?))) {
@@ -2027,7 +2031,7 @@ impl App {
                     let full_width = ui.available_width();
                     let highlight = ui.painter().add(egui::Shape::Noop);
                     let resp = ui.add(
-                        egui::Label::new(egui::RichText::new(text).monospace())
+                        egui::Label::new(egui::RichText::new(&text).monospace())
                             .sense(egui::Sense::click()),
                     );
                     if list.selected == Some(i) {
@@ -2047,6 +2051,16 @@ impl App {
                     if resp.clicked() {
                         reveal = Some((i, m.target, m.path.clone()));
                     }
+                    resp.context_menu(|ui| {
+                        if ui.button("Copy path").clicked() {
+                            ui.ctx().copy_text(path_string(&m.path));
+                            ui.close();
+                        }
+                        if ui.button("Copy line").clicked() {
+                            ui.ctx().copy_text(text.clone());
+                            ui.close();
+                        }
+                    });
                 }
             });
 
@@ -2106,6 +2120,7 @@ impl App {
                 )
             })
             .inner;
+        text_menu::attach(&resp, &self.paste_text, text_menu::Kind::Typed);
 
         let pasted = resp.has_focus()
             && ui
@@ -2241,6 +2256,7 @@ impl App {
                          or pick one at top right)",
                     )
                     .show(ui);
+                text_menu::attach(&output.response, &self.query_text, text_menu::Kind::Typed);
                 // `TextEdit` scrolls to its cursor the frame it is edited, but
                 // by then the scroll area still has the old, shorter content:
                 // typing grows it a line at a time and gets away with that, a
@@ -2530,14 +2546,16 @@ impl App {
                 }
             }
             if let Some(err) = &self.load_error {
-                ui.colored_label(
+                message(
+                    ui,
                     egui::Color32::from_rgb(220, 80, 80),
                     format!("Load error: {err}"),
                 );
                 ui.separator();
             }
             if let Some(err) = &self.save_error {
-                ui.colored_label(
+                message(
+                    ui,
                     egui::Color32::from_rgb(220, 80, 80),
                     format!("Save error: {err}"),
                 );
@@ -2547,7 +2565,8 @@ impl App {
                 ui.separator();
             }
             if let Some(err) = &self.copy_error {
-                ui.colored_label(
+                message(
+                    ui,
                     egui::Color32::from_rgb(220, 80, 80),
                     format!("Copy error: {err}"),
                 );
@@ -2608,11 +2627,12 @@ impl App {
                 if let Some(last) = &self.last_item_error {
                     msg.push_str(&format!(" (last: {last})"));
                 }
-                ui.colored_label(egui::Color32::from_rgb(210, 150, 40), msg);
+                message(ui, egui::Color32::from_rgb(210, 150, 40), msg);
             }
             if let Some(err) = &self.query_error {
                 ui.separator();
-                ui.colored_label(
+                message(
+                    ui,
                     egui::Color32::from_rgb(220, 80, 80),
                     format!(
                         "Query error: {err}{}",
@@ -2729,11 +2749,7 @@ impl App {
         egui::ScrollArea::both()
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                ui.add(
-                    egui::Label::new(egui::RichText::new(&self.results_text_cache).monospace())
-                        .selectable(true)
-                        .wrap_mode(egui::TextWrapMode::Extend),
-                );
+                text_menu::read_only(ui, "results_text", &self.results_text_cache, false);
             });
     }
 
@@ -2785,6 +2801,7 @@ impl App {
                     )
                 })
                 .inner;
+            text_menu::attach(&resp, &self.source_text_cache, text_menu::Kind::Typed);
             if resp.has_focus()
                 && ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Enter))
             {
@@ -2822,11 +2839,7 @@ impl App {
             egui::ScrollArea::both()
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
-                    ui.add(
-                        egui::Label::new(egui::RichText::new(&self.source_text_cache).monospace())
-                            .selectable(true)
-                            .wrap_mode(egui::TextWrapMode::Extend),
-                    );
+                    text_menu::read_only(ui, "source_text", &self.source_text_cache, false);
                 });
         }
     }
@@ -2869,6 +2882,12 @@ fn select_text_edit_range(ctx: &egui::Context, id: egui::Id, start: usize, end: 
     )));
     state.store(ctx, id);
     ctx.memory_mut(|m| m.request_focus(id));
+}
+
+/// A line of text in a colour (an error, mostly) that a right click copies.
+fn message(ui: &mut egui::Ui, color: egui::Color32, text: String) {
+    let label = ui.colored_label(color, &text);
+    text_menu::copy_only(&label, &text);
 }
 
 /// Small ☀/🌙 button that flips between light and dark theme.
@@ -3071,30 +3090,32 @@ impl InfoWindow {
 
 fn info_window_contents(ui: &mut egui::Ui) {
     ui.add_space(4.0);
-    ui.strong(format!("jsonquery gui v{}", env!("CARGO_PKG_VERSION")));
+    let version = format!("jsonquery gui v{}", env!("CARGO_PKG_VERSION"));
+    text_menu::copy_only(&ui.strong(&version), &version);
     ui.add_space(8.0);
     egui::Grid::new("info_window_grid")
         .num_columns(2)
         .spacing([8.0, 6.0])
         .show(ui, |ui| {
             ui.label("License:");
-            ui.hyperlink_to("MIT", format!("{REPO_URL}/blob/master/LICENSE"));
+            link(ui, "MIT", format!("{REPO_URL}/blob/master/LICENSE"));
             ui.end_row();
 
             ui.label("Source:");
-            ui.hyperlink_to("GitHub", REPO_URL);
+            link(ui, "GitHub", REPO_URL.to_owned());
             ui.end_row();
 
             ui.label("Website:");
-            ui.hyperlink_to(WEBSITE_NAME, WEBSITE_URL);
+            link(ui, WEBSITE_NAME, WEBSITE_URL.to_owned());
             ui.end_row();
 
             ui.label("Issues / contact:");
-            ui.hyperlink_to("Report an issue", format!("{REPO_URL}/issues"));
+            link(ui, "Report an issue", format!("{REPO_URL}/issues"));
             ui.end_row();
 
             ui.label("Privacy:");
-            ui.hyperlink_to(
+            link(
+                ui,
                 "Privacy policy",
                 format!("{REPO_URL}/blob/master/PRIVACY.md"),
             );
@@ -3102,16 +3123,28 @@ fn info_window_contents(ui: &mut egui::Ui) {
         });
     ui.add_space(8.0);
     ui.label("Known limitations:");
-    ui.label(
+    const LIMITATIONS: &str =
         "Drag-and-drop doesn't work on native Wayland (use the Source field, or run \
          under XWayland); a file of 256 MB or more (the size is a setting, under ⚙) is \
          read from disk as you look at it, and a query that needs all of a long list as a \
-         value, and the Tools window (but for Format), don't work on it.",
-    );
-    ui.hyperlink_to(
+         value, and the Tools window (but for Format), don't work on it.";
+    text_menu::copy_only(&ui.label(LIMITATIONS), LIMITATIONS);
+    link(
+        ui,
         "More in the README",
         format!("{REPO_URL}#known-limitations"),
     );
+}
+
+/// A link that opens in the browser, and that a right click copies the address of.
+fn link(ui: &mut egui::Ui, text: &str, url: String) {
+    let response = ui.hyperlink_to(text, &url);
+    response.context_menu(|ui| {
+        if ui.button("Copy link").clicked() {
+            ui.ctx().copy_text(url.clone());
+            ui.close();
+        }
+    });
 }
 
 /// Small "(i)" tag pinned to the bottom-right of the status bar — opens the

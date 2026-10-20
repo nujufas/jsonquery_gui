@@ -12,6 +12,7 @@ mod query_suggest;
 mod scratch_dir;
 mod settings;
 mod settings_window;
+mod text_menu;
 mod tools;
 mod tree_view;
 mod tutorial;

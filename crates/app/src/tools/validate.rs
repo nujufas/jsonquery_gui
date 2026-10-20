@@ -302,12 +302,8 @@ fn report_text(validated: &Validated) -> String {
     let (summary, _) = status(validated);
     let mut text = format!("{summary} ({})\n", report.draft);
     for problem in &report.problems {
-        text.push_str(&format!(
-            "{}: {} [{}]\n",
-            path_or_document(&problem.path),
-            problem.message,
-            problem.keyword
-        ));
+        text.push_str(&problem_text(problem));
+        text.push('\n');
     }
     if report.more {
         text.push_str("…and more\n");
@@ -414,7 +410,7 @@ fn problem_row(
             .selectable(false),
     );
 
-    response
+    let response = response
         .on_hover_text(format!(
             "{}\n\nAt {}\nKeyword: {}\nIn the schema: {}",
             problem.message,
@@ -426,7 +422,34 @@ fn problem_row(
                 &problem.schema_path
             }
         ))
-        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_cursor(egui::CursorIcon::PointingHand);
+    response.context_menu(|ui| {
+        let ctx = ui.ctx().clone();
+        let path = ui.add_enabled(!problem.path.is_empty(), egui::Button::new("Copy path"));
+        if path.clicked() {
+            ctx.copy_text(problem.path.clone());
+            ui.close();
+        }
+        if ui.button("Copy message").clicked() {
+            ctx.copy_text(problem.message.clone());
+            ui.close();
+        }
+        if ui.button("Copy problem").clicked() {
+            ctx.copy_text(problem_text(problem));
+            ui.close();
+        }
+    });
+    response
+}
+
+/// One problem on a line, as the report written for the clipboard has it.
+fn problem_text(problem: &Problem) -> String {
+    format!(
+        "{}: {} [{}]",
+        path_or_document(&problem.path),
+        problem.message,
+        problem.keyword
+    )
 }
 
 #[cfg(test)]
