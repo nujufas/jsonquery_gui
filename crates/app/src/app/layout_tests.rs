@@ -2172,8 +2172,9 @@ fn is_drawn(h: &Harness, text: &str) -> bool {
     h.texts().iter().any(|(t, _)| t == text)
 }
 
-/// Frames until `done` (the worker thread answers in its own time).
-fn wait_for(h: &mut Harness, what: &str, done: impl Fn(&Harness) -> bool) {
+/// Frames until `done`, which may ask the app for what it holds (the worker thread answers
+/// in its own time).
+fn wait_until(h: &mut Harness, what: &str, mut done: impl FnMut(&mut Harness) -> bool) {
     for _ in 0..300 {
         h.frame();
         if done(h) {
@@ -2183,6 +2184,11 @@ fn wait_for(h: &mut Harness, what: &str, done: impl Fn(&Harness) -> bool) {
         std::thread::sleep(Duration::from_millis(10));
     }
     panic!("waited for {what}; drawn: {:?}", h.texts());
+}
+
+/// Frames until `done` (the worker thread answers in its own time).
+fn wait_for(h: &mut Harness, what: &str, done: impl Fn(&Harness) -> bool) {
+    wait_until(h, what, |h| done(h));
 }
 
 #[test]
@@ -3920,25 +3926,19 @@ fn the_caret_goes_where_the_double_click_was() {
     h.double_click(line.min.x + 7.0 * glyph + 1.0, line.center().y);
     h.type_text("1");
     enter(&mut h);
-    wait_for(&mut h, "the new comparison", |h| {
-        is_drawn_containing(h, "Changed line 3")
+    // (What the box holds is what is waited for: "Changed line 3" is on the screen
+    // after each of the two, so it says nothing of the second.)
+    wait_until(&mut h, "the new comparison", |h| {
+        as_json(&h.app.tools.box_text(Tool::Diff, "Left")) == serde_json::json!({"a": 1, "b": 12})
     });
-    assert_eq!(
-        as_json(&h.app.tools.box_text(Tool::Diff, "Left")),
-        serde_json::json!({"a": 1, "b": 12})
-    );
     // Past the end of the line: at the end.
     let line = rect_of(&h, "  \"b\": 12");
     h.double_click(line.max.x + 40.0, line.center().y);
     h.type_text("3");
     enter(&mut h);
-    wait_for(&mut h, "the new comparison", |h| {
-        is_drawn_containing(h, "Changed line 3")
+    wait_until(&mut h, "the new comparison", |h| {
+        as_json(&h.app.tools.box_text(Tool::Diff, "Left")) == serde_json::json!({"a": 1, "b": 123})
     });
-    assert_eq!(
-        as_json(&h.app.tools.box_text(Tool::Diff, "Left")),
-        serde_json::json!({"a": 1, "b": 123})
-    );
 }
 
 #[test]
@@ -7948,8 +7948,10 @@ fn the_row_of_tabs_and_what_it_holds_do_not_creep() {
         .fill(Tool::Diff, "Right", r#"{"a":2,"b":[1,3],"c":true}"#);
     h.settle();
     press(&mut h, "Compare");
-    press(&mut h, "Side by side");
+    // (The tab is pressed when the answer is in: while the job runs, the Compare button is a
+    // spinner and Cancel, and when the answer comes the row of tabs moves under the pointer.)
     wait_for(&mut h, "the comparison", |h| is_drawn(h, "Changes (3)"));
+    press(&mut h, "Side by side");
     let before = (h.panel("toolbar").unwrap(), h.panel("status_bar").unwrap());
     for _ in 0..30 {
         h.frame();
@@ -8077,8 +8079,11 @@ fn alt_and_the_arrows_step_through_the_differences_only_on_the_diff_tab() {
         .fill(Tool::Diff, "Right", r#"{"a":2,"b":[1,3],"c":true}"#);
     h.settle();
     press(&mut h, "Compare");
-    press(&mut h, "Side by side");
+    // (The tab is pressed when the answer is in: while the job runs, the Compare button is a
+    // spinner and Cancel, and when the answer comes the row of tabs moves under the pointer:
+    // the press then landed on Changes now and then.)
     wait_for(&mut h, "the comparison", |h| is_drawn(h, "Changes (3)"));
+    press(&mut h, "Side by side");
 
     // Whether the page took Alt+Down: a key that is taken is gone from the input.
     fn left_over(h: &mut Harness) -> bool {
