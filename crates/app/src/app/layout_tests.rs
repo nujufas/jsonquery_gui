@@ -5815,7 +5815,7 @@ fn the_known_issues_of_a_window_inside_the_main_window_open_without_asking_for_a
     h.app.info_window.open_or_focus(&h.ctx);
     h.settle();
     // The window is a small one, and the header is below what it shows: scroll to it.
-    let title = rect_of(&h, "jsonquery gui v0.5.1");
+    let title = rect_of(&h, &format!("jsonquery gui v{}", env!("CARGO_PKG_VERSION")));
     h.pointer(title.center().x, title.center().y + 60.0);
     h.frame_with(vec![egui::Event::MouseWheel {
         unit: egui::MouseWheelUnit::Point,
