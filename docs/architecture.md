@@ -369,6 +369,7 @@ text on the clipboard.
 | `jmespath` | JMESPath engine. |
 | `jsonschema` | JSON Schema validation for the Tools window's Validate Schema (drafts 4–2020-12), without its HTTP and file features. |
 | `crossbeam-channel` | UI ⇄ worker-thread messaging. |
+| `ring` | The SHA-256 of what the workspace keeps and the random bytes of an item's id (already there, under `ureq`'s TLS). |
 | `rfd` | Native file dialog behind the toolbar's "…" button, alongside OS-level drag-and-drop (handled directly by egui/winit). |
 | `ureq` | Loading a document from a URL. |
 | `anyhow` / `thiserror` | Error handling — typed errors at API boundaries, contextual errors in the app layer. |
@@ -446,6 +447,73 @@ things are made from it:
   the first thousand results of one that never finishes. When an upgrade or a fix makes
   a program behave like jq, its test fails and names the entry to take out of
   `list.rs`.
+
+## 11. Workspace
+
+The user's saved queries, schemas, patches and documents are a folder (`workspace.rs`,
+and `workspace/` beside it in the app crate; the guide for users is
+[Workspace](workspace.md)). It is a real folder, so that other programs can use what is
+in it, and so everything that is done to it is written to be safe to do to a folder
+that is not only the app's:
+
+- **`workspace/names.rs`** — which file is which kind of item (`.jq`, `.schema.json`,
+  `.patch.json`… `ItemKind`), the sample that goes with it (`<name>.sample.json`), and
+  the names a file system and a person may use (`check_name`, `check_item_name`: the
+  characters, the length, the names Windows keeps, and a round trip so that a name is
+  read back as the same item).
+- **`workspace/files.rs`** — `write_atomic` (a file is written beside and renamed into
+  place), relative paths (`/` between the parts, on every system), and the guard against
+  going through a link (`passes_through_a_link`, `is_inside`).
+- **`workspace/ids.rs`** — `sha256_hex` / `sha256_file` and `RandomIds` (UUID v4 from the
+  system's random bytes), both from `ring`; `IdSource` is a trait so that a test can have
+  ids it can predict.
+- **`workspace/index.rs`** — `.jsonquery/index.json`: the id, SHA-256, size and time of
+  every item and the SHA-256 of its sample, as it is documented in
+  [Workspace](workspace.md#the-id-and-the-sha-256-of-each-item); keys that a later version
+  wrote are kept, an unusable file is set aside, a newer one is never written over.
+- **`workspace/store.rs`** — `Workspace`: the folder read into a tree of `Folder`s and
+  `Item`s (`scan`: what is new gets an id, what was changed keeps it with a new SHA-256,
+  what was moved is found again by its SHA-256, what is gone is dropped), and `save`,
+  `save_staged`, `create_folder`, `rename`, `move_to`, `duplicate`, `delete`. Every one
+  reads the folder again first, and writes the index after.
+- **`workspace/transfer.rs`** — `export` (to a folder that is new or empty, with the index
+  so that ids and SHA-256s travel) and `import` (into a new folder or among what is there;
+  the same SHA-256 is not copied again; an id in use is replaced).
+
+The pane (`workspace_pane.rs`, with `tree.rs`, `drag.rs`, `forms.rs` and `icons.rs` under it) is
+drawn at the left of the main window by `App::workspace_panel`, before the rows it
+stands beside (the status bar is drawn before it, so that it stops above it); it asks
+the app for what it cannot do itself through `Action`s, as the Tools do with their
+`Request`s: put a query in the box, put a file in the Tools' schema or patch box, open
+a file as the Source, write the Source to a file (the sample of an item: the worker
+writes it, to a file in the app's folder in the workspace, which is moved into place
+when `Event::Saved` says it is written), keep another folder, show more or less of
+the pane. Where it is not shown (`settings::WorkspaceView::Hidden`, the way the app
+starts) nothing of it is drawn or read, and the window is as it was.
+
+A row of the list senses clicks and drags (`tree.rs`): the one that is dragged is the
+payload of egui's drag and drop (`Carried`, in `drag.rs`), and what is under the pointer
+is worked out once a frame from the rectangles of the rows drawn (`Spot`), not from
+each row's own response, because egui says that a widget under another still contains
+the pointer. `drag.rs` has what can be said without a window — what a drop would do
+(`verdict`), the label, when a shut folder opens (`dwell`) and how fast the list scrolls
+(`edge_scroll`) — and the few pictures; the move itself is `Workspace::move_to`, which
+the menu's *Move to* uses too. The pictures (`icons.rs`) are drawn with shapes on whole
+pixels: the folders of the list as one solid body with a tab, the button of the status bar
+(and the strip of a folded pane) as a window with its left column filled, the button
+that makes a folder as a folder with a plus left out of its body (rectangles around the
+gap, so that what shows in it is the button). A message under the list asks for the
+window to be drawn again every frame it is shown, because egui forgets, at the next frame,
+what an earlier frame asked for, and a window nobody touches is not drawn at all.
+
+The button that shows the pane is the first thing in the status bar, before the status
+text (`App::status_bar`). A query is also put in the box from outside the pane: a query
+that is carried out of the list and let go over the query pane (`Env::query_area`, the
+rectangle the app drew it in last frame) is opened as a double click opens it (`tree.rs`,
+`carry`), and a file dropped on a window (`App::handle_drag_and_drop`) whose name ends in
+a query's (`workspace::query_language_of`) goes in the box through the same
+`App::put_query`. The windows are not told where in them a file is let go (winit 0.30
+has no position for a drop), so which pane a dropped file is for is the file's to say.
 
 ## Scaling beyond in-memory
 

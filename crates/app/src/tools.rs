@@ -152,6 +152,9 @@ impl Tool {
     }
 }
 
+/// What the main window paints an error in.
+pub const ERROR_COLOR: egui::Color32 = ERROR;
+
 /// The ⚓ on the button that docks the Tools in the main window.
 pub const DOCK_ICON: &str = "⚓";
 
@@ -321,6 +324,51 @@ impl Tools {
     pub fn open_on(&mut self, ctx: &egui::Context, tool: Tool) {
         self.tool = tool;
         self.open_or_focus(ctx);
+    }
+
+    /// The tool whose page is the one that is in front (or that opens), and so what
+    /// the pane of the workspace is for.
+    pub fn current_tool(&self) -> Tool {
+        self.tool
+    }
+
+    /// Show `tool`'s page: its window, opened or brought to the front, or, docked,
+    /// its tab.
+    pub fn show_tool(&mut self, ctx: &egui::Context, tool: Tool) {
+        self.tool = tool;
+        self.open_or_focus(ctx);
+    }
+
+    /// The text in the box called `title` on `tool`'s page, if it is text that a
+    /// save would write (not a file that was not read into the box, nor the
+    /// document that is open in the main window).
+    pub fn text_in_box(&self, tool: Tool, title: &str) -> Option<Arc<str>> {
+        let operand = match tool {
+            Tool::Validate => self.validate.operand_ref(title),
+            Tool::Patch => self.patch.operand_ref(title),
+            Tool::Merge | Tool::Format | Tool::Diff => None,
+        }?;
+        operand.text_to_save()
+    }
+
+    /// Put the file `path`, from the workspace, in the page of `tool` that takes
+    /// one (the schema of Validate, the patch of Patch), and, if there is one,
+    /// the file `sample` in its Document box, show the page — and, with a sample,
+    /// run it: what is asked of the app is given.
+    pub fn use_workspace_files(
+        &mut self,
+        ctx: &egui::Context,
+        tool: Tool,
+        path: &Path,
+        sample: Option<&Path>,
+    ) -> Option<Request> {
+        let request = match tool {
+            Tool::Validate => self.validate.use_files(path, sample),
+            Tool::Patch => self.patch.use_files(path, sample),
+            Tool::Merge | Tool::Format | Tool::Diff => None,
+        };
+        self.show_tool(ctx, tool);
+        request
     }
 
     /// Put `text` in the box called `title` on `tool`'s page.

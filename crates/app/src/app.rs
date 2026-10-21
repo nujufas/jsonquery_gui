@@ -18,13 +18,14 @@ use crate::dock::{Central, Dock, Pane};
 use crate::pane_header;
 use crate::query_highlight;
 use crate::query_suggest::{apply_suggestion, QuerySuggest};
-use crate::settings::{Settings, Store, DEFAULT_WINDOW, MIN_WINDOW};
+use crate::settings::{Settings, Store, WorkspaceView, DEFAULT_WINDOW, MIN_WINDOW};
 use crate::settings_window::SettingsWindow;
 use crate::text_menu;
 use crate::tools::{self, Place, Tools};
 use crate::tree_view::{RowAction, TreeView};
 use crate::tutorial::{LoadRequest, Tutorial};
 use crate::worker::{self, Command, CopyTarget, Event, SearchRoot};
+use crate::workspace_pane::{self, WorkspacePane};
 use crate::x11_alert::X11Alert;
 
 mod issues_view;
@@ -110,6 +111,31 @@ const MERGED_LABEL_EXTRA_WIDTH: f32 = 60.0;
 /// Extra width reserved for the "dock all" button, which is there only while a
 /// pane is in a window of its own.
 const DOCK_ALL_BUTTON_WIDTH: f32 = 30.0;
+/// What the Query row keeps free for the engine picker and the pop-out button, which
+/// the workspace's button and where the query came from may not take.
+const QUERY_ROW_ENGINE_RESERVE: f32 = 340.0;
+
+/// What the workspace pane is lent for a frame, from the app's own fields: a macro,
+/// and not a method, so that the pane can be borrowed mutably beside it.
+macro_rules! workspace_env {
+    ($app:expr) => {
+        workspace_pane::Env {
+            query_area: $app.seen_query_rect,
+            query_text: &$app.query_text,
+            engine: $app
+                .query_engine
+                .unwrap_or_else(|| jsonquery_query::Kind::detect(&$app.query_text)),
+            doc: $app.doc.as_ref(),
+            sample_limit: $app.settings.limits.tools(),
+            front: if $app.tools.page_in_front() {
+                workspace_pane::Front::Tool($app.tools.current_tool())
+            } else {
+                workspace_pane::Front::Query
+            },
+            tools: &$app.tools,
+        }
+    };
+}
 
 pub struct App {
     cmd_tx: Sender<Command>,
@@ -162,6 +188,11 @@ pub struct App {
     tutorial: Tutorial,
     /// The Tools: a second native window, or tabs of the main window.
     tools: Tools,
+    /// The workspace: the user's saved queries, schemas and samples, in a pane at the
+    /// left of the window (`workspace_pane.rs`).
+    workspace_pane: WorkspacePane,
+    /// How wide the workspace pane was drawn last (none while it is not open).
+    seen_workspace_width: Option<f32>,
     /// The (i) info window (also a second native window) — license, source,
     /// issues/contact, privacy and known limitations.
     info_window: InfoWindow,
@@ -184,6 +215,9 @@ pub struct App {
     /// were drawn last (none while the pane is out in a window of its own).
     seen_query_height: Option<f32>,
     seen_source_share: Option<f32>,
+    /// Where the query panel was drawn last, for the workspace pane: a query carried
+    /// from its list and put down there is opened. None while it is not in the window.
+    seen_query_rect: Option<egui::Rect>,
     /// A window opened at a saved size was checked against its screen.
     window_checked: bool,
     /// What the window and its panes measured when last seen, and since when (in
@@ -299,6 +333,7 @@ struct Layout {
     window: [f32; 2],
     query_height: Option<f32>,
     source_share: Option<f32>,
+    workspace_width: Option<f32>,
 }
 
 /// What a "Search…" run looked for — "Find" and "Find All" re-search whenever
@@ -470,6 +505,11 @@ impl App {
             Place::Window
         });
 
+        let workspace_pane = WorkspacePane::new(
+            store.default_workspace_folder(),
+            settings.workspace_folder.clone(),
+        );
+
         Self {
             cmd_tx,
             evt_rx,
@@ -496,12 +536,15 @@ impl App {
             query_suggest,
             tutorial: Tutorial::default(),
             tools,
+            workspace_pane,
+            seen_workspace_width: None,
             info_window: InfoWindow::default(),
             settings_window: SettingsWindow::default(),
             interface_kept: settings.interface,
             interface_pending: None,
             seen_query_height: None,
             seen_source_share: None,
+            seen_query_rect: None,
             window_checked: false,
             layout_seen: None,
             maximize_asked: false,
@@ -632,11 +675,19 @@ impl App {
                     self.run_after_load = false;
                 }
                 Event::Saved(path) => {
+                    // The sample of an item that is being saved in the workspace is
+                    // not a file that the user saved: it is not said to be.
+                    if self.workspace_pane.sample_written(ctx, &path) {
+                        continue;
+                    }
                     self.save_error = None;
                     self.tools.saved(&path);
                     self.last_saved = Some(path);
                 }
                 Event::SaveError(e) => {
+                    if self.workspace_pane.sample_failed(ctx, &e) {
+                        continue;
+                    }
                     self.last_saved = None;
                     self.tools.save_failed(&e);
                     self.save_error = Some(e);
@@ -1159,6 +1210,12 @@ impl App {
         if self.viewport_of(self.focused_panel) == viewport {
             self.clipboard_warning_dialog(ctx);
         }
+        // The workspace's windows are the main window's.
+        if viewport == egui::ViewportId::ROOT {
+            let env = workspace_env!(self);
+            self.workspace_pane.windows(ctx, &env);
+            self.apply_workspace_actions(ctx);
+        }
     }
 
     /// Open the "Search…" dialog for `target`'s tree with the Find field
@@ -1585,12 +1642,51 @@ impl App {
             // One file is opened; several are not something to open, so they
             // go to the Tools window to be merged.
             match <[PathBuf; 1]>::try_from(dropped) {
-                Ok([path]) => self.open_file(path),
+                Ok([path]) => self.take_dropped_file(path),
                 Err(several) if several.len() > 1 => self.tools.add_files(ui.ctx(), several),
                 Err(_) => {}
             }
         }
         hovering
+    }
+
+    /// A file that was dropped on a window: a query — what its name ends in says so
+    /// (`.jq`, `.jsonpath`, `.jmespath`, `.jsonptr`) — goes in the query box, in its
+    /// language, and any other file is opened as the Source.
+    ///
+    /// The window is not told where in it a file was let go, so which pane the file is for
+    /// cannot be the pointer's to say: the file says.
+    fn take_dropped_file(&mut self, path: PathBuf) {
+        match query_language_of_path(&path) {
+            Some(engine) => self.use_query_file(path, engine),
+            None => self.open_file(path),
+        }
+    }
+
+    /// Put the text of the file `path` in the query box, in `engine`'s language. A file
+    /// that cannot be read, or is too big to be a query, is said in the status bar, and
+    /// the box is left as it is; a file that is used takes away what was said of the last
+    /// one, as a file that is opened does.
+    fn use_query_file(&mut self, path: PathBuf, engine: jsonquery_query::Kind) {
+        match crate::workspace::read_text(&path, workspace_pane::QUERY_LIMIT) {
+            Ok(text) => {
+                self.load_error = None;
+                self.put_query(engine, text.clone());
+                self.workspace_pane.note_dropped(&path, text);
+            }
+            Err(error) => self.load_error = Some(error),
+        }
+    }
+
+    /// Put `text` in the query box, in `engine`'s language, and show the box: what a
+    /// query that is opened from the workspace, or dropped on the window, comes to.
+    fn put_query(&mut self, engine: jsonquery_query::Kind, text: String) {
+        // What it opens is for the main window's own tab to show.
+        self.tools.show_query();
+        self.query_engine = Some(engine);
+        self.query_text = text;
+        self.query_follow_cursor = true;
+        self.query_suggest.close();
     }
 
     /// One row: a source field that takes a typed or pasted URL or local
@@ -2086,9 +2182,14 @@ impl App {
     /// no document is loaded: paste, and it loads immediately — no button.
     fn paste_area(&mut self, ui: &mut egui::Ui, hovering_drop: bool) {
         if hovering_drop {
+            let what = if query_file_hovered(ui.ctx()) {
+                "Drop to use as the query"
+            } else {
+                "Drop to open"
+            };
             ui.vertical_centered(|ui| {
                 ui.add_space(40.0);
-                ui.heading("Drop to open");
+                ui.heading(what);
             });
             return;
         }
@@ -2151,6 +2252,13 @@ impl App {
                 if clicked && self.doc.is_some() {
                     self.run_query();
                 }
+            }
+
+            // With the workspace shown: the button that saves the query in it, and
+            // where the query came from.
+            if self.settings.interface.workspace != WorkspaceView::Hidden {
+                let room = ui.available_width() - QUERY_ROW_ENGINE_RESERVE;
+                self.workspace_pane.query_row(ui, &self.query_text, room);
             }
 
             // Engine picker, pinned to the query box's top right, just left
@@ -2283,7 +2391,10 @@ impl App {
         {
             // What `TextEdit` paints for its own frame (hover/focus included).
             let visuals = ui.style().interact(&output.response);
-            let stroke = if output.response.has_focus() {
+            // A query file that is dragged over the window would land here.
+            let stroke = if query_file_hovered(ui.ctx()) {
+                egui::Stroke::new(1.5, ui.visuals().hyperlink_color)
+            } else if output.response.has_focus() {
                 ui.visuals().selection.stroke
             } else {
                 visuals.bg_stroke
@@ -2475,6 +2586,10 @@ impl App {
         // second closure's separate `&mut self.info_window` borrow — taken
         // out for the duration and put back afterwards.
         //
+        // The left side begins with the button that shows or hides the workspace
+        // pane (which is at the left of the window, over it), and has the status
+        // text after it.
+        //
         // The right side is laid out right to left: the (i) first, so that it
         // stays in the corner, then the 🌐 that opens the website, and the ⚙ that
         // opens the Settings, where they are whether the Tools are docked or not.
@@ -2489,9 +2604,11 @@ impl App {
         let page = self.tools.page_in_front();
         let docked = self.tools.is_docked();
         let mut undock = false;
+        let mut workspace_view = self.settings.interface.workspace;
         egui::Sides::new().shrink_right().show(
             ui,
             |ui| {
+                workspace_button(ui, &mut workspace_view);
                 if page {
                     self.tools.status_bar(ui);
                 } else {
@@ -2511,6 +2628,7 @@ impl App {
         self.info_window = info_window;
         self.settings_window = settings_window;
         self.x11_alert = x11_alert;
+        self.settings.interface.workspace = workspace_view;
         if undock {
             self.tools.request_place(Place::Window);
         }
@@ -2884,6 +3002,26 @@ fn select_text_edit_range(ctx: &egui::Context, id: egui::Id, start: usize, end: 
     ctx.memory_mut(|m| m.request_focus(id));
 }
 
+/// The language of the query that the file at `path` is, if what its name ends in says it
+/// is one.
+fn query_language_of_path(path: &std::path::Path) -> Option<jsonquery_query::Kind> {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .and_then(crate::workspace::query_language_of)
+}
+
+/// Whether what is dragged over the window is one file that is a query, which dropped, goes
+/// in the query box (`take_dropped_file`).
+fn query_file_hovered(ctx: &egui::Context) -> bool {
+    ctx.input(|i| match i.raw.hovered_files.as_slice() {
+        [file] => file
+            .path
+            .as_deref()
+            .is_some_and(|path| query_language_of_path(path).is_some()),
+        _ => false,
+    })
+}
+
 /// A line of text in a colour (an error, mostly) that a right click copies.
 fn message(ui: &mut egui::Ui, color: egui::Color32, text: String) {
     let label = ui.colored_label(color, &text);
@@ -2957,6 +3095,48 @@ fn website_button(ui: &mut egui::Ui) {
     if response.clicked() {
         ui.ctx().open_url(egui::OpenUrl::new_tab(WEBSITE_URL));
     }
+}
+
+/// Small button at the left end of the status bar, under the pane it is for — shows the
+/// workspace pane, or hides it again.
+fn workspace_button(ui: &mut egui::Ui, view: &mut WorkspaceView) {
+    let shown = *view != WorkspaceView::Hidden;
+    let tip = if shown {
+        "Workspace — your saved queries, schemas and samples\nClick to hide it."
+    } else {
+        "Workspace — your saved queries, schemas and samples\nClick to show it at the left of the window."
+    };
+    if workspace_pane::status_button(ui, shown, tip) {
+        *view = if shown {
+            WorkspaceView::Hidden
+        } else {
+            WorkspaceView::Open
+        };
+    }
+}
+
+/// Show `path` in the system's file manager.
+fn reveal_in_file_manager(path: &std::path::Path) {
+    // (The tests, which click everything, must not start a program.)
+    #[cfg(not(test))]
+    {
+        let folder = if path.is_dir() {
+            path.to_path_buf()
+        } else {
+            path.parent()
+                .map_or_else(|| path.to_path_buf(), std::path::Path::to_path_buf)
+        };
+        let program = if cfg!(target_os = "windows") {
+            "explorer"
+        } else if cfg!(target_os = "macos") {
+            "open"
+        } else {
+            "xdg-open"
+        };
+        let _ = std::process::Command::new(program).arg(folder).spawn();
+    }
+    #[cfg(test)]
+    let _ = path;
 }
 
 /// Small ⚙ button beside the 🌐 — opens the Settings window (or brings it to
@@ -3212,14 +3392,20 @@ impl App {
 
         // With the Tools docked, the top row is the row of tabs, and the source
         // field is the first row of the Json Query tab, under it.
+        //
+        // The status bar is drawn before the workspace pane, which stops above it,
+        // and the pane before the rows it stands beside (the toolbar, unless that
+        // is the row of tabs): where the pane is not shown, the order changes
+        // nothing.
         let docked = self.tools.is_docked();
-        egui::Panel::top("toolbar").show(ui, |ui| {
-            if docked {
-                self.tab_strip(ui);
-            } else {
-                self.toolbar(ui);
-            }
-        });
+        if docked {
+            egui::Panel::top("toolbar").show(ui, |ui| self.tab_strip(ui));
+        }
+        egui::Panel::bottom("status_bar").show(ui, |ui| self.status_bar(ui));
+        self.workspace_panel(ui);
+        if !docked {
+            egui::Panel::top("toolbar").show(ui, |ui| self.toolbar(ui));
+        }
         // (A tab that was clicked just now is in front already.)
         let page = self.tools.page_in_front();
         if docked && !page {
@@ -3238,8 +3424,10 @@ impl App {
                 .show(ui, |ui| self.query_pane(ui));
             self.dock.note_docked(Pane::Query, query.response.rect);
             self.seen_query_height = Some(query.response.rect.height());
+            self.seen_query_rect = Some(query.response.rect);
+        } else {
+            self.seen_query_rect = None;
         }
-        egui::Panel::bottom("status_bar").show(ui, |ui| self.status_bar(ui));
         if page {
             // The page of a tool takes all the room there is.
             if let Some(request) = self.tools.docked_page(ui, self.doc.as_ref()) {
@@ -3313,6 +3501,97 @@ impl App {
         }
     }
 
+    /// The workspace pane, at the left of what the window holds below the row of
+    /// tabs: the pane itself, or, folded (or in a window too narrow for it), the
+    /// strip that opens it. Not there at all while it is hidden.
+    fn workspace_panel(&mut self, ui: &mut egui::Ui) {
+        let view = self.settings.interface.workspace;
+        if view == WorkspaceView::Hidden {
+            self.seen_workspace_width = None;
+            return;
+        }
+        let ctx = ui.ctx().clone();
+        let window_width = ctx.viewport_rect().width();
+        let room = window_width >= workspace_pane::MIN_WINDOW_WIDTH;
+        let env = workspace_env!(self);
+        if view == WorkspaceView::Open && room {
+            let width = self
+                .settings
+                .interface
+                .workspace_width
+                .unwrap_or(workspace_pane::DEFAULT_WIDTH);
+            let widest = (window_width * 0.5).max(workspace_pane::MIN_WIDTH);
+            let frame = egui::Frame::side_top_panel(ui.style()).inner_margin(egui::Margin::same(8));
+            let panel = egui::Panel::left("workspace_pane")
+                .resizable(true)
+                .default_size(width)
+                .size_range(workspace_pane::MIN_WIDTH..=widest)
+                .frame(frame)
+                .show(ui, |ui| self.workspace_pane.pane(ui, &env));
+            self.seen_workspace_width = Some(panel.response.rect.width());
+        } else {
+            self.seen_workspace_width = None;
+            // (A margin as small as the strip allows: the button and the folder are 24
+            // points wide, and what does not fit is cut off by the edge of the strip.)
+            let frame = egui::Frame::side_top_panel(ui.style()).inner_margin(egui::Margin::same(1));
+            egui::Panel::left("workspace_rail")
+                .resizable(false)
+                .exact_size(workspace_pane::RAIL_WIDTH)
+                .frame(frame)
+                .show(ui, |ui| self.workspace_pane.rail(ui, room));
+        }
+        self.apply_workspace_actions(&ctx);
+    }
+
+    /// Do what the workspace pane asked for.
+    fn apply_workspace_actions(&mut self, ctx: &egui::Context) {
+        for action in self.workspace_pane.take_actions() {
+            match action {
+                workspace_pane::Action::OpenQuery {
+                    id,
+                    engine,
+                    text,
+                    sample,
+                } => {
+                    self.put_query(engine, text.clone());
+                    self.workspace_pane.note_opened(id, text);
+                    if let Some(sample) = sample {
+                        self.run_after_load = true;
+                        self.open_file(sample);
+                    }
+                }
+                workspace_pane::Action::UseFiles { tool, path, sample } => {
+                    if let Some(request) =
+                        self.tools
+                            .use_workspace_files(ctx, tool, &path, sample.as_deref())
+                    {
+                        self.apply_tools_request(ctx, request);
+                    }
+                }
+                workspace_pane::Action::OpenDocument(path) => {
+                    self.tools.show_query();
+                    self.open_file(path);
+                }
+                workspace_pane::Action::WriteDocument { doc, to } => {
+                    let _ = self.cmd_tx.send(Command::SaveFile {
+                        doc,
+                        node_path: None,
+                        path: to,
+                    });
+                }
+                workspace_pane::Action::SetFolder(folder) => {
+                    self.settings.workspace_folder.clone_from(&folder);
+                    self.save_settings();
+                    self.workspace_pane.use_folder(folder);
+                }
+                workspace_pane::Action::SetView(view) => {
+                    self.settings.interface.workspace = view;
+                }
+                workspace_pane::Action::Reveal(path) => reveal_in_file_manager(&path),
+            }
+        }
+    }
+
     /// Move the Tools to the other place if they asked to be, now that no frame is
     /// being drawn: from their window into the main window, or out of it.
     /// Whichever is to draw them next is told to. True when they moved.
@@ -3376,6 +3655,7 @@ impl App {
                 source_share: self
                     .seen_source_share
                     .map(|s| (s * 1000.0).round() / 1000.0),
+                workspace_width: self.seen_workspace_width.map(f32::round),
             };
             let since = match self.layout_seen {
                 Some((seen, since)) if seen == sample => since,
@@ -3395,6 +3675,10 @@ impl App {
             if let Some(share) = sample.source_share {
                 let usual = (share - 0.5).abs() < 0.005;
                 proposed.source_share = (!usual).then_some(share);
+            }
+            if let Some(width) = sample.workspace_width {
+                let usual = (width - workspace_pane::DEFAULT_WIDTH).abs() < 1.0;
+                proposed.workspace_width = (!usual).then_some(width);
             }
             // Only a layout that is not the one that is kept has to hold still.
             if proposed != now {

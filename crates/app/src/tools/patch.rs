@@ -54,6 +54,24 @@ impl Patch {
             .find(|o| o.title() == title)
     }
 
+    /// The box called `title`, to read.
+    pub(super) fn operand_ref(&self, title: &str) -> Option<&Operand> {
+        [&self.document, &self.patch]
+            .into_iter()
+            .find(|o| o.title() == title)
+    }
+
+    /// The patch in the file `patch`, from the workspace; and, if there is a file
+    /// `document` too, the document to patch, and the patch applied.
+    pub(super) fn use_files(&mut self, patch: &Path, document: Option<&Path>) -> Option<Request> {
+        self.patch.load_file(patch);
+        self.run.clear();
+        let document = document?;
+        self.document.load_file(document);
+        self.run.clear();
+        self.start()
+    }
+
     /// The answer to a [`Request::Job`] for this page.
     pub(super) fn done(&mut self, gen: u64, result: Result<Patched, String>) {
         self.run.finish(gen, result);
@@ -97,6 +115,24 @@ impl Patch {
                 request = self.start();
             }
             ui.add_enabled_ui(!busy, |ui| self.kind_ui(ui));
+            // The patches of the workspace: the pane at the left of the main window.
+            ui.separator();
+            let can_save = !self.patch.is_empty() && self.patch.can_save();
+            if ui
+                .add_enabled(can_save, egui::Button::new("Save patch…"))
+                .on_hover_text("Keep the patch in the workspace")
+                .on_disabled_hover_text("Nothing to keep: the Patch box has no text in it")
+                .clicked()
+            {
+                crate::workspace_pane::wish(ui.ctx(), crate::workspace_pane::Wish::SavePatch);
+            }
+            if ui
+                .button("Saved patches…")
+                .on_hover_text("Pick a patch from the workspace")
+                .clicked()
+            {
+                crate::workspace_pane::wish(ui.ctx(), crate::workspace_pane::Wish::PickPatch);
+            }
         });
         request
     }

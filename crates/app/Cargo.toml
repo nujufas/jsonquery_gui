@@ -16,6 +16,9 @@ egui = "0.36.1"
 egui_extras = "0.36.1"
 jsonquery-core = { path = "../core" }
 jsonquery-query = { path = "../query" }
+# SHA-256 of what the workspace keeps, and the random bytes of an item's id: the
+# crate that the TLS stack of `ureq` is already built on.
+ring = "0.17.14"
 rfd = "0.17.2"
 serde_json = { version = "1.0.151", features = ["arbitrary_precision", "preserve_order"] }
 thiserror = "2.0.20"

@@ -141,7 +141,7 @@ impl SettingsWindow {
     /// box and is a limit, though the box has not lost the focus, is taken: the
     /// settings it makes are given, if they differ from `current`.
     pub fn close(&mut self, current: &Settings) -> Option<Settings> {
-        let mut next = *current;
+        let mut next = current.clone();
         for (limit, field) in Limit::ALL.into_iter().zip(self.fields.iter_mut()) {
             if field.edited {
                 if let Ok(bytes) = parse_size(&field.text).and_then(check_range) {
@@ -207,14 +207,14 @@ impl SettingsWindow {
             changed = self.window_frame(ui, current, store);
         });
         if close {
-            let base = changed.unwrap_or(*current);
+            let base = changed.clone().unwrap_or_else(|| current.clone());
             changed = self.close(&base).or(changed);
         }
         changed
     }
 
     fn contents(&mut self, ui: &mut egui::Ui, current: &Settings) -> Option<Settings> {
-        let mut next = *current;
+        let mut next = current.clone();
         let any_edited = self.fields.iter().any(|f| f.edited);
         // (No least height to scroll in: `visible`, below, is what there is room for.)
         let shown = egui::ScrollArea::vertical()

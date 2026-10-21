@@ -44,6 +44,18 @@ patches and validates documents too. Built in Rust with
   is shown in action under [Tools](#tools) below. They open in a window of their
   own, or **docked** in the main window — the **⚓** button in their row of tabs gives
   the main window a row of tabs: **Json Query** itself, then the five tools.
+- **Workspace** — the button at the left end of the status bar shows a
+  pane at the left of the window that keeps your own **queries, schemas, patches and
+  documents**, each with an optional **sample**, in folders you make. **Open** puts a
+  query in the query box, a schema in Validate Schema and a patch in Patch JSON;
+  **Open with sample** opens its sample as well and runs it. **💾** (and **Save…** beside
+  Run) saves what is in the box, with the Source as its sample if you want. It is a
+  plain folder (`~/.jsonquery/workspace`, or one you choose) of ordinary files, so an
+  editor, a file manager and `git` work on it; **drag** a row onto a folder to move it
+  there, or a query onto the query box to open it; **Export** and **Import** move it
+  between computers, and each item keeps an id and a SHA-256, not shown, for what
+  comes later. Until you show it the window is as it always was. See
+  [docs/workspace.md](docs/workspace.md).
 - **Streamed, cancellable queries** — results appear as jq produces them, so
   `first(...)`/`limit(...)` genuinely stop early; starting a new query aborts
   whatever was still running.
@@ -92,7 +104,8 @@ patches and validates documents too. Built in Rust with
 - **Save to file** — the whole source document, the whole result set, or a
   single node, independently.
 - **Load however's convenient** — drag-and-drop (several files at once are
-  offered to **Merge JSON**), a **Source** field that takes a URL or a local
+  offered to **Merge JSON**; a query file — `.jq`, `.jsonpath`, `.jmespath` or
+  `.jsonptr` — goes in the query box instead), a **Source** field that takes a URL or a local
   path (type it or paste it, or browse with **…**), or pasting JSON straight
   into the text area.
 - **Resizable query box that scrolls** — drag the query panel's bottom edge to
@@ -117,8 +130,9 @@ patches and validates documents too. Built in Rust with
   download or a copy may be, how much a query on a huge file may hold. Hover a
   name for what it does and its default, which is what the app has always used.
   The app also starts as you left it: the theme, whether autocomplete is on, the
-  size of the window (maximized or not) and of its panes, and whether the Tools
-  are docked. All of it is in one small file, `~/.jsonquery/settings.json`. See
+  size of the window (maximized or not) and of its panes, whether the Tools
+  are docked, and how the workspace pane is shown. All of it is in one small file,
+  `~/.jsonquery/settings.json`. See
   [docs/settings.md](docs/settings.md).
 - **On the web** — the 🌐 in the status bar, between the ⓘ and the ⚙, opens
   [jsonquery.dev](https://jsonquery.dev) in your web browser: this app's query

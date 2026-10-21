@@ -83,8 +83,15 @@ The app starts as you left it:
   with that row of tabs, on the Json Query tab. The size and place of the Tools'
   *window* are not kept: window managers decide those.
 
-Nothing else is: not the files you opened, not your queries, not the pane layout
-of a window that was popped out, not what the Tools hold. (See the
+- **the workspace pane**: hidden, which is how it starts, open at the left of the window,
+  or folded to a strip, and how wide it was dragged to (the width it starts with is
+  256 points); and the **folder** you chose for your workspace, if you chose one (it
+  starts in the folder `workspace` beside this file). Only the path is kept here, and
+  nothing of what is in the workspace: see [Workspace](workspace.md).
+
+Nothing else is: not the files you opened, not what is in the query box (a query is
+kept when you save it in the workspace, and not otherwise), not the pane layout of a
+window that was popped out, not what the Tools hold. (See the
 [privacy policy](../PRIVACY.md).)
 
 ## The file
@@ -116,7 +123,8 @@ reaches everyone who never touched it:
   "autocomplete": true,
   "tools": "docked",
   "window": { "width": 1400.0, "height": 900.0, "maximized": true },
-  "panes": { "query_height": 140.0, "source_share": 0.42 }
+  "panes": { "query_height": 140.0, "source_share": 0.42 },
+  "workspace": { "pane": "open", "width": 300.0, "folder": "/home/me/team-queries" }
 }
 ```
 
@@ -125,7 +133,10 @@ The names of the limits are `keep_on_disk_from`, `download`, `tools`, `copy`,
 order of the table. A limit is text with a unit, as it is typed in the window, or a
 number of bytes. `theme` is `"dark"` or `"light"`; `source_share` is from 0 to 1.
 Beside `limits`, `tools` is `"window"` or `"docked"` (it is not the limit of that name,
-which is inside `limits`).
+which is inside `limits`). In `workspace`, `pane` is `"open"` or `"collapsed"` (it is
+not there while the pane is hidden), `width` is in points (from 120 to 2000, else it is
+left out; the window then holds it between 208 and half of its own width), and `folder`
+is a full path.
 
 The file can be edited by hand while the app is not running (the app rewrites it
 as a whole, and keeps nothing of what it does not know). A file that is not there,

@@ -1,6 +1,6 @@
 # Privacy policy: jsonquery gui
 
-_Last updated: 2026-10-11_
+_Last updated: 2026-10-20_
 
 jsonquery gui ("the app") is a desktop program for browsing and querying JSON files on your own
 computer. This policy covers the app however you install it: the Microsoft Store, GitHub Releases,
@@ -40,10 +40,19 @@ through do their own data collection, independent of anything the app does — s
 - **Files you save.** The app writes a file only when you choose Save, and only where you choose.
 - **Settings.** The app keeps no history of your files or queries. It does save your settings — the
   limits on file sizes you set, the theme, whether autocomplete is on, whether the Tools are docked
-  in the main window, and how big its window and panes were — in one small file on your computer,
-  `settings.json` in the `.jsonquery` folder of your home folder (`%USERPROFILE%\.jsonquery` on
-  Windows). It holds nothing about your files or queries, is never sent anywhere, and can be deleted
-  at any time to put everything back to the defaults.
+  in the main window, how big its window and panes were, and how the workspace pane (below) is shown
+  and in which folder it is kept — in one small file on your computer, `settings.json` in the
+  `.jsonquery` folder of your home folder (`%USERPROFILE%\.jsonquery` on Windows). It holds nothing
+  about your files or queries, is never sent anywhere, and can be deleted at any time to put
+  everything back to the defaults.
+- **The workspace.** If you save a query, a schema, a patch or a document in the workspace, the app
+  writes it as a file — and, if you ask for it, a sample of data with it — in the workspace's
+  folder, which is the folder `workspace` beside the settings (`~/.jsonquery/workspace`) unless you
+  chose another, together with a small hidden file in it, `.jsonquery/index.json`, that holds an
+  id and a SHA-256 (a fingerprint of the file's text) for each item. The app writes these only when
+  you choose to save, import or change something in the workspace, only in that folder (or where you
+  choose, for Export), and never sends them anywhere. They stay until you delete them: they are
+  ordinary files in an ordinary folder.
 
 ## Stores and package managers
 

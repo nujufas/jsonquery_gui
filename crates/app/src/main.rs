@@ -17,6 +17,8 @@ mod tools;
 mod tree_view;
 mod tutorial;
 mod worker;
+mod workspace;
+mod workspace_pane;
 mod x11_alert;
 mod x11_launcher;
 

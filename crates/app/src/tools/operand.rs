@@ -215,7 +215,6 @@ impl Operand {
         }
     }
 
-    #[cfg(test)]
     pub fn title(&self) -> &'static str {
         self.title
     }

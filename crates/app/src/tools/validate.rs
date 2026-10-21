@@ -60,6 +60,28 @@ impl Validate {
             .find(|o| o.title() == title)
     }
 
+    /// The box called `title`, to read.
+    pub(super) fn operand_ref(&self, title: &str) -> Option<&Operand> {
+        [&self.document, &self.schema]
+            .into_iter()
+            .find(|o| o.title() == title)
+    }
+
+    /// The schema in the file `schema`, from the workspace; and, if there is a file
+    /// `document` too, the document to check against it, and the check started.
+    pub(super) fn use_files(
+        &mut self,
+        schema: &std::path::Path,
+        document: Option<&std::path::Path>,
+    ) -> Option<Request> {
+        self.schema.load_file(schema);
+        self.changed();
+        let document = document?;
+        self.document.load_file(document);
+        self.changed();
+        self.start()
+    }
+
     /// The answer to a [`Request::Job`] for this page.
     pub(super) fn done(&mut self, gen: u64, result: Result<Validated, String>) {
         self.selected = None;
@@ -118,6 +140,24 @@ impl Validate {
                     self.changed();
                 }
             });
+            // The schemas of the workspace: the pane at the left of the main window.
+            ui.separator();
+            let can_save = !self.schema.is_empty() && self.schema.can_save();
+            if ui
+                .add_enabled(can_save, egui::Button::new("Save schema…"))
+                .on_hover_text("Keep the schema in the workspace")
+                .on_disabled_hover_text("Nothing to keep: the Schema box has no text in it")
+                .clicked()
+            {
+                crate::workspace_pane::wish(ui.ctx(), crate::workspace_pane::Wish::SaveSchema);
+            }
+            if ui
+                .button("Saved schemas…")
+                .on_hover_text("Pick a schema from the workspace")
+                .clicked()
+            {
+                crate::workspace_pane::wish(ui.ctx(), crate::workspace_pane::Wish::PickSchema);
+            }
         });
         request
     }

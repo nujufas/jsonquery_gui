@@ -1,13 +1,15 @@
 //! What the user can set, and the file it is kept in between runs.
 //!
-//! Two kinds of thing are kept:
+//! Three kinds of thing are kept:
 //!
 //! * the limits on the size of files (`limits.rs`; the Settings window,
 //!   `settings_window.rs`): from what size a file is kept on disk instead of
 //!   being loaded, how much the Tools window takes, and so on;
 //! * how the window looks (`interface.rs`): the theme, whether the query box
-//!   suggests, the size of the window and of its panes, and whether the Tools
-//!   are docked in it, as they were left.
+//!   suggests, the size of the window and of its panes, whether the Tools
+//!   are docked in it, and whether the workspace pane is shown, as they were left;
+//! * where the user keeps their workspace (`workspace.rs`), if they chose a folder
+//!   of their own for it: the path, and nothing of what is in it.
 //!
 //! The defaults are what the app has always done, and only what the user changed
 //! from them is written down, so that a default that is better one day reaches
@@ -27,7 +29,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value};
 
-pub use interface::{Interface, DEFAULT_WINDOW, MIN_WINDOW};
+pub use interface::{Interface, WorkspaceView, DEFAULT_WINDOW, MIN_WINDOW};
 pub use limits::{
     check_range, parse_size, size_text, FileLimits, Group, Limit, DEFAULT_TOOLS_BYTES,
 };
@@ -43,19 +45,31 @@ const FILE: &str = "settings.json";
 pub const HOME_VARIABLE: &str = "JSONQUERY_HOME";
 
 /// Everything the user can set.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Settings {
     pub limits: FileLimits,
     pub interface: Interface,
+    /// The folder the user chose for their workspace; none while it is the one
+    /// beside the settings (`Store::default_workspace_folder`).
+    pub workspace_folder: Option<PathBuf>,
 }
 
 impl Settings {
     /// What `settings.json` holds for these: only what is not what the app has
     /// always used.
-    pub fn to_json(self) -> Value {
+    pub fn to_json(&self) -> Value {
         let mut root = Map::new();
         root.insert("limits".to_owned(), Value::Object(self.limits.to_json()));
         self.interface.write(&mut root);
+        // A folder that is not text cannot be written, and is not kept.
+        if let Some(folder) = self.workspace_folder.as_deref().and_then(Path::to_str) {
+            if let Value::Object(workspace) = root
+                .entry("workspace")
+                .or_insert_with(|| Value::Object(Map::new()))
+            {
+                workspace.insert("folder".to_owned(), Value::from(folder));
+            }
+        }
         Value::Object(root)
     }
 
@@ -67,7 +81,34 @@ impl Settings {
         let mut notes = Vec::new();
         let limits = FileLimits::read(value.get("limits"), &mut notes);
         let interface = Interface::read(value, &mut notes);
-        (Settings { limits, interface }, notes)
+        // (`Interface::read` has said it if `workspace` is not an object)
+        let workspace_folder = value
+            .get("workspace")
+            .and_then(|w| w.get("folder"))
+            .and_then(|folder| {
+                match folder
+                    .as_str()
+                    .map(Path::new)
+                    .filter(|path| path.is_absolute())
+                {
+                    Some(path) => Some(path.to_path_buf()),
+                    None => {
+                        notes.push(format!(
+                        "workspace.folder: {folder} is not a full path, so the workspace is where \
+                         it usually is"
+                    ));
+                        None
+                    }
+                }
+            });
+        (
+            Settings {
+                limits,
+                interface,
+                workspace_folder,
+            },
+            notes,
+        )
     }
 }
 
@@ -108,6 +149,16 @@ impl Store {
     /// The file the settings are in, if there is one.
     pub fn path(&self) -> Option<&Path> {
         self.path.as_deref()
+    }
+
+    /// Where the workspace is kept unless the user chose another folder for it:
+    /// the folder `workspace` beside the settings; none if there is nowhere to
+    /// keep the settings.
+    pub fn default_workspace_folder(&self) -> Option<PathBuf> {
+        self.path
+            .as_deref()
+            .and_then(Path::parent)
+            .map(|folder| folder.join("workspace"))
     }
 
     /// What was wrong with the file when it was read: what was left out and why.
@@ -243,6 +294,68 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn the_workspace_is_beside_the_settings_unless_another_folder_was_chosen() {
+        let store = Store::at(Some(PathBuf::from("/home/me/.jsonquery/settings.json")));
+        assert_eq!(
+            store.default_workspace_folder(),
+            Some(PathBuf::from("/home/me/.jsonquery/workspace"))
+        );
+        assert_eq!(Store::at(None).default_workspace_folder(), None);
+        // And the folder that was chosen is a path that is written down, and only then.
+        assert_eq!(Settings::default().to_json(), json!({"limits": {}}));
+        let settings = Settings {
+            workspace_folder: Some(PathBuf::from("/home/me/team queries")),
+            ..Default::default()
+        };
+        assert_eq!(
+            settings.to_json(),
+            json!({"limits": {}, "workspace": {"folder": "/home/me/team queries"}})
+        );
+        let (read, notes) = Settings::read(&settings.to_json());
+        assert_eq!(read, settings);
+        assert!(notes.is_empty(), "{notes:?}");
+    }
+
+    #[test]
+    fn the_folder_of_the_workspace_and_how_its_pane_is_shown_are_one_object_in_the_file() {
+        let mut settings = Settings {
+            workspace_folder: Some(PathBuf::from("/data/queries")),
+            ..Default::default()
+        };
+        settings.interface.workspace = WorkspaceView::Open;
+        settings.interface.workspace_width = Some(280.0);
+        let json = settings.to_json();
+        assert_eq!(
+            json["workspace"],
+            json!({"pane": "open", "width": 280.0, "folder": "/data/queries"})
+        );
+        let (read, notes) = Settings::read(&json);
+        assert_eq!(read, settings);
+        assert!(notes.is_empty(), "{notes:?}");
+    }
+
+    #[test]
+    fn a_folder_for_the_workspace_that_is_not_a_full_path_is_left_out_and_said() {
+        for folder in [
+            json!("queries"),
+            json!("~/queries"),
+            json!(""),
+            json!(5),
+            json!(null),
+            json!(["/a"]),
+        ] {
+            let (settings, notes) = Settings::read(&json!({"workspace": {"folder": folder}}));
+            assert_eq!(settings.workspace_folder, None, "{folder}");
+            assert_eq!(notes.len(), 1, "{folder}: {notes:?}");
+            assert!(notes[0].starts_with("workspace.folder: "), "{notes:?}");
+        }
+        // A workspace that is not an object is said once, by the interface.
+        let (settings, notes) = Settings::read(&json!({"workspace": "x"}));
+        assert_eq!(settings.workspace_folder, None);
+        assert_eq!(notes.len(), 1, "{notes:?}");
     }
 
     #[test]

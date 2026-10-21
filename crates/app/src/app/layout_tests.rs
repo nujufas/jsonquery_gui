@@ -9,6 +9,11 @@ use crate::scratch_dir::{ScratchDir, ScratchFile};
 use egui::containers::panel::PanelState;
 use std::collections::HashMap;
 
+mod query_drop_tests;
+mod workspace_drag_tests;
+mod workspace_icon_tests;
+mod workspace_tests;
+
 const SCREEN: egui::Vec2 = egui::vec2(1200.0, 800.0);
 
 struct Harness {
@@ -28,6 +33,9 @@ struct Harness {
     /// Every address any frame has asked to have opened in the web browser, oldest
     /// first.
     opened: Vec<String>,
+    /// How long the last frame said it could wait before it was drawn again, if nothing
+    /// else asked for it sooner (`Duration::MAX`: it asked for nothing).
+    repaint_delay: std::time::Duration,
 }
 
 impl Harness {
@@ -63,6 +71,7 @@ impl Harness {
             commands: Vec::new(),
             copied: Vec::new(),
             opened: Vec::new(),
+            repaint_delay: std::time::Duration::MAX,
         };
         // A couple of frames so every panel has measured itself.
         h.settle();
@@ -86,6 +95,10 @@ impl Harness {
         // Nothing paints these, and egui panics if a texture update is dropped.
         output.textures_delta.clear();
         self.shapes = output.shapes;
+        self.repaint_delay = output
+            .viewport_output
+            .get(&egui::ViewportId::ROOT)
+            .map_or(std::time::Duration::MAX, |viewport| viewport.repaint_delay);
         for viewport in output.viewport_output.values() {
             self.commands.extend(viewport.commands.iter().cloned());
         }
@@ -2254,7 +2267,7 @@ fn a_merge_result_as_big_as_files_are_kept_on_disk_from_is_kept_in_a_temporary_f
     // Kept on disk from 2 KB, the same merge is a file, and says so.
     open_settings(&mut h);
     set_limit(&mut h, Limit::KeepOnDisk, "2 KB");
-    let current = h.app.settings;
+    let current = h.app.settings.clone();
     h.app.settings_window.close(&current);
     h.settle();
     press(&mut h, "Merge");
@@ -6094,7 +6107,7 @@ fn the_tools_window_goes_by_the_limit_on_what_it_takes() {
     open_settings(&mut h);
     open_advanced(&mut h);
     set_limit(&mut h, Limit::Tools, "1 KB");
-    let current = h.app.settings;
+    let current = h.app.settings.clone();
     h.app.settings_window.close(&current);
     open_tool(&mut h, Tool::Format);
     press(&mut h, "Open document");
@@ -6109,7 +6122,7 @@ fn the_tools_window_goes_by_the_limit_on_what_it_takes() {
     open_settings(&mut h);
     open_advanced(&mut h);
     set_limit(&mut h, Limit::Tools, "1 MB");
-    let current = h.app.settings;
+    let current = h.app.settings.clone();
     h.app.settings_window.close(&current);
     h.settle();
     press(&mut h, "Open document");
@@ -6196,7 +6209,7 @@ fn advanced_is_closed_whenever_the_window_is_opened() {
     let mut h = Harness::new();
     open_settings(&mut h);
     open_advanced(&mut h);
-    let current = h.app.settings;
+    let current = h.app.settings.clone();
     h.app.settings_window.close(&current);
     h.settle();
     assert!(!is_drawn(&h, Limit::Copy.label()), "the window is gone");

@@ -1,6 +1,7 @@
 //! How the window looks and where its parts are, kept from one run to the next:
 //! the theme, whether the query box suggests as you type, the size of the window,
-//! the sizes of its panes, and whether the Tools are docked in the main window.
+//! the sizes of its panes, whether the Tools are docked in the main window, and
+//! whether the workspace pane is shown and how wide.
 //!
 //! Like the limits, only what differs from what the app starts with is written
 //! down: a size is there once the user has changed it, and not before.
@@ -27,6 +28,21 @@ const QUERY_HEIGHT: RangeInclusive<f32> = 40.0..=4_000.0;
 /// What a saved share of the width for Source (against Results) may be.
 const SOURCE_SHARE: RangeInclusive<f32> = 0.05..=0.95;
 
+/// What a saved width of the workspace pane may be, in points.
+const WORKSPACE_WIDTH: RangeInclusive<f32> = 120.0..=2_000.0;
+
+/// How much of the workspace pane is shown.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum WorkspaceView {
+    /// Not at all: the window is as it has always been. (What the app starts with.)
+    #[default]
+    Hidden,
+    /// The pane, with the folders and items of the workspace.
+    Open,
+    /// Only the thin strip at the left edge that opens it.
+    Rail,
+}
+
 /// What the user sees of the window, as it was left.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Interface {
@@ -48,6 +64,11 @@ pub struct Interface {
     /// The Tools are tabs of the main window, beside Json Query, and not a
     /// window of their own, which the app starts with.
     pub tools_docked: bool,
+    /// How much of the workspace pane is shown.
+    pub workspace: WorkspaceView,
+    /// How wide the workspace pane was dragged to, if it was dragged from the
+    /// width it starts with.
+    pub workspace_width: Option<f32>,
 }
 
 impl Default for Interface {
@@ -60,6 +81,8 @@ impl Default for Interface {
             query_height: None,
             source_share: None,
             tools_docked: false,
+            workspace: WorkspaceView::Hidden,
+            workspace_width: None,
         }
     }
 }
@@ -107,6 +130,23 @@ impl Interface {
         }
         if !panes.is_empty() {
             root.insert("panes".to_owned(), Value::Object(panes));
+        }
+
+        let mut workspace = Map::new();
+        match self.workspace {
+            WorkspaceView::Hidden => {}
+            WorkspaceView::Open => {
+                workspace.insert("pane".to_owned(), Value::from("open"));
+            }
+            WorkspaceView::Rail => {
+                workspace.insert("pane".to_owned(), Value::from("collapsed"));
+            }
+        }
+        if let Some(width) = self.workspace_width {
+            workspace.insert("width".to_owned(), number(width));
+        }
+        if !workspace.is_empty() {
+            root.insert("workspace".to_owned(), Value::Object(workspace));
         }
     }
 
@@ -180,6 +220,29 @@ impl Interface {
                     panes.get("source_share"),
                     "panes.source_share",
                     &SOURCE_SHARE,
+                    notes,
+                );
+            }
+        }
+
+        if let Some(workspace) = root.get("workspace") {
+            if let Some(workspace) = object(workspace, "workspace", notes) {
+                match workspace.get("pane") {
+                    None => {}
+                    Some(Value::String(pane)) if pane.eq_ignore_ascii_case("open") => {
+                        interface.workspace = WorkspaceView::Open;
+                    }
+                    Some(Value::String(pane)) if pane.eq_ignore_ascii_case("collapsed") => {
+                        interface.workspace = WorkspaceView::Rail;
+                    }
+                    Some(other) => notes.push(format!(
+                        "workspace.pane: {other} is not \"open\" or \"collapsed\", so the pane is not shown"
+                    )),
+                }
+                interface.workspace_width = ranged(
+                    workspace.get("width"),
+                    "workspace.width",
+                    &WORKSPACE_WIDTH,
                     notes,
                 );
             }
@@ -316,6 +379,8 @@ mod tests {
             query_height: Some(150.0),
             source_share: Some(0.35),
             tools_docked: true,
+            workspace: WorkspaceView::Rail,
+            workspace_width: Some(310.0),
         };
         let (read, notes) = read(written(&interface));
         assert_eq!(read, interface);
@@ -438,6 +503,85 @@ mod tests {
             assert!(!interface.tools_docked, "{tools}: a window is used");
             assert_eq!(notes.len(), 1, "{tools}: said why: {notes:?}");
             assert!(notes[0].starts_with("tools: "), "{notes:?}");
+        }
+    }
+
+    #[test]
+    fn the_workspace_pane_is_not_shown_until_it_is_asked_for_so_the_window_is_as_it_was() {
+        let interface = Interface::default();
+        assert_eq!(interface.workspace, WorkspaceView::Hidden);
+        assert_eq!(interface.workspace_width, None);
+        assert_eq!(written(&interface), json!({}));
+    }
+
+    #[test]
+    fn the_workspace_pane_is_written_as_open_or_collapsed_and_only_when_it_is_shown() {
+        let mut interface = Interface {
+            workspace: WorkspaceView::Open,
+            ..Default::default()
+        };
+        assert_eq!(written(&interface), json!({"workspace": {"pane": "open"}}));
+        interface.workspace = WorkspaceView::Rail;
+        assert_eq!(
+            written(&interface),
+            json!({"workspace": {"pane": "collapsed"}})
+        );
+        interface.workspace_width = Some(300.0);
+        assert_eq!(
+            written(&interface),
+            json!({"workspace": {"pane": "collapsed", "width": 300.0}})
+        );
+        // A pane that is hidden remembers how wide it was.
+        interface.workspace = WorkspaceView::Hidden;
+        assert_eq!(written(&interface), json!({"workspace": {"width": 300.0}}));
+    }
+
+    #[test]
+    fn the_workspace_pane_is_read_in_any_case_and_what_is_wrong_is_said() {
+        assert_eq!(
+            read(json!({"workspace": {"pane": "OPEN"}})).0.workspace,
+            WorkspaceView::Open
+        );
+        assert_eq!(
+            read(json!({"workspace": {"pane": "Collapsed"}}))
+                .0
+                .workspace,
+            WorkspaceView::Rail
+        );
+        assert_eq!(
+            read(json!({"workspace": {}})).0.workspace,
+            WorkspaceView::Hidden
+        );
+        for pane in [json!("wide"), json!(true), json!(["open"]), json!(null)] {
+            let (interface, notes) = read(json!({"workspace": {"pane": pane}}));
+            assert_eq!(interface.workspace, WorkspaceView::Hidden, "{pane}");
+            assert_eq!(notes.len(), 1, "{pane}: {notes:?}");
+            assert!(notes[0].starts_with("workspace.pane: "), "{notes:?}");
+        }
+        let (interface, notes) = read(json!({"workspace": 5}));
+        assert_eq!(interface, Interface::default());
+        assert!(
+            notes[0].starts_with("workspace is not an object"),
+            "{notes:?}"
+        );
+    }
+
+    #[test]
+    fn the_width_of_the_workspace_pane_is_held_to_what_a_window_has_room_for() {
+        assert_eq!(
+            read(json!({"workspace": {"width": 260}})).0.workspace_width,
+            Some(260.0)
+        );
+        for width in [
+            json!(0),
+            json!(5),
+            json!(100000),
+            json!("wide"),
+            json!(-300),
+        ] {
+            let (interface, notes) = read(json!({"workspace": {"width": width}}));
+            assert_eq!(interface.workspace_width, None, "{width}");
+            assert_eq!(notes.len(), 1, "{width}: {notes:?}");
         }
     }
 

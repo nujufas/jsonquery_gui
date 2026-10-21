@@ -77,6 +77,14 @@ A box has four ways in:
 - **Open document** uses the document that is open in the main window (one
   over the limit below is refused: the box says so).
 
+A **schema** and a **patch** — the Schema box of Validate Schema and the Patch box of
+Patch JSON — can also be kept, with a sample, in the [workspace](workspace.md) (the pane
+at the left of the window, shown by the button at the left end of the status bar): **Use as
+schema** and **Use as patch** put the item in the box and show the page, **With its
+sample** puts its sample in the Document box too and runs it, and **💾** saves what is in
+the box (the page that is in front says which). With the Tools docked, the pane's chips
+follow the page: *Schemas* on Validate Schema, *Patches* on Patch JSON.
+
 A box has the right-click menu of a text box: **Cut**, **Copy**, **Paste** and
 **Select All**. (Where a result is shown as text, as the Format and Patch results are,
 the menu has **Copy** and **Select All**: the text can be selected, and not changed.)
