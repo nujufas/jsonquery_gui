@@ -296,6 +296,12 @@ mod tests {
         }
     }
 
+    /// A full path on whatever the tests run on: `/data/queries` has no drive on Windows,
+    /// and the settings do not go by a path that is not a full one.
+    fn a_full_path(name: &str) -> PathBuf {
+        std::env::temp_dir().join(name)
+    }
+
     #[test]
     fn the_workspace_is_beside_the_settings_unless_another_folder_was_chosen() {
         let store = Store::at(Some(PathBuf::from("/home/me/.jsonquery/settings.json")));
@@ -306,13 +312,14 @@ mod tests {
         assert_eq!(Store::at(None).default_workspace_folder(), None);
         // And the folder that was chosen is a path that is written down, and only then.
         assert_eq!(Settings::default().to_json(), json!({"limits": {}}));
+        let folder = a_full_path("team queries");
         let settings = Settings {
-            workspace_folder: Some(PathBuf::from("/home/me/team queries")),
+            workspace_folder: Some(folder.clone()),
             ..Default::default()
         };
         assert_eq!(
             settings.to_json(),
-            json!({"limits": {}, "workspace": {"folder": "/home/me/team queries"}})
+            json!({"limits": {}, "workspace": {"folder": folder.to_str()}})
         );
         let (read, notes) = Settings::read(&settings.to_json());
         assert_eq!(read, settings);
@@ -321,8 +328,9 @@ mod tests {
 
     #[test]
     fn the_folder_of_the_workspace_and_how_its_pane_is_shown_are_one_object_in_the_file() {
+        let folder = a_full_path("queries");
         let mut settings = Settings {
-            workspace_folder: Some(PathBuf::from("/data/queries")),
+            workspace_folder: Some(folder.clone()),
             ..Default::default()
         };
         settings.interface.workspace = WorkspaceView::Open;
@@ -330,7 +338,7 @@ mod tests {
         let json = settings.to_json();
         assert_eq!(
             json["workspace"],
-            json!({"pane": "open", "width": 280.0, "folder": "/data/queries"})
+            json!({"pane": "open", "width": 280.0, "folder": folder.to_str()})
         );
         let (read, notes) = Settings::read(&json);
         assert_eq!(read, settings);

@@ -114,6 +114,18 @@ pub(super) fn press_last(h: &mut Harness, text: &str) {
     h.click(rect.center().x, rect.center().y);
 }
 
+/// Click at the beginning of the text drawn as `text`, not in its middle: a path in a box is as
+/// long as the folder the test is in, and where that is long (the temp folder of macOS) the
+/// middle of it is under the button beside the box.
+pub(super) fn press_start(h: &mut Harness, text: &str) {
+    let rect = text_rects(&h.shapes)
+        .into_iter()
+        .find(|(t, _)| t == text)
+        .unwrap_or_else(|| panic!("{text:?} is drawn: {:?}", h.texts()))
+        .1;
+    h.click(rect.min.x + 4.0, rect.center().y);
+}
+
 /// Click the text that begins with `part`.
 pub(super) fn press_starting(h: &mut Harness, part: &str) {
     let rect = text_rects(&h.shapes)
@@ -1203,7 +1215,7 @@ fn a_folder_that_cannot_be_imported_is_said_and_typing_another_lets_one_press_im
     assert!(!dir.join("not there at all").exists());
     assert!(is_drawn(&h, "Import a workspace"));
     // Typing another folder takes the old words away, and one press does the rest.
-    press(&mut h, &missing.display().to_string());
+    press_start(&mut h, &missing.display().to_string());
     type_over(&mut h, &from.display().to_string());
     h.settle();
     assert!(
@@ -1236,7 +1248,7 @@ fn the_new_folder_of_an_import_is_named_for_the_folder_that_comes_in_unless_it_w
     // A name that is typed stays when another folder comes in.
     press(&mut h, "first queries");
     type_over(&mut h, "mine");
-    press(&mut h, &first.display().to_string());
+    press_start(&mut h, &first.display().to_string());
     type_over(&mut h, &second.display().to_string());
     h.settle();
     press_last(&mut h, "Import");
