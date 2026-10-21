@@ -8,6 +8,8 @@ the left of the window is how you look through it.
 Nothing is sent anywhere, and nothing is kept that you did not save: a query you
 type is forgotten when you close the app, as it always was, until you save it here.
 
+![The Workspace pane at the left of the window, with a query opened from it together with its sample](images/screenshot-workspace.png)
+
 ## Showing the pane
 
 The **button at the left end of the status bar**, under the pane it is for, shows the
@@ -75,6 +77,8 @@ it would go into is outlined, and a label beside the pointer says where it would
 place, and the folder it went into is open, with the message *Moved “orders” into
 “Services”* under the list. Let go on an **item** and the row goes into the folder that
 item is in; on the **empty part of the list**, to the top of the workspace.
+
+![A query being dragged onto a folder: the folder is outlined, and a label says where the query will go](images/screenshot-workspace-drag.png)
 
 - Holding the row over a **shut folder** for a moment opens it, so that a folder
   inside it can be the place; holding it near the top or the foot of a **long list**

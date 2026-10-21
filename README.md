@@ -56,6 +56,10 @@ patches and validates documents too. Built in Rust with
   between computers, and each item keeps an id and a SHA-256, not shown, for what
   comes later. Until you show it the window is as it always was. See
   [docs/workspace.md](docs/workspace.md).
+
+  ![The Workspace pane at the left of the window: folders of queries, schemas, patches and documents, each item with its kind and a paperclip when it has a sample, and under the list the one that is picked; beside it the query that was opened with its sample, run, with the source and the results](docs/images/screenshot-workspace.png)
+
+  ![A query being dragged onto a folder of the pane: the folder is outlined and a label says where the query will go](docs/images/screenshot-workspace-drag.png)
 - **Streamed, cancellable queries** — results appear as jq produces them, so
   `first(...)`/`limit(...)` genuinely stop early; starting a new query aborts
   whatever was still running.
@@ -393,7 +397,7 @@ files on its window.
 - The script finds jsonquery by itself: the program next to it, the snap, or
   the Arch package. If you keep an AppImage somewhere, name it (make it
   executable first with `chmod +x`):
-  `bash jsonquery-x11.sh ~/Apps/jsonquery_gui-0.5.1-x86_64.AppImage`
+  `bash jsonquery-x11.sh ~/Apps/jsonquery_gui-0.5.2-x86_64.AppImage`
 - **Moved or updated the program?** Run the script again; it rewrites the
   entry.
 - `bash jsonquery-x11.sh run` starts jsonquery under X11 once, without adding
