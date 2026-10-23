@@ -1,6 +1,6 @@
 # Privacy policy: jsonquery gui
 
-_Last updated: 2026-10-20_
+_Last updated: 2026-10-22_
 
 jsonquery gui ("the app") is a desktop program for browsing and querying JSON files on your own
 computer. This policy covers the app however you install it: the Microsoft Store, GitHub Releases,
@@ -19,13 +19,14 @@ through do their own data collection, independent of anything the app does — s
 - **Files and pasted JSON.** The app reads JSON files you choose (with the file dialog, a path you
   type, or drag and drop) and JSON you paste. They are processed on your computer and are never
   uploaded anywhere.
-- **URLs you enter.** If you type a web address into the Source field, the app requests it directly
-  from your computer with an ordinary HTTP(S) request. The server behind that address sees the
-  request, including your IP address, and handles it under its own policies. Nothing is sent to the
-  developer. The response is saved to a temporary file in your operating system's temporary-files
-  folder (on Windows, your user temp folder; on Linux, typically `/tmp`, or a private per-app
-  location if you installed via Snap) and read from there. The app does not delete that file, so it
-  stays until you or your OS's own temp-file cleanup removes it.
+- **URLs you enter.** If you type a web address into the Source field (or open one that you saved
+  in the workspace), the app requests it directly from your computer with an ordinary HTTP(S)
+  request. The server behind that address sees the request, including your IP address, and handles
+  it under its own policies. Nothing is sent to the developer. The response is saved to a temporary
+  file in your operating system's temporary-files folder (on Windows, your user temp folder; on
+  Linux, typically `/tmp`, or a private per-app location if you installed via Snap) and read from
+  there. The app does not delete that file, so it stays until you or your OS's own temp-file cleanup
+  removes it.
 - **Big results of a merge.** A merge whose result is as big as the size from which the app keeps a
   file on disk (256 MB unless you changed it in the settings) is written, while you look at it, to a
   temporary file in your operating system's temporary-files folder, readable only by you where the
@@ -45,14 +46,14 @@ through do their own data collection, independent of anything the app does — s
   `.jsonquery` folder of your home folder (`%USERPROFILE%\.jsonquery` on Windows). It holds nothing
   about your files or queries, is never sent anywhere, and can be deleted at any time to put
   everything back to the defaults.
-- **The workspace.** If you save a query, a schema, a patch or a document in the workspace, the app
-  writes it as a file — and, if you ask for it, a sample of data with it — in the workspace's
-  folder, which is the folder `workspace` beside the settings (`~/.jsonquery/workspace`) unless you
-  chose another, together with a small hidden file in it, `.jsonquery/index.json`, that holds an
-  id and a SHA-256 (a fingerprint of the file's text) for each item. The app writes these only when
-  you choose to save, import or change something in the workspace, only in that folder (or where you
-  choose, for Export), and never sends them anywhere. They stay until you delete them: they are
-  ordinary files in an ordinary folder.
+- **The workspace.** If you save a query, a schema, a patch, a document or a web address in the
+  workspace, the app writes it as a file — and, if you ask for it, a sample of data with it (not with
+  a web address) — in the workspace's folder, which is the folder `workspace` beside the settings
+  (`~/.jsonquery/workspace`) unless you chose another, together with a small hidden file in it,
+  `.jsonquery/index.json`, that holds an id and a SHA-256 (a fingerprint of the file's text) for each
+  item. The app writes these only when you choose to save, import or change something in the
+  workspace, only in that folder (or where you choose, for Export), and never sends them anywhere.
+  They stay until you delete them: they are ordinary files in an ordinary folder.
 
 ## Stores and package managers
 

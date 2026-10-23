@@ -1,9 +1,9 @@
 # Workspace
 
-Your own queries, schemas, patches and documents, each with a sample if you want
-one, kept in folders you make, to come back to. The **workspace** is a folder on
-your computer — an ordinary one, with folders and files in it — and the **pane** at
-the left of the window is how you look through it.
+Your own queries, schemas, patches, documents and web addresses, each (but an address)
+with a sample if you want one, kept in folders you make, to come back to. The
+**workspace** is a folder on your computer — an ordinary one, with folders and files in
+it — and the **pane** at the left of the window is how you look through it.
 
 Nothing is sent anywhere, and nothing is kept that you did not save: a query you
 type is forgotten when you close the app, as it always was, until you save it here.
@@ -35,15 +35,15 @@ only the strip is shown, because there is no room beside it.
   read (a file that could not be read, a link that is not followed).
 - **A filter** narrows the list to the items whose name, or whose folder's name,
   has what you type; the **chips** narrow it to one sort of item: *All*, *Queries*,
-  *Schemas*, *Patches* or *Docs*. With the Tools docked, the chips follow the page in
-  front: *Schemas* on **Validate Schema**, *Patches* on **Patch JSON**, *All* on **Json
-  Query**.
+  *Schemas*, *Patches*, *Docs* or *URLs*. With the Tools docked, the chips follow the
+  page in front: *Schemas* on **Validate Schema**, *Patches* on **Patch JSON**, *All* on
+  **Json Query**.
 - **The list** has the folders first, each with how many items are in it, and the
   items under them. A tag says what an item is (`jq`, `JP` for JSONPath, `JM` for
-  JMESPath, `PT` for JSON Pointer, `schema`, `patch`, `json`), and a paperclip that
-  it has a sample.
+  JMESPath, `PT` for JSON Pointer, `schema`, `patch`, `json`, `url`), and a paperclip
+  that it has a sample.
 - **The item that is picked** is under the list: its name, its file, its first
-  lines, its sample, and the buttons that open it.
+  lines (a web address: the address), its sample, and the buttons that open it.
 
 ## What an item is, and where it goes
 
@@ -53,6 +53,7 @@ only the strip is shown, because there is no room beside it.
 | a schema | `.schema.json` | in the **Schema** box of Validate Schema, whose page is shown |
 | a patch | `.patch.json` | in the **Patch** box of Patch JSON, whose page is shown |
 | a document | `.json`, `.ndjson`, `.jsonl` | as the Source (a document has no sample) |
+| a web address | `.url` | **loaded from the web** as the Source (it has no sample either) |
 
 *Open with sample* does the same and opens the item's **sample** as well: as the
 Source for a query, which is then run; in the **Document** box for a schema or a
@@ -60,13 +61,20 @@ patch, which is then validated or applied. Nothing replaces what is in a box unt
 you open something: a click only picks. (**Ctrl+Z** in the query box brings back the
 text that an open replaced.)
 
+A web address is loaded as if you had typed it in the Source field and pressed *Load*
+([more below](#a-web-address)): the Query page is shown, the document comes in as the
+Source, and a load that fails is said where a typed one is. Its button is *Load from the
+web*, and it has no *with sample*. A file that holds no web address says so under the
+list, and nothing is loaded.
+
 A click picks a folder or an item (a click on a folder also opens or shuts it), a
 double click on an item opens it, and a **right click** has the menu: *Open*, *Open
 with sample*, *Rename*, *Duplicate*, *Move to*, *Copy text*, *Show in the file
 manager* and *Delete…* (which asks first); a folder's has *Save the query here…*,
-*New folder…*, *Rename*, *Move to*, *Import into this folder…*, *Export this
-folder…*, *Show in the file manager* and *Delete…*. *Rename* is done in the list:
-type the new name and press Enter.
+*Save a web address here…*, *New folder…*, *Rename*, *Move to*, *Import into this
+folder…*, *Export this folder…*, *Show in the file manager* and *Delete…*. *Rename* is
+done in the list: type the new name and press Enter. A web address has *Load from the
+web* in place of the first two, and its *Copy text* copies the address.
 
 ### Moving by dragging
 
@@ -98,8 +106,8 @@ item is in; on the **empty part of the list**, to the top of the workspace.
 - **Drag a query out of the list onto the query pane**: the pane is outlined, a label
   beside the pointer says *Open “logins” as the query*, and let go, it is opened as a
   double click on it opens it (its language is chosen, and the Query row says where it
-  came from). Nothing is moved. A schema, a patch, a document or a folder is not opened
-  that way, and is not lit there; **Esc** puts the row back.
+  came from). Nothing is moved. A schema, a patch, a document, a web address or a
+  folder is not opened that way, and is not lit there; **Esc** puts the row back.
 - **Drop a query file on the window**: a file whose name ends in `.jq`, `.jsonpath`,
   `.jmespath` or `.jsonptr`, from the file manager or from anywhere, goes in the query
   box, in the language that the end says, and the box is outlined while the file is over
@@ -112,6 +120,33 @@ item is in; on the **empty part of the list**, to the top of the workspace.
   file that is used takes what was said away. (**Ctrl+Z** brings back the text that a
   drop replaced.)
 
+### A web address
+
+A `.url` file is a Windows *Internet Shortcut*, which a file manager and other programs
+know too. The app writes exactly this, in UTF-8, without a byte-order mark and with
+`\r\n` after each line:
+
+```
+[InternetShortcut]
+URL=https://example.com/data.json
+```
+
+and reads it leniently: the address is the value of the **first line whose key is
+`URL`** (in any case, the key and the value trimmed, in any section or in none); a file
+with no such line that is a single line is that address. A byte-order mark and either
+kind of line end are accepted.
+
+An address is `http://` or `https://` (in any case) and a host (at least one character
+before the first `/`, `?` or `#`), in all 1 to 4096 characters, with no space or control
+character in it. Anything else — `ftp://…`, `file://…`, `example.com` — is not a web
+address. The same rule is used when a file is read, when an address is typed in the
+window that saves, and before one is loaded. A `.url` file that holds no web address is
+listed all the same (it is a file with that end), and says so when it is opened.
+
+Its name is the file's name without `.url`, and has the rules of the other names
+(below). Like the other items it has an id and a SHA-256 in the index, and is renamed,
+moved (also by dragging), copied, deleted, exported and imported.
+
 ## Saving
 
 **💾** in the pane, and the **Save…** that the Query row has beside Run while the
@@ -121,14 +156,25 @@ front of it with the window that saves):
 
 - **Save** — *the query* (the text of the query box, in the language it runs as),
   *a schema* (the Schema box of Validate Schema), *a patch* (the Patch box of Patch
-  JSON) or *the Source* (the document that is open, as a document). What the page in
-  front is for is what is chosen to begin with; what has nothing in it is greyed.
+  JSON), *the Source* (the document that is open, as a document) or **Web address**
+  (typed in a box of the window). What the page in front is for is what is chosen to
+  begin with; what has nothing in it is greyed.
 - **Name** and **Folder**, and, if you want one, **a new folder in it**. A query
-  that was opened from the workspace comes back under its own name and folder: the
-  button then says **Replace**, and the item keeps its id.
+  that was opened from the workspace comes back under its own name and folder; where
+  an item of that name and kind is there, the button says **Replace**, and the item
+  keeps its id.
 - **Keep … as its sample** — the Source, for a query (up to what the Tools take,
   128 MB unless you changed it in Settings); the Document box of the page, for a
-  schema or a patch. The sample is written as the pretty-printed document.
+  schema or a patch. The sample is written as the pretty-printed document. A web
+  address has no such box.
+- **Web address** — the box starts with the address of the document that is open, if
+  it was loaded from the web, or else with the address that is in the Source field and
+  has not been loaded; if there is none, it is empty, and is where you type. The name
+  starts as the last part of the address (without `.json`, `.ndjson` or `.jsonl`) or
+  as its host, and follows the address until you type one of your own. An address that
+  is not one ([above](#a-web-address)) is said, and cannot be saved. The window begins
+  on this choice when it is opened by *Save a web address here…* in the menu of a
+  folder, which is then the folder it saves in.
 
 A name may not be empty, longer than 120 letters, start or end with a dot, have any
 of `/ \ : * ? " < > |` in it, or be a name that Windows keeps for itself (`CON`,
@@ -161,7 +207,8 @@ workspace/
 ├── Services/
 │   ├── orders-api.schema.json             a schema
 │   ├── orders-api.sample.json             its sample: the items called `orders-api` share it
-│   └── bump replicas.patch.json           a patch
+│   ├── bump replicas.patch.json           a patch
+│   └── daily rates.url                    a web address
 ├── scratch.jq
 └── .jsonquery/index.json                  see below
 ```
@@ -169,7 +216,10 @@ workspace/
 A file that does not end in one of the ends above, a name that starts with a dot, and
 a link are not the workspace's, and are left alone; folders more than 16 deep are not
 read. A **sample** is the file `<name>.sample.json` in the folder of the item (the
-items of one name in one folder — a query and a schema, say — share it).
+items of one name in one folder — a query and a schema, say — share it). A web address
+has none, and shares none: `orders.sample.json` is the sample of the queries, schemas
+and patches called `orders`, not of an `orders.url`, which does not keep it when they
+are deleted, and does not take it along when it is moved, renamed, copied or deleted.
 
 ### The id and the SHA-256 of each item
 

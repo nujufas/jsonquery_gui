@@ -11,15 +11,15 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use eframe::egui::{self, Align2};
-use jsonquery_core::Document;
+use jsonquery_core::{Document, DocumentSource};
 use jsonquery_query::Kind as Engine;
 
 use super::{Action, Env, Front, Waiting, WorkspacePane};
 use crate::app::human_bytes;
 use crate::tools::{Tool, ERROR_COLOR};
 use crate::workspace::{
-    check_item_name, check_name, Clash, Imported, ItemKind, NewItem, Place, Preview, SampleSource,
-    Scope, Workspace,
+    check_item_name, check_name, default_name, shortcut_text, web_address, Clash, Imported,
+    ItemKind, NewItem, Place, Preview, SampleSource, Scope, Workspace,
 };
 
 /// The window that is open, if one is.
@@ -107,6 +107,8 @@ pub(super) enum What {
     Schema,
     Patch,
     Document,
+    /// A web address, which is typed in the form.
+    Url,
 }
 
 /// The texts that can be saved, as they were when the form was opened.
@@ -121,16 +123,32 @@ struct Sources {
 pub(super) struct SaveForm {
     what: What,
     name: String,
+    /// The name was typed, or is the name of the item the query came from: it does not
+    /// follow the web address any more.
+    named: bool,
     folder: String,
     /// A folder to make inside `folder`, for this item.
     subfolder: String,
     keep_sample: bool,
+    /// The web address that is saved, when that is what is saved.
+    address: String,
     focus: bool,
+    /// The box of the address, and not the name's, is to take the focus.
+    focus_address: bool,
     sources: Sources,
     engine: Engine,
     doc: Option<Arc<Document>>,
     sample_limit: u64,
     error: Option<String>,
+}
+
+impl SaveForm {
+    /// The name is made from the address until the name is typed.
+    fn follow_address(&mut self) {
+        if !self.named {
+            self.name = default_name(&self.address);
+        }
+    }
 }
 
 pub(super) struct FolderForm {
@@ -261,7 +279,7 @@ impl WorkspacePane {
         let asked = self.prefer.take().filter(|what| match what {
             What::Schema => sources.schema.is_some(),
             What::Patch => sources.patch.is_some(),
-            What::Query | What::Document => true,
+            What::Query | What::Document | What::Url => true,
         });
         let what = match env.front {
             _ if asked.is_some() => asked.unwrap_or(What::Query),
@@ -278,13 +296,25 @@ impl WorkspacePane {
             (What::Query, Some((name, folder))) => (name, folder),
             _ => (String::new(), self.selected_folder()),
         };
+        let named = !name.is_empty();
+        let address = offered_address(env);
+        // A web address is typed first, if there is none to begin with.
+        let ask_for_address = what == What::Url && address.is_empty();
+        let name = if what == What::Url && !named {
+            default_name(&address)
+        } else {
+            name
+        };
         self.form = Form::Save(Box::new(SaveForm {
             what,
             name,
+            named,
             folder,
             subfolder: String::new(),
             keep_sample: false,
-            focus: true,
+            address,
+            focus: !ask_for_address,
+            focus_address: ask_for_address,
             sources,
             engine: env.engine,
             doc: env.doc.cloned(),
@@ -312,12 +342,17 @@ impl WorkspacePane {
             What::Schema => ItemKind::Schema,
             What::Patch => ItemKind::Patch,
             What::Document => ItemKind::Document,
+            What::Url => ItemKind::Url,
         };
         let name_problem = if form.name.trim().is_empty() {
             None
         } else {
             check_item_name(&form.name, kind).err()
         };
+        let address_problem = (form.what == What::Url
+            && !form.address.trim().is_empty()
+            && web_address(&form.address).is_none())
+        .then_some("That is not a web address (http:// or https://, no spaces)");
         let sub_problem = if form.subfolder.trim().is_empty() {
             None
         } else {
@@ -358,6 +393,7 @@ impl WorkspacePane {
                         (What::Schema, "a schema"),
                         (What::Patch, "a patch"),
                         (What::Document, "the Source"),
+                        (What::Url, "Web address"),
                     ] {
                         let available = what_is_available(form, what);
                         let response = ui.add_enabled(
@@ -366,11 +402,18 @@ impl WorkspacePane {
                         );
                         if response.clicked() {
                             form.what = what;
+                            if what == What::Url {
+                                form.follow_address();
+                                form.focus_address = form.address.is_empty();
+                            }
                         }
                         let _ = response.on_disabled_hover_text(why_not(what));
                     }
                 });
                 ui.add_space(4.0);
+                if form.what == What::Url {
+                    submit |= address_box(ui, form, address_problem);
+                }
                 ui.label("Name");
                 let name_id = egui::Id::new("workspace_save_name");
                 if !ui.is_sizing_pass() && std::mem::take(&mut form.focus) {
@@ -382,6 +425,10 @@ impl WorkspacePane {
                         .desired_width(f32::INFINITY),
                 );
                 crate::text_menu::attach(&field, &form.name, crate::text_menu::Kind::Typed);
+                if field.changed() {
+                    // (a name that was typed stays; one that was emptied is the address's again)
+                    form.named = !form.name.trim().is_empty();
+                }
                 if field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                     submit = true;
                 }
@@ -461,6 +508,7 @@ impl WorkspacePane {
             What::Schema => form.sources.schema.as_deref().map(str::to_owned),
             What::Patch => form.sources.patch.as_deref().map(str::to_owned),
             What::Document => None,
+            What::Url => web_address(&form.address).map(shortcut_text),
         };
         // The sample: a text from the box next to it, or the Source, which the worker
         // writes.
@@ -1096,7 +1144,48 @@ fn folder_combo(ui: &mut egui::Ui, id: &str, chosen: &mut String, folders: &[Str
         });
 }
 
-/// Whether what the person wants to save is there to be saved.
+/// The web address that the box of the form starts with: the one the open document was
+/// loaded from, or else the one in the Source field that has not been loaded (yet).
+fn offered_address(env: &Env<'_>) -> String {
+    let loaded = env.doc.and_then(|doc| match &doc.source {
+        DocumentSource::Url(url) => web_address(url),
+        _ => None,
+    });
+    loaded
+        .or_else(|| web_address(env.source_text))
+        .unwrap_or_default()
+        .to_owned()
+}
+
+/// The box that takes the web address, with what is wrong with it under it. Gives
+/// whether Enter was pressed in it.
+fn address_box(ui: &mut egui::Ui, form: &mut SaveForm, problem: Option<&str>) -> bool {
+    ui.label("Web address");
+    let id = egui::Id::new("workspace_save_address");
+    // (Not in the frame of a click, which was not on the box, and so takes the focus away from
+    // a box that is made in it: this is the frame after the click on the choice.)
+    if !ui.is_sizing_pass() && form.focus_address && !ui.input(|i| i.pointer.any_click()) {
+        form.focus_address = false;
+        ui.memory_mut(|m| m.request_focus(id));
+    }
+    let field = ui.add(
+        egui::TextEdit::singleline(&mut form.address)
+            .id(id)
+            .hint_text("https://…")
+            .desired_width(f32::INFINITY),
+    );
+    crate::text_menu::attach(&field, &form.address, crate::text_menu::Kind::Typed);
+    if field.changed() {
+        form.follow_address();
+    }
+    if let Some(problem) = problem {
+        ui.colored_label(ERROR_COLOR, problem);
+    }
+    field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))
+}
+
+/// Whether what the person wants to save is there to be saved. (A web address is typed
+/// in the form: it is always there to be picked.)
 fn what_is_available(form: &SaveForm, what: What) -> bool {
     match what {
         What::Query => !form.sources.query.trim().is_empty(),
@@ -1106,6 +1195,7 @@ fn what_is_available(form: &SaveForm, what: What) -> bool {
             .doc
             .as_ref()
             .is_some_and(|doc| doc.byte_len <= form.sample_limit),
+        What::Url => true,
     }
 }
 
@@ -1115,11 +1205,16 @@ fn why_not(what: What) -> &'static str {
         What::Schema => "The Schema box of Validate has no text in it",
         What::Patch => "The Patch box of Patch has no text in it",
         What::Document => "There is no document open, or it is bigger than the Tools take",
+        What::Url => "Type a web address",
     }
 }
 
+/// Whether there is what is to be saved: a web address has to be typed, and be one.
 fn source_ready(form: &SaveForm) -> bool {
-    what_is_available(form, form.what)
+    match form.what {
+        What::Url => web_address(&form.address).is_some(),
+        what => what_is_available(form, what),
+    }
 }
 
 /// Whether the thing saved can have a sample kept with it.
@@ -1128,7 +1223,7 @@ fn what_has_sample(form: &SaveForm) -> bool {
         What::Query => form.doc.is_some(),
         What::Schema => form.sources.schema_document.is_some(),
         What::Patch => form.sources.patch_document.is_some(),
-        What::Document => false,
+        What::Document | What::Url => false,
     }
 }
 
@@ -1165,7 +1260,7 @@ fn sample_choice(ui: &mut egui::Ui, form: &mut SaveForm) {
             form.sources.patch_document.is_some(),
             "The Document box of Patch has no text in it",
         ),
-        What::Document => return,
+        What::Document | What::Url => return,
     };
     if !available {
         form.keep_sample = false;
@@ -1188,6 +1283,7 @@ fn describe(preview: &Preview) -> String {
         (preview.schemas, "schema", "schemas"),
         (preview.patches, "patch", "patches"),
         (preview.documents, "document", "documents"),
+        (preview.urls, "web address", "web addresses"),
     ] {
         if count > 0 {
             parts.push(format!("{count} {}", if count == 1 { one } else { many }));
@@ -1335,6 +1431,7 @@ mod tests {
             schemas: 3,
             patches: 1,
             documents: 1,
+            urls: 0,
             samples: 6,
             sample_bytes: 22 * 1024,
             notes: Vec::new(),
@@ -1350,6 +1447,27 @@ mod tests {
             ..Preview::default()
         };
         assert_eq!(describe(&one), "1 item in 1 folder: 1 query");
+    }
+
+    #[test]
+    fn the_web_addresses_in_a_folder_are_told_in_a_line_too() {
+        let some = Preview {
+            folders: 1,
+            items: 3,
+            queries: 1,
+            urls: 2,
+            ..Preview::default()
+        };
+        assert_eq!(
+            describe(&some),
+            "3 items in 1 folder: 1 query, 2 web addresses"
+        );
+        let one = Preview {
+            items: 1,
+            urls: 1,
+            ..Preview::default()
+        };
+        assert_eq!(describe(&one), "1 item in 0 folders: 1 web address");
     }
 
     #[test]

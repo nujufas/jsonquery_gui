@@ -1,5 +1,6 @@
-//! The workspace: a folder of the user's own queries, schemas, patches and
-//! documents, each with an optional sample, to come back to.
+//! The workspace: a folder of the user's own queries, schemas, patches, documents and
+//! web addresses, each with an optional sample (but an address, which has none), to
+//! come back to.
 //!
 //! It is a folder in the ordinary sense — folders inside folders, and files in
 //! them — so that it can be opened in a file manager, kept in a repository, copied
@@ -9,6 +10,8 @@
 //! the user has chosen another.
 //!
 //! * `names.rs` — which file is which kind of item, and the names that may be given.
+//! * `address.rs` — the web address that a `.url` item holds: what may be one, how a file
+//!   keeps it, and the name it is saved under to begin with.
 //! * `files.rs` — writing a file whole or not at all, and keeping to the workspace's
 //!   folder.
 //! * `ids.rs` — the SHA-256 of what an item holds, and the id it keeps.
@@ -18,6 +21,7 @@
 //!
 //! What the user sees of it — the pane, its menus and forms — is `workspace_pane.rs`.
 
+mod address;
 mod files;
 mod ids;
 mod index;
@@ -28,6 +32,7 @@ mod transfer;
 #[cfg(test)]
 mod tests;
 
+pub use address::{address_in, default_name, shortcut_text, web_address};
 #[cfg(test)]
 pub use ids::sha256_hex;
 pub use names::{check_item_name, check_name, query_language_of, Group, ItemKind};

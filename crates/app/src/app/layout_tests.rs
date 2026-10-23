@@ -13,6 +13,7 @@ mod query_drop_tests;
 mod workspace_drag_tests;
 mod workspace_icon_tests;
 mod workspace_tests;
+mod workspace_url_tests;
 
 const SCREEN: egui::Vec2 = egui::vec2(1200.0, 800.0);
 

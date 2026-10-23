@@ -6,9 +6,9 @@ open, fast to scroll, fast to query. This page covers the problem and goals;
 [Query Engines](query-engines.md) covers the supported query dialects,
 [Known issues](known-issues.md) lists where jq programs run differently here,
 [Tutorial](tutorial.md) documents the built-in lessons window,
-[Workspace](workspace.md) covers your own saved queries, schemas, patches and
-samples, and [Settings](settings.md) covers the limits on file sizes, and what the
-app remembers of how you left it.
+[Workspace](workspace.md) covers your own saved queries, schemas, patches, web
+addresses and samples, and [Settings](settings.md) covers the limits on file sizes, and
+what the app remembers of how you left it.
 
 ## The problem
 
@@ -103,6 +103,7 @@ is in [Architecture](architecture.md).
   tabs beside Json Query: merging several JSON files with a jq filter, formatting,
   diffing, patching (RFC 6902 / 7386) and validating against a JSON Schema.
 - **[Workspace](workspace.md)** — the pane at the left of the window that keeps your
-  own queries, schemas, patches and documents, each with an optional sample, in
-  folders you make; where they are kept (plain files, with an id and a SHA-256 for
-  each in a hidden index) and how a workspace is exported and imported.
+  own queries, schemas, patches, documents and web addresses, each (but an address)
+  with an optional sample, in folders you make; where they are kept (plain files, with
+  an id and a SHA-256 for each in a hidden index) and how a workspace is exported and
+  imported.

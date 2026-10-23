@@ -45,9 +45,10 @@ patches and validates documents too. Built in Rust with
   own, or **docked** in the main window — the **⚓** button in their row of tabs gives
   the main window a row of tabs: **Json Query** itself, then the five tools.
 - **Workspace** — the button at the left end of the status bar shows a
-  pane at the left of the window that keeps your own **queries, schemas, patches and
-  documents**, each with an optional **sample**, in folders you make. **Open** puts a
-  query in the query box, a schema in Validate Schema and a patch in Patch JSON;
+  pane at the left of the window that keeps your own **queries, schemas, patches,
+  documents and web addresses**, each (but an address) with an optional **sample**, in
+  folders you make. **Open** puts a query in the query box, a schema in Validate Schema
+  and a patch in Patch JSON, and **Load from the web** loads an address as the Source;
   **Open with sample** opens its sample as well and runs it. **💾** (and **Save…** beside
   Run) saves what is in the box, with the Source as its sample if you want. It is a
   plain folder (`~/.jsonquery/workspace`, or one you choose) of ordinary files, so an

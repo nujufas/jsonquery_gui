@@ -1,6 +1,6 @@
 //! The workspace pane: the strip at the left of the main window that holds the
-//! user's saved queries, schemas, patches and documents (`workspace.rs`), with
-//! their samples, in the folders they were put in.
+//! user's saved queries, schemas, patches, documents and web addresses
+//! (`workspace.rs`), with their samples, in the folders they were put in.
 //!
 //! * The pane has a header (save what is in the box here, make a folder, a menu with
 //!   import and export, fold it away), a line that says where the workspace is, a
@@ -12,9 +12,9 @@
 //!   folder to move it there (`drag.rs`).
 //! * An item is put where it belongs: a query in the query box (and its
 //!   language chosen), a schema in the Schema box of Validate, a patch in the
-//!   Patch box of Patch, a document as the Source. *Open with sample* also opens the
-//!   sample as the Source — or, for a schema or a patch, in the Document box — and
-//!   runs it.
+//!   Patch box of Patch, a document as the Source, a web address loaded from the web
+//!   as the Source. *Open with sample* also opens the sample as the Source — or, for a
+//!   schema or a patch, in the Document box — and runs it.
 //! * Folded, the pane is a thin strip with the one button that opens it again; and
 //!   until it is asked for it is not there at all, so that the window is as it has
 //!   always been (`settings::WorkspaceView`).
@@ -80,6 +80,9 @@ pub const MIN_WINDOW_WIDTH: f32 = 900.0;
 /// How long a message stays under the list, in seconds.
 const NOTICE_SECONDS: f64 = 8.0;
 
+/// What is said of a web address's file that holds no web address.
+const NO_ADDRESS: &str = "There is no web address in it";
+
 /// The most of a query that is put in the box, from an item or from a file that is dropped
 /// on the window: it is laid out whole, as the query box's text always is.
 pub const QUERY_LIMIT: u64 = 1024 * 1024;
@@ -136,6 +139,9 @@ pub enum Action {
     },
     /// Open this file as the Source.
     OpenDocument(PathBuf),
+    /// Load this web address as the Source, as if it had been typed in the Source field
+    /// and Load pressed.
+    OpenUrl(String),
     /// Write the document that is open to this file (the sample of an item that is
     /// being saved), and say when it is written.
     WriteDocument { doc: Arc<Document>, to: PathBuf },
@@ -165,6 +171,8 @@ pub struct Env<'a> {
     pub engine: Engine,
     /// The document that is open as the Source.
     pub doc: Option<&'a Arc<Document>>,
+    /// What is in the Source field, which may be an address that has not been loaded.
+    pub source_text: &'a str,
     /// The most a document may be to be kept as a sample (what the Tools take).
     pub sample_limit: u64,
     pub front: Front,

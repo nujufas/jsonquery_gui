@@ -6,9 +6,9 @@ use std::collections::HashSet;
 use eframe::egui::{self, Color32, FontId, Rect, TextStyle};
 
 use super::drag::{self, Carried, Spot, Verdict};
-use super::{forms, icons, Action, Env, Front, WorkspacePane, QUERY_LIMIT};
+use super::{forms, icons, Action, Env, Front, WorkspacePane, NO_ADDRESS, QUERY_LIMIT};
 use crate::tools::Tool;
-use crate::workspace::{Folder, Group, Item, ItemKind};
+use crate::workspace::{address_in, Folder, Group, Item, ItemKind};
 
 const ROW_HEIGHT: f32 = 20.0;
 const INDENT: f32 = 14.0;
@@ -38,6 +38,7 @@ pub(super) enum Event {
     CopyText(String),
     Reveal(String),
     SaveInto(String),
+    SaveUrlInto(String),
     NewFolderIn(String),
     ExportFolder(String),
     ImportInto(String),
@@ -131,6 +132,7 @@ fn badge_colors(kind: ItemKind, dark: bool) -> (Color32, Color32) {
         ItemKind::Schema => ((211, 238, 238), (23, 72, 75)),
         ItemKind::Patch => ((250, 219, 228), (82, 32, 47)),
         ItemKind::Document => ((228, 228, 228), (56, 56, 56)),
+        ItemKind::Url => ((246, 240, 160), (84, 76, 0)),
     };
     let text = match kind {
         ItemKind::Query(Jq) => ((26, 63, 115), (180, 207, 247)),
@@ -140,6 +142,7 @@ fn badge_colors(kind: ItemKind, dark: bool) -> (Color32, Color32) {
         ItemKind::Schema => ((15, 79, 82), (166, 223, 226)),
         ItemKind::Patch => ((124, 30, 59), (243, 176, 196)),
         ItemKind::Document => ((68, 68, 68), (192, 192, 192)),
+        ItemKind::Url => ((98, 76, 0), (244, 226, 134)),
     };
     let rgb = |(r, g, b): (u8, u8, u8)| Color32::from_rgb(r, g, b);
     if dark {
@@ -611,6 +614,7 @@ impl WorkspacePane {
                 None if item.kind == ItemKind::Document => {
                     format!("Document · {}", crate::app::human_bytes(item.bytes))
                 }
+                None if item.kind == ItemKind::Url => "Web address".to_owned(),
                 None => "No sample".to_owned(),
             };
             ui.label(egui::RichText::new(sample).small().weak());
@@ -648,7 +652,8 @@ impl WorkspacePane {
         }
     }
 
-    /// The first lines of what `item` holds, read once for each version of it.
+    /// The first lines of what `item` holds (a web address: the address), read once for
+    /// each version of it.
     fn preview_of(&mut self, item: &Item) -> String {
         if let Some((sha, text)) = &self.preview {
             if *sha == item.sha256 {
@@ -660,13 +665,8 @@ impl WorkspacePane {
             .as_ref()
             .and_then(|ws| ws.read_text(&item.path, 64 * 1024).ok())
             .unwrap_or_default();
-        let shown: String = text
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
-            .take(2)
-            .collect::<Vec<_>>()
-            .join("  ");
+        let address = address_in(&text).filter(|_| item.kind == ItemKind::Url);
+        let shown = address.map_or_else(|| first_lines(&text), str::to_owned);
         let shown: String = shown.chars().take(240).collect();
         self.preview = Some((item.sha256.clone(), shown.clone()));
         shown
@@ -744,17 +744,7 @@ impl WorkspacePane {
                 Event::Delete(path) => {
                     self.form = forms::Form::delete(self.workspace.as_ref(), &path);
                 }
-                Event::CopyText(path) => {
-                    let text = self
-                        .workspace
-                        .as_ref()
-                        .map(|ws| ws.read_text(&path, QUERY_LIMIT * 16));
-                    match text {
-                        Some(Ok(text)) => ctx.copy_text(text),
-                        Some(Err(e)) => self.say(ctx, e, true),
-                        None => {}
-                    }
-                }
+                Event::CopyText(path) => self.copy_text_of(ctx, &path),
                 Event::Reveal(path) => {
                     if let Some(ws) = &self.workspace {
                         self.actions.push(Action::Reveal(ws.abs(&path)));
@@ -762,6 +752,11 @@ impl WorkspacePane {
                 }
                 Event::SaveInto(folder) => {
                     self.selected = Some(folder);
+                    self.wants_save = true;
+                }
+                Event::SaveUrlInto(folder) => {
+                    self.selected = Some(folder);
+                    self.prefer = Some(forms::What::Url);
                     self.wants_save = true;
                 }
                 Event::NewFolderIn(folder) => self.form = forms::Form::folder(folder),
@@ -775,8 +770,24 @@ impl WorkspacePane {
         let _ = env;
     }
 
+    /// Copy the text of the item at `path` to the clipboard: what its file holds, or, for
+    /// a web address, the address.
+    fn copy_text_of(&mut self, ctx: &egui::Context, path: &str) {
+        let Some(ws) = &self.workspace else { return };
+        let is_address = ws.item(path).is_some_and(|item| item.kind == ItemKind::Url);
+        match ws.read_text(path, QUERY_LIMIT * 16) {
+            Ok(text) if is_address => match address_in(&text) {
+                Some(address) => ctx.copy_text(address.to_owned()),
+                None => self.say(ctx, NO_ADDRESS, true),
+            },
+            Ok(text) => ctx.copy_text(text),
+            Err(e) => self.say(ctx, e, true),
+        }
+    }
+
     /// Put the item at `path` where it belongs; with its sample, as the Source (or
-    /// as the document of the page), and run it.
+    /// as the document of the page), and run it. A web address is loaded from the web
+    /// as the Source.
     fn open_item(&mut self, ctx: &egui::Context, path: &str, with_sample: bool) {
         let Some(ws) = &self.workspace else { return };
         let Some(item) = ws.item(path).cloned() else {
@@ -812,9 +823,32 @@ impl WorkspacePane {
                 sample,
             },
             ItemKind::Document => Action::OpenDocument(file),
+            ItemKind::Url => match ws.read_text(&item.path, QUERY_LIMIT) {
+                Ok(text) => match address_in(&text) {
+                    Some(address) => Action::OpenUrl(address.to_owned()),
+                    None => {
+                        self.say(ctx, NO_ADDRESS, true);
+                        return;
+                    }
+                },
+                Err(e) => {
+                    self.say(ctx, e, true);
+                    return;
+                }
+            },
         };
         self.actions.push(action);
     }
+}
+
+/// The first two lines of `text` that have anything in them, trimmed, on one line.
+fn first_lines(text: &str) -> String {
+    text.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .take(2)
+        .collect::<Vec<_>>()
+        .join("  ")
 }
 
 /// What the two buttons under an item say, by what it is.
@@ -824,6 +858,7 @@ fn labels(kind: ItemKind, _front: Front) -> (&'static str, &'static str) {
         ItemKind::Schema => ("Use as schema", "With its sample"),
         ItemKind::Patch => ("Use as patch", "With its sample"),
         ItemKind::Document => ("Open as Source", "Open as Source"),
+        ItemKind::Url => ("Load from the web", "Load from the web"),
     }
 }
 
@@ -874,6 +909,10 @@ fn row_menu(ui: &mut egui::Ui, row: &Row, folders: &[String], events: &mut Vec<E
         What::Folder { .. } => {
             if ui.button("Save the query here…").clicked() {
                 events.push(Event::SaveInto(path.clone()));
+                ui.close();
+            }
+            if ui.button("Save a web address here…").clicked() {
+                events.push(Event::SaveUrlInto(path.clone()));
                 ui.close();
             }
             if ui.button("New folder…").clicked() {
@@ -942,4 +981,98 @@ fn move_menu(
             offer(ui, folder, &label);
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use jsonquery_query::Kind::{JmesPath, Jq, JsonPath, JsonPointer};
+
+    const KINDS: [ItemKind; 8] = [
+        ItemKind::Query(Jq),
+        ItemKind::Query(JsonPath),
+        ItemKind::Query(JmesPath),
+        ItemKind::Query(JsonPointer),
+        ItemKind::Schema,
+        ItemKind::Patch,
+        ItemKind::Document,
+        ItemKind::Url,
+    ];
+
+    /// How well `text` can be read on `background`: the ratio of their lightness, 1 to 21.
+    fn contrast(background: Color32, text: Color32) -> f32 {
+        fn lightness(color: Color32) -> f32 {
+            let channel = |c: u8| {
+                let c = f32::from(c) / 255.0;
+                if c <= 0.03928 {
+                    c / 12.92
+                } else {
+                    ((c + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * channel(color.r()) + 0.7152 * channel(color.g()) + 0.0722 * channel(color.b())
+        }
+        let (a, b) = (lightness(background), lightness(text));
+        (a.max(b) + 0.05) / (a.min(b) + 0.05)
+    }
+
+    #[test]
+    fn every_kind_has_a_tag_of_its_own_in_the_light_theme_and_in_the_dark_one() {
+        for dark in [false, true] {
+            let tags: Vec<(Color32, Color32)> =
+                KINDS.iter().map(|kind| badge_colors(*kind, dark)).collect();
+            for (i, one) in tags.iter().enumerate() {
+                for other in &tags[i + 1..] {
+                    assert_ne!(one.0, other.0, "two kinds have the background {:?}", one.0);
+                    assert_ne!(one, other);
+                }
+            }
+        }
+        // …and the dark theme's is not the light theme's.
+        for kind in KINDS {
+            assert_ne!(
+                badge_colors(kind, false),
+                badge_colors(kind, true),
+                "{kind:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_text_of_a_tag_can_be_read_on_its_background_in_both_themes() {
+        for dark in [false, true] {
+            for kind in KINDS {
+                let (background, text) = badge_colors(kind, dark);
+                assert!(
+                    contrast(background, text) >= 4.5,
+                    "{kind:?} (dark: {dark}) is {:.1} to 1",
+                    contrast(background, text)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn what_an_item_holds_is_shown_as_its_first_two_lines_that_have_anything_in_them() {
+        assert_eq!(first_lines("\n  a  \n\n b \r\nc"), "a  b");
+        assert_eq!(first_lines("only"), "only");
+        assert_eq!(first_lines(" \n\t\n"), "");
+        assert_eq!(
+            first_lines("[InternetShortcut]\r\nURL=https://example.com/a\r\nIconIndex=0"),
+            "[InternetShortcut]  URL=https://example.com/a"
+        );
+    }
+
+    #[test]
+    fn the_buttons_under_an_item_say_what_it_does_by_what_it_is() {
+        assert_eq!(
+            labels(ItemKind::Url, Front::Query).0,
+            "Load from the web",
+            "the button of a web address"
+        );
+        assert_eq!(labels(ItemKind::Query(Jq), Front::Query).0, "Open");
+        assert_eq!(labels(ItemKind::Schema, Front::Query).0, "Use as schema");
+        assert_eq!(labels(ItemKind::Patch, Front::Query).0, "Use as patch");
+        assert_eq!(labels(ItemKind::Document, Front::Query).0, "Open as Source");
+    }
 }

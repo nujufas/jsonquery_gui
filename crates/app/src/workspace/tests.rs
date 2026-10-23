@@ -1817,3 +1817,618 @@ fn a_sample_that_two_items_share_is_one_sample_in_what_an_import_would_bring() {
         (2, 1, 6)
     );
 }
+
+// ---- web addresses ---------------------------------------------------------------------------
+
+const ADDRESS: &str = "https://example.com/data/orders.json";
+
+fn save_url(workspace: &mut Workspace, folder: &str, name: &str, address: &str) -> Item {
+    workspace
+        .save(NewItem {
+            folder,
+            name,
+            kind: ItemKind::Url,
+            body: &shortcut_text(address),
+            sample: SampleSource::Keep,
+            replace: false,
+        })
+        .unwrap()
+}
+
+/// What a folder holds in most of these tests: a query with a sample, and a web address of
+/// the same name (which is not to be taken for something that needs the sample, or has it).
+fn query_and_address_of_one_name(dir: &Path) -> Workspace {
+    put(dir, "f/orders.jq", ".a");
+    put(dir, "f/orders.sample.json", "[1]");
+    put(dir, "f/orders.url", &shortcut_text(ADDRESS));
+    open(dir)
+}
+
+#[test]
+fn a_url_file_is_an_item_of_its_own_kind_with_an_id_a_sha_and_no_sample() {
+    let dir = ScratchDir::new("ws", "url-item");
+    let text = shortcut_text(ADDRESS);
+    put(&dir, "Data/orders.url", &text);
+    // A file that is named for it, and which nobody has.
+    put(&dir, "Data/orders.sample.json", "[1]");
+    let workspace = open(&dir);
+    let item = workspace.item("Data/orders.url").unwrap();
+    assert_eq!((item.name.as_str(), item.kind), ("orders", ItemKind::Url));
+    assert!(item.sample.is_none(), "{:?}", item.sample);
+    assert_eq!(item.sha256, sha(&text));
+    assert_eq!(item.bytes, text.len() as u64);
+    assert!(!item.id.is_empty());
+    assert_eq!(
+        workspace.tree().item_count(),
+        1,
+        "the sample is not an item"
+    );
+
+    let (index, state, notes) = Index::read(&dir);
+    assert_eq!(state, State::Read);
+    assert!(notes.is_empty(), "{notes:?}");
+    let entry = &index.items["Data/orders.url"];
+    assert_eq!(
+        (entry.id.as_str(), entry.sha256.as_str()),
+        (item.id.as_str(), item.sha256.as_str())
+    );
+    assert!(
+        entry.sample.is_none(),
+        "and the index does not say it has one"
+    );
+    assert_eq!(index.items.len(), 1);
+}
+
+#[test]
+fn the_sample_of_a_name_is_the_queries_when_a_web_address_has_the_name_too() {
+    let dir = ScratchDir::new("ws", "url-and-query");
+    let workspace = query_and_address_of_one_name(&dir);
+    let query = workspace.item("f/orders.jq").unwrap();
+    assert_eq!(query.sample.as_ref().unwrap().path, "f/orders.sample.json");
+    assert!(workspace.item("f/orders.url").unwrap().sample.is_none());
+    let (index, _, _) = Index::read(&dir);
+    assert!(index.items["f/orders.jq"].sample.is_some());
+    assert!(index.items["f/orders.url"].sample.is_none());
+}
+
+#[test]
+fn a_url_file_that_holds_no_address_is_listed_all_the_same_and_its_text_is_read() {
+    let dir = ScratchDir::new("ws", "url-no-address");
+    put(&dir, "empty.url", "");
+    put(&dir, "words.url", "not an address\nat all\n");
+    put(
+        &dir,
+        "ftp.url",
+        "[InternetShortcut]\r\nURL=ftp://example.com/a\r\n",
+    );
+    put(
+        &dir,
+        "marked.url",
+        "\u{feff}[InternetShortcut]\r\nURL=https://example.com/a\r\n",
+    );
+    put(&dir, "lenient.URL", "https://example.com/b\n");
+    let workspace = open(&dir);
+    assert_eq!(
+        paths(&workspace),
+        [
+            "empty.url",
+            "ftp.url",
+            "lenient.URL",
+            "marked.url",
+            "words.url"
+        ]
+    );
+    let address_of = |rel: &str| {
+        let text = workspace.read_text(rel, 1000).unwrap();
+        address_in(&text).map(str::to_owned)
+    };
+    assert_eq!(address_of("empty.url"), None);
+    assert_eq!(address_of("words.url"), None);
+    assert_eq!(address_of("ftp.url"), None);
+    assert_eq!(
+        address_of("marked.url").as_deref(),
+        Some("https://example.com/a"),
+        "a byte-order mark is not in the way"
+    );
+    assert_eq!(
+        address_of("lenient.URL").as_deref(),
+        Some("https://example.com/b")
+    );
+    for item in workspace.tree().all_items() {
+        assert_eq!(item.kind, ItemKind::Url, "{}", item.path);
+        assert!(!item.id.is_empty() && item.sample.is_none());
+    }
+}
+
+#[test]
+fn a_web_address_is_saved_as_the_lines_of_a_shortcut_and_replaced_with_its_id_kept() {
+    let dir = ScratchDir::new("ws", "url-save");
+    let mut workspace = open(&dir);
+    let item = save_url(&mut workspace, "Data", "orders", ADDRESS);
+    assert_eq!(item.path, "Data/orders.url");
+    assert_eq!(item.kind, ItemKind::Url);
+    let on_disk = fs::read(dir.join("Data/orders.url")).unwrap();
+    assert_eq!(
+        on_disk,
+        b"[InternetShortcut]\r\nURL=https://example.com/data/orders.json\r\n"
+    );
+    assert_eq!(item.sha256, sha256_hex(&on_disk));
+    assert!(item.sample.is_none());
+
+    // Not over what is there unless that is asked for.
+    let refused = workspace.save(NewItem {
+        folder: "Data",
+        name: "orders",
+        kind: ItemKind::Url,
+        body: &shortcut_text("https://example.com/other"),
+        sample: SampleSource::Keep,
+        replace: false,
+    });
+    let error = refused.unwrap_err();
+    assert!(
+        error.contains("There is already a web address called “orders”"),
+        "{error}"
+    );
+    assert_eq!(fs::read(dir.join("Data/orders.url")).unwrap(), on_disk);
+
+    let replaced = workspace
+        .save(NewItem {
+            folder: "Data",
+            name: "orders",
+            kind: ItemKind::Url,
+            body: &shortcut_text("https://example.com/other"),
+            sample: SampleSource::Keep,
+            replace: true,
+        })
+        .unwrap();
+    assert_eq!(replaced.id, item.id, "the same item");
+    assert_eq!(
+        replaced.sha256,
+        sha(&shortcut_text("https://example.com/other"))
+    );
+    let (index, _, _) = Index::read(&dir);
+    assert_eq!(index.items["Data/orders.url"].sha256, replaced.sha256);
+    assert_eq!(index.items.len(), 1);
+}
+
+#[test]
+fn a_web_address_is_never_saved_with_a_sample_and_nothing_is_written_when_one_is_given() {
+    let dir = ScratchDir::new("ws", "url-save-sample");
+    let mut workspace = open(&dir);
+    let staged = workspace.staging_path();
+    fs::write(&staged, "[1]").unwrap();
+    for sample in [
+        SampleSource::Text("[1]".to_owned()),
+        SampleSource::Staged(staged.clone()),
+    ] {
+        let error = workspace
+            .save(NewItem {
+                folder: "f",
+                name: "feed",
+                kind: ItemKind::Url,
+                body: &shortcut_text(ADDRESS),
+                sample,
+                replace: false,
+            })
+            .unwrap_err();
+        assert_eq!(error, "A web address has no sample");
+    }
+    assert!(!dir.join("f").exists(), "nothing was made");
+    assert!(staged.exists(), "and the file that waits was not taken");
+    assert!(workspace.tree().all_items().is_empty());
+}
+
+#[test]
+fn saving_a_web_address_leaves_the_sample_of_the_items_of_its_name_alone() {
+    let dir = ScratchDir::new("ws", "url-save-beside");
+    let mut workspace = open(&dir);
+    save_with_sample(&mut workspace, "", "orders", ".a", "[1]");
+    let url = save_url(&mut workspace, "", "orders", ADDRESS);
+    assert!(url.sample.is_none());
+    assert_eq!(text(&dir, "orders.sample.json"), "[1]");
+    assert!(workspace.item("orders.jq").unwrap().sample.is_some());
+    workspace
+        .save(NewItem {
+            folder: "",
+            name: "orders",
+            kind: ItemKind::Url,
+            body: &shortcut_text("https://example.com/b"),
+            sample: SampleSource::Keep,
+            replace: true,
+        })
+        .unwrap();
+    assert_eq!(text(&dir, "orders.sample.json"), "[1]");
+    // And a query saved on either side of an address of its name has the sample it is given.
+    save_with_sample(&mut workspace, "", "feed", ".f", "[2]");
+    save_url(&mut workspace, "", "feed", ADDRESS);
+    assert_eq!(text(&dir, "feed.sample.json"), "[2]");
+    save_url(&mut workspace, "", "late", ADDRESS);
+    let late = save_with_sample(&mut workspace, "", "late", ".l", "[3]");
+    assert_eq!(late.sample.unwrap().path, "late.sample.json");
+    assert!(workspace.item("late.url").unwrap().sample.is_none());
+}
+
+#[test]
+fn a_query_that_is_renamed_takes_its_sample_along_though_a_web_address_has_its_name() {
+    let dir = ScratchDir::new("ws", "url-rename-query");
+    let mut workspace = query_and_address_of_one_name(&dir);
+    workspace.rename("f/orders.jq", "orders query").unwrap();
+    assert_eq!(text(&dir, "f/orders query.sample.json"), "[1]");
+    assert!(
+        !dir.join("f/orders.sample.json").exists(),
+        "it did not stay behind for the address"
+    );
+    assert!(workspace
+        .item("f/orders query.jq")
+        .unwrap()
+        .sample
+        .is_some());
+    let url = workspace.item("f/orders.url").unwrap();
+    assert!(url.sample.is_none());
+    assert_eq!(text(&dir, "f/orders.url"), shortcut_text(ADDRESS));
+}
+
+#[test]
+fn a_web_address_that_is_renamed_keeps_its_id_and_takes_no_sample_and_leaves_none() {
+    let dir = ScratchDir::new("ws", "url-rename");
+    let mut workspace = query_and_address_of_one_name(&dir);
+    let id = id_of(&workspace, "f/orders.url");
+    assert_eq!(
+        workspace.rename("f/orders.url", "feed").unwrap(),
+        "f/feed.url"
+    );
+    assert_eq!(id_of(&workspace, "f/feed.url"), id);
+    assert_eq!(text(&dir, "f/feed.url"), shortcut_text(ADDRESS));
+    assert_eq!(
+        text(&dir, "f/orders.sample.json"),
+        "[1]",
+        "the query's, still there"
+    );
+    assert!(!dir.join("f/feed.sample.json").exists());
+    let (index, _, _) = Index::read(&dir);
+    assert_eq!(index.items["f/feed.url"].id, id);
+    assert!(!index.items.contains_key("f/orders.url"));
+    // A name that has a sample (somebody else's) is no reason to refuse: it does not touch it.
+    put(&dir, "f/taken.sample.json", "[9]");
+    assert_eq!(
+        workspace.rename("f/feed.url", "taken").unwrap(),
+        "f/taken.url"
+    );
+    assert_eq!(text(&dir, "f/taken.sample.json"), "[9]");
+    assert!(workspace.item("f/taken.url").unwrap().sample.is_none());
+    // A name that another address has is refused, and the end keeps the case it had.
+    put(&dir, "f/Loud.URL", &shortcut_text(ADDRESS));
+    workspace.rescan();
+    let error = workspace.rename("f/taken.url", "loud").unwrap_err();
+    assert!(
+        error.contains("There is already a web address called “loud”"),
+        "{error}"
+    );
+    assert_eq!(
+        workspace.rename("f/Loud.URL", "Quiet").unwrap(),
+        "f/Quiet.URL"
+    );
+}
+
+#[test]
+fn a_query_that_is_moved_takes_its_sample_along_though_a_web_address_has_its_name() {
+    let dir = ScratchDir::new("ws", "url-move-query");
+    let mut workspace = query_and_address_of_one_name(&dir);
+    workspace.create_folder("", "to").unwrap();
+    workspace.move_to("f/orders.jq", "to").unwrap();
+    assert_eq!(text(&dir, "to/orders.sample.json"), "[1]");
+    assert!(
+        !dir.join("f/orders.sample.json").exists(),
+        "moved, and not copied for the address to keep"
+    );
+    assert!(workspace.item("f/orders.url").unwrap().sample.is_none());
+}
+
+#[test]
+fn a_web_address_that_is_moved_goes_alone_with_its_id() {
+    let dir = ScratchDir::new("ws", "url-move");
+    let mut workspace = query_and_address_of_one_name(&dir);
+    put(&dir, "to/orders.sample.json", "[7]");
+    let id = id_of(&workspace, "f/orders.url");
+    // (Into a folder that has a sample of its name: it does not mind.)
+    assert_eq!(
+        workspace.move_to("f/orders.url", "to").unwrap(),
+        "to/orders.url"
+    );
+    assert_eq!(id_of(&workspace, "to/orders.url"), id);
+    assert_eq!(
+        text(&dir, "to/orders.sample.json"),
+        "[7]",
+        "that sample is as it was"
+    );
+    assert_eq!(
+        text(&dir, "f/orders.sample.json"),
+        "[1]",
+        "and this one stayed"
+    );
+    assert!(workspace.item("to/orders.url").unwrap().sample.is_none());
+    assert!(!dir.join("f/orders.url").exists());
+    // A web address of the name that is there is refused, as any item is.
+    put(
+        &dir,
+        "g/orders.url",
+        &shortcut_text("https://example.com/other"),
+    );
+    workspace.rescan();
+    let error = workspace.move_to("g/orders.url", "to").unwrap_err();
+    assert!(
+        error.contains("There is already a web address called “orders”"),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_web_address_is_copied_alone_and_its_name_does_not_mind_a_sample() {
+    let dir = ScratchDir::new("ws", "url-duplicate");
+    let mut workspace = query_and_address_of_one_name(&dir);
+    let original = workspace.item("f/orders.url").unwrap().clone();
+    let copy = workspace.duplicate("f/orders.url").unwrap();
+    assert_eq!(copy.path, "f/orders (2).url");
+    assert_ne!(copy.id, original.id);
+    assert_eq!(copy.sha256, original.sha256);
+    assert_eq!(text(&dir, "f/orders (2).url"), shortcut_text(ADDRESS));
+    assert!(copy.sample.is_none());
+    assert!(
+        !dir.join("f/orders (2).sample.json").exists(),
+        "no sample was copied for it"
+    );
+    // A sample that is there (nobody's) at the next name is no reason to skip it…
+    put(&dir, "g/u.url", &shortcut_text(ADDRESS));
+    put(&dir, "g/u (2).sample.json", "[3]");
+    workspace.rescan();
+    assert_eq!(workspace.duplicate("g/u.url").unwrap().path, "g/u (2).url");
+    assert_eq!(text(&dir, "g/u (2).sample.json"), "[3]", "it is as it was");
+    // …as it is for a query, whose copy would take that sample for its own.
+    put(&dir, "g/q.jq", ".q");
+    put(&dir, "g/q (2).sample.json", "[4]");
+    workspace.rescan();
+    assert_eq!(workspace.duplicate("g/q.jq").unwrap().path, "g/q (3).jq");
+    // The copy of a query that has a sample, beside an address of the name, has the sample.
+    let query_copy = workspace.duplicate("f/orders.jq").unwrap();
+    assert_eq!(query_copy.path, "f/orders (3).jq");
+    assert_eq!(text(&dir, "f/orders (3).sample.json"), "[1]");
+    assert!(query_copy.sample.is_some());
+}
+
+#[test]
+fn a_query_that_is_deleted_takes_its_sample_though_a_web_address_has_its_name() {
+    let dir = ScratchDir::new("ws", "url-delete-query");
+    let mut workspace = query_and_address_of_one_name(&dir);
+    assert_eq!(
+        workspace.delete("f/orders.jq").unwrap(),
+        Deleted { items: 1, left: 0 }
+    );
+    assert!(!dir.join("f/orders.sample.json").exists());
+    assert!(
+        dir.join("f/orders.url").is_file(),
+        "the address is still there"
+    );
+    assert_eq!(paths(&workspace), ["f/orders.url"]);
+}
+
+#[test]
+fn a_web_address_that_is_deleted_takes_no_sample_with_it() {
+    let dir = ScratchDir::new("ws", "url-delete");
+    let mut workspace = query_and_address_of_one_name(&dir);
+    put(&dir, "f/solo.url", &shortcut_text(ADDRESS));
+    put(&dir, "f/solo.sample.json", "[2]");
+    workspace.rescan();
+    assert_eq!(
+        workspace.delete("f/orders.url").unwrap(),
+        Deleted { items: 1, left: 0 }
+    );
+    assert_eq!(text(&dir, "f/orders.sample.json"), "[1]", "the query's");
+    assert!(workspace.item("f/orders.jq").unwrap().sample.is_some());
+    // Nor the one that nobody has.
+    workspace.delete("f/solo.url").unwrap();
+    assert_eq!(text(&dir, "f/solo.sample.json"), "[2]");
+    let (index, _, _) = Index::read(&dir);
+    assert_eq!(index.items.keys().collect::<Vec<_>>(), ["f/orders.jq"]);
+}
+
+#[test]
+fn a_folder_is_deleted_with_the_web_addresses_in_it_as_it_is_with_the_rest() {
+    let dir = ScratchDir::new("ws", "url-delete-folder");
+    let mut workspace = query_and_address_of_one_name(&dir);
+    put(&dir, "f/more/feed.url", &shortcut_text(ADDRESS));
+    workspace.rescan();
+    assert_eq!(
+        workspace.delete("f").unwrap(),
+        Deleted { items: 3, left: 0 }
+    );
+    assert!(!dir.join("f").exists());
+}
+
+#[test]
+fn a_web_address_that_another_program_moved_is_found_again_and_keeps_its_id() {
+    let dir = ScratchDir::new("ws", "url-moved-outside");
+    put(&dir, "a.url", &shortcut_text(ADDRESS));
+    let mut workspace = open(&dir);
+    let id = id_of(&workspace, "a.url");
+    fs::create_dir_all(dir.join("g")).unwrap();
+    fs::rename(dir.join("a.url"), dir.join("g/b.url")).unwrap();
+    workspace.rescan();
+    assert_eq!(id_of(&workspace, "g/b.url"), id);
+    // And one that was edited keeps it, with the new text's sha.
+    put(
+        &dir,
+        "g/b.url",
+        &shortcut_text("https://example.com/edited"),
+    );
+    workspace.rescan();
+    assert_eq!(id_of(&workspace, "g/b.url"), id);
+    assert_eq!(
+        workspace.item("g/b.url").unwrap().sha256,
+        sha(&shortcut_text("https://example.com/edited"))
+    );
+}
+
+#[test]
+fn web_addresses_are_exported_with_their_ids_and_without_a_sample_of_their_own() {
+    let dir = ScratchDir::new("ws", "url-export");
+    let out = ScratchDir::new("ws", "url-export-to");
+    let mut workspace = something(&dir);
+    save_url(&mut workspace, "Logs/Errors", "slow", ADDRESS);
+    save_url(
+        &mut workspace,
+        "Feeds",
+        "orders",
+        "https://example.com/orders.json",
+    );
+    for with_samples in [true, false] {
+        let to = out.join(format!("copy-{with_samples}"));
+        let done = workspace
+            .export(&Scope::Everything, &to, with_samples)
+            .unwrap();
+        assert_eq!(done.items, 6, "the addresses are items");
+        // `slow` has a sample of its own, and its address is not what it is exported with.
+        assert_eq!(done.samples, if with_samples { 2 } else { 0 });
+        assert_eq!(
+            text(&to, "Feeds/orders.url"),
+            shortcut_text("https://example.com/orders.json")
+        );
+        assert_eq!(text(&to, "Logs/Errors/slow.url"), shortcut_text(ADDRESS));
+        let copy = open(&to);
+        for path in ["Feeds/orders.url", "Logs/Errors/slow.url"] {
+            let (here, there) = (workspace.item(path).unwrap(), copy.item(path).unwrap());
+            assert_eq!(
+                (&there.id, &there.sha256),
+                (&here.id, &here.sha256),
+                "{path}"
+            );
+            assert!(there.sample.is_none(), "{path}");
+        }
+        let (index, _, _) = Index::read(&to);
+        assert!(index.items["Logs/Errors/slow.url"].sample.is_none());
+        assert_eq!(index.items.len(), 6);
+    }
+    // A folder alone, too.
+    let done = workspace
+        .export(&Scope::Folder("Feeds".to_owned()), &out.join("feeds"), true)
+        .unwrap();
+    assert_eq!((done.items, done.samples), (1, 0));
+}
+
+#[test]
+fn web_addresses_are_imported_with_their_ids_and_the_same_one_is_not_brought_in_twice() {
+    let source = ScratchDir::new("ws", "url-import-from");
+    let dir = ScratchDir::new("ws", "url-import-into");
+    let mut theirs = open(&source);
+    save_url(&mut theirs, "Feeds", "orders", ADDRESS);
+    save_with_sample(&mut theirs, "Feeds", "orders", ".q", "[1]");
+    // An address and a file of its name that is nobody's.
+    put(&source, "Feeds/solo.url", &shortcut_text(ADDRESS));
+    put(&source, "Feeds/solo.sample.json", "[2]");
+    let mut workspace = open_after(&dir, 100);
+    let first = workspace
+        .import(
+            &source,
+            &Place::NewFolder("team".to_owned()),
+            Clash::KeepBoth,
+        )
+        .unwrap();
+    assert_eq!((first.added, first.identical), (3, 0));
+    assert_eq!(text(&dir, "team/Feeds/orders.url"), shortcut_text(ADDRESS));
+    assert_eq!(text(&dir, "team/Feeds/solo.url"), shortcut_text(ADDRESS));
+    assert!(
+        !dir.join("team/Feeds/solo.sample.json").exists(),
+        "a file that nobody has is not brought in"
+    );
+    assert_eq!(
+        id_of(&workspace, "team/Feeds/orders.url"),
+        id_of(&theirs, "Feeds/orders.url")
+    );
+    assert!(workspace
+        .item("team/Feeds/orders.url")
+        .unwrap()
+        .sample
+        .is_none());
+    assert_eq!(text(&dir, "team/Feeds/orders.sample.json"), "[1]");
+    let second = workspace
+        .import(&source, &Place::Inside("team".to_owned()), Clash::KeepBoth)
+        .unwrap();
+    assert_eq!((second.added, second.identical), (0, 3));
+}
+
+#[test]
+fn an_imported_web_address_whose_name_is_taken_is_given_a_number_that_a_sample_does_not_stop() {
+    let source = ScratchDir::new("ws", "url-import-clash-from");
+    put(
+        &source,
+        "orders.url",
+        &shortcut_text("https://example.com/theirs"),
+    );
+    put(&source, "orders.jq", ".theirs");
+    put(&source, "orders.sample.json", "[9]");
+    // In the workspace: the same names, with other texts, and a sample at the next number.
+    let dir = ScratchDir::new("ws", "url-import-clash-into");
+    put(
+        &dir,
+        "orders.url",
+        &shortcut_text("https://example.com/mine"),
+    );
+    put(&dir, "orders.jq", ".mine");
+    put(&dir, "orders (2).sample.json", "[2]");
+    let mut workspace = open(&dir);
+    let done = workspace
+        .import(&source, &Place::Inside(String::new()), Clash::KeepBoth)
+        .unwrap();
+    assert_eq!((done.added, done.renamed), (0, 2));
+    // The address does not mind the sample of `orders (2)`; the query does, and goes on.
+    assert_eq!(
+        text(&dir, "orders (2).url"),
+        shortcut_text("https://example.com/theirs")
+    );
+    assert_eq!(text(&dir, "orders (3).jq"), ".theirs");
+    assert_eq!(text(&dir, "orders (3).sample.json"), "[9]");
+    assert_eq!(text(&dir, "orders (2).sample.json"), "[2]", "as it was");
+    assert!(workspace.item("orders (2).url").unwrap().sample.is_none());
+
+    // Replaced: the one that is there is, with its id kept.
+    let id = id_of(&workspace, "orders.url");
+    let done = workspace
+        .import(&source, &Place::Inside(String::new()), Clash::Replace)
+        .unwrap();
+    assert_eq!(done.replaced, 2);
+    assert_eq!(
+        text(&dir, "orders.url"),
+        shortcut_text("https://example.com/theirs")
+    );
+    assert_eq!(id_of(&workspace, "orders.url"), id);
+    // Left out: nothing is written.
+    let before = text(&dir, "orders.url");
+    put(
+        &source,
+        "orders.url",
+        &shortcut_text("https://example.com/third"),
+    );
+    let done = workspace
+        .import(&source, &Place::Inside(String::new()), Clash::Skip)
+        .unwrap();
+    assert_eq!((done.skipped, done.identical), (1, 1));
+    assert_eq!(text(&dir, "orders.url"), before);
+}
+
+#[test]
+fn what_a_folder_holds_counts_its_web_addresses_and_the_names_of_them_claim_no_sample() {
+    let source = ScratchDir::new("ws", "url-preview");
+    put(&source, "a.url", &shortcut_text(ADDRESS));
+    put(&source, "a.sample.json", "[1, 2]");
+    put(&source, "b.jq", ".b");
+    put(&source, "b.sample.json", "[1]");
+    put(&source, "b.url", &shortcut_text(ADDRESS));
+    put(&source, "Sub/c.url", &shortcut_text(ADDRESS));
+    let preview = preview(&source).unwrap();
+    assert_eq!(preview.items, 4);
+    assert_eq!((preview.urls, preview.queries), (3, 1));
+    assert_eq!(
+        (preview.samples, preview.sample_bytes),
+        (1, 3),
+        "only the query's sample is counted"
+    );
+}

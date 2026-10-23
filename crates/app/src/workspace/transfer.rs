@@ -73,6 +73,7 @@ pub struct Preview {
     pub schemas: usize,
     pub patches: usize,
     pub documents: usize,
+    pub urls: usize,
     pub samples: usize,
     pub sample_bytes: u64,
     pub notes: Vec<String>,
@@ -124,6 +125,7 @@ pub fn preview(from: &Path) -> Result<Preview, String> {
             ItemKind::Schema => preview.schemas += 1,
             ItemKind::Patch => preview.patches += 1,
             ItemKind::Document => preview.documents += 1,
+            ItemKind::Url => preview.urls += 1,
         }
         if let Some(sample) = &item.sample {
             if counted.insert(sample.path.clone()) {
@@ -384,7 +386,8 @@ impl Workspace {
                     |n| {
                         self.abs(&join(dest_folder, &format!("{n}{}", item.ext)))
                             .exists()
-                            || self.abs(&join(dest_folder, &sample_file_name(n))).exists()
+                            || (item.kind.takes_sample()
+                                && self.abs(&join(dest_folder, &sample_file_name(n))).exists())
                     },
                     &item.name,
                 );

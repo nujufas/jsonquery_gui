@@ -450,17 +450,25 @@ things are made from it:
 
 ## 11. Workspace
 
-The user's saved queries, schemas, patches and documents are a folder (`workspace.rs`,
-and `workspace/` beside it in the app crate; the guide for users is
+The user's saved queries, schemas, patches, documents and web addresses are a folder
+(`workspace.rs`, and `workspace/` beside it in the app crate; the guide for users is
 [Workspace](workspace.md)). It is a real folder, so that other programs can use what is
 in it, and so everything that is done to it is written to be safe to do to a folder
 that is not only the app's:
 
 - **`workspace/names.rs`** — which file is which kind of item (`.jq`, `.schema.json`,
-  `.patch.json`… `ItemKind`), the sample that goes with it (`<name>.sample.json`), and
-  the names a file system and a person may use (`check_name`, `check_item_name`: the
-  characters, the length, the names Windows keeps, and a round trip so that a name is
-  read back as the same item).
+  `.patch.json`, `.url`… `ItemKind`), the sample that goes with it
+  (`<name>.sample.json`), and the names a file system and a person may use
+  (`check_name`, `check_item_name`: the characters, the length, the names Windows keeps,
+  and a round trip so that a name is read back as the same item). A web address
+  (`ItemKind::Url`) never has a sample and never shares one (`ItemKind::takes_sample`):
+  `scan` gives it none, and the sample rules of `store.rs` and `transfer.rs` (who keeps
+  a sample, which names a copy or an import may take) do not count it.
+- **`workspace/address.rs`** — the web address that a `.url` item holds: `web_address`,
+  the one rule for what may be an address (used where a file is read, in the window
+  that saves, and before anything is loaded), `address_in` (the first `URL` line of a
+  Windows Internet Shortcut, or the one line that the file is), `shortcut_text` (what is
+  written) and `default_name` (what a new item is called to begin with).
 - **`workspace/files.rs`** — `write_atomic` (a file is written beside and renamed into
   place), relative paths (`/` between the parts, on every system), and the guard against
   going through a link (`passes_through_a_link`, `is_inside`).
@@ -485,7 +493,9 @@ drawn at the left of the main window by `App::workspace_panel`, before the rows 
 stands beside (the status bar is drawn before it, so that it stops above it); it asks
 the app for what it cannot do itself through `Action`s, as the Tools do with their
 `Request`s: put a query in the box, put a file in the Tools' schema or patch box, open
-a file as the Source, write the Source to a file (the sample of an item: the worker
+a file as the Source, load a web address as the Source (`Action::OpenUrl`, which the
+app does as `App::open_url` does for an address typed in the Source field and loaded),
+write the Source to a file (the sample of an item: the worker
 writes it, to a file in the app's folder in the workspace, which is moved into place
 when `Event::Saved` says it is written), keep another folder, show more or less of
 the pane. Where it is not shown (`settings::WorkspaceView::Hidden`, the way the app

@@ -57,6 +57,8 @@ pub struct Item {
     /// The relative path of its file.
     pub path: String,
     pub bytes: u64,
+    /// The file `<name>.sample.json` beside it, if there is one and the kind of item has
+    /// a sample to have (`ItemKind::takes_sample`).
     pub sample: Option<Sample>,
     /// The end its file has, as it is written.
     pub(super) ext: String,
@@ -348,21 +350,26 @@ pub(super) fn scan_up_to(
         used.insert(id.clone());
 
         let sample_path = join(parent(&found.rel), &sample_file_name(&found.name));
-        let sample = walk.samples.get(&sample_path).and_then(|meta| {
-            let cached = base
-                .and_then(|e| e.sample.as_ref())
-                .filter(|s| s.bytes == meta.bytes && s.modified == meta.modified);
-            match cached {
-                Some(sample) => Some(sample.clone()),
-                None => sha256_file(&on_disk(root, &sample_path))
-                    .ok()
-                    .map(|(sha, _)| SampleEntry {
-                        sha256: sha,
-                        bytes: meta.bytes,
-                        modified: meta.modified,
-                    }),
-            }
-        });
+        // (A web address has none, whatever file is called after it.)
+        let sample = walk
+            .samples
+            .get(&sample_path)
+            .filter(|_| found.kind.takes_sample())
+            .and_then(|meta| {
+                let cached = base
+                    .and_then(|e| e.sample.as_ref())
+                    .filter(|s| s.bytes == meta.bytes && s.modified == meta.modified);
+                match cached {
+                    Some(sample) => Some(sample.clone()),
+                    None => sha256_file(&on_disk(root, &sample_path))
+                        .ok()
+                        .map(|(sha, _)| SampleEntry {
+                            sha256: sha,
+                            bytes: meta.bytes,
+                            modified: meta.modified,
+                        }),
+                }
+            });
 
         let mut entry = match base {
             Some(base) => base.renewed(id.clone(), sha.clone(), found.bytes, found.modified),
@@ -663,12 +670,13 @@ impl Workspace {
     }
 
     /// Whether another item in the same folder has the name of `item` (and so the
-    /// same sample).
+    /// same sample). A web address has no sample, so it shares none, and is not one
+    /// that keeps the sample of the items of its name.
     fn shares_sample(&self, item: &Item) -> bool {
         self.tree.find_folder(item.folder()).is_some_and(|f| {
             f.items
                 .iter()
-                .any(|i| i.path != item.path && i.name == item.name)
+                .any(|i| i.path != item.path && i.name == item.name && i.kind.takes_sample())
         })
     }
 
@@ -713,6 +721,10 @@ impl Workspace {
         sample: SampleSource,
         replace: bool,
     ) -> Result<Item, String> {
+        // (Nothing is written, or taken from where it waits, for an item that has no sample.)
+        if !kind.takes_sample() && !matches!(sample, SampleSource::Keep) {
+            return Err(format!("A {} has no sample", kind.what()));
+        }
         self.rescan();
         let name = check_item_name(name, kind)?;
         let folder = self.checked_folder(folder)?;
@@ -958,9 +970,10 @@ impl Workspace {
         let name = unique_name(
             |candidate| {
                 self.has_name(&folder, candidate)
-                    || self
-                        .abs(&join(&folder, &sample_file_name(candidate)))
-                        .exists()
+                    || (item.kind.takes_sample()
+                        && self
+                            .abs(&join(&folder, &sample_file_name(candidate)))
+                            .exists())
             },
             &item.name,
         );

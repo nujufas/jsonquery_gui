@@ -13,6 +13,7 @@
 //! | `name.schema.json` | a JSON Schema, for Validate |
 //! | `name.patch.json` | a JSON Patch or a JSON Merge Patch, for Patch |
 //! | `name.json`, `name.ndjson`, `name.jsonl` | a document, to open as Source |
+//! | `name.url` | a web address, to load as Source (see `address.rs`) |
 //! | `name.sample.json` | the sample of the items called `name` in that folder |
 //!
 //! Anything else in a folder is not the workspace's, and is left alone.
@@ -37,6 +38,9 @@ pub enum ItemKind {
     Patch,
     /// A JSON document, to open as the Source.
     Document,
+    /// The web address of a JSON document, to load as the Source. It never has a
+    /// sample, nor shares one.
+    Url,
 }
 
 /// The sorts of item the pane can be asked to list: one of its chips.
@@ -48,15 +52,17 @@ pub enum Group {
     Schemas,
     Patches,
     Documents,
+    Urls,
 }
 
 impl Group {
-    pub const ALL: [Group; 5] = [
+    pub const ALL: [Group; 6] = [
         Group::All,
         Group::Queries,
         Group::Schemas,
         Group::Patches,
         Group::Documents,
+        Group::Urls,
     ];
 
     /// What the chip says.
@@ -67,6 +73,7 @@ impl Group {
             Group::Schemas => "Schemas",
             Group::Patches => "Patches",
             Group::Documents => "Docs",
+            Group::Urls => "URLs",
         }
     }
 
@@ -78,6 +85,7 @@ impl Group {
             Group::Schemas => kind == ItemKind::Schema,
             Group::Patches => kind == ItemKind::Patch,
             Group::Documents => kind == ItemKind::Document,
+            Group::Urls => kind == ItemKind::Url,
         }
     }
 }
@@ -93,6 +101,7 @@ impl ItemKind {
             ItemKind::Schema => ".schema.json",
             ItemKind::Patch => ".patch.json",
             ItemKind::Document => ".json",
+            ItemKind::Url => ".url",
         }
     }
 
@@ -106,6 +115,7 @@ impl ItemKind {
             ItemKind::Schema => "schema",
             ItemKind::Patch => "patch",
             ItemKind::Document => "json",
+            ItemKind::Url => "url",
         }
     }
 
@@ -116,13 +126,22 @@ impl ItemKind {
             ItemKind::Schema => "schema",
             ItemKind::Patch => "patch",
             ItemKind::Document => "document",
+            ItemKind::Url => "web address",
         }
+    }
+
+    /// Whether an item of this kind goes with the sample of its name. A web address
+    /// does not: the sample that its name would point at belongs to the other
+    /// items of that name, or to none, and the address neither keeps it alive nor
+    /// takes it along.
+    pub fn takes_sample(self) -> bool {
+        self != ItemKind::Url
     }
 }
 
 /// The ends that say what a file is, longest first (`.schema.json` is a schema, not
 /// a document that ends in `.json`).
-const SUFFIXES: [(&str, ItemKind); 9] = [
+const SUFFIXES: [(&str, ItemKind); 10] = [
     (".schema.json", ItemKind::Schema),
     (".patch.json", ItemKind::Patch),
     (".jsonpath", ItemKind::Query(Engine::JsonPath)),
@@ -132,6 +151,7 @@ const SUFFIXES: [(&str, ItemKind); 9] = [
     (".ndjson", ItemKind::Document),
     (".jsonl", ItemKind::Document),
     (".json", ItemKind::Document),
+    (".url", ItemKind::Url),
 ];
 
 /// A file name that is an item's.
@@ -168,7 +188,7 @@ pub fn parse_file_name(file: &str) -> Option<Parsed> {
 
 /// Whether `text` ends in `suffix`, whatever the case (a file that is `A.JQ` is a
 /// jq program on a system that does not tell the cases apart, and Windows is one).
-fn ends_with_ignoring_case(text: &str, suffix: &str) -> bool {
+pub(super) fn ends_with_ignoring_case(text: &str, suffix: &str) -> bool {
     text.len() >= suffix.len()
         && text
             .get(text.len() - suffix.len()..)
@@ -195,6 +215,12 @@ pub fn sample_file_name(name: &str) -> String {
 /// something else.
 const FORBIDDEN: [char; 9] = ['/', '\\', ':', '*', '?', '"', '<', '>', '|'];
 
+/// Whether a name may not have `c` in it: one of the characters above, or a control
+/// character.
+fn is_forbidden(c: char) -> bool {
+    FORBIDDEN.contains(&c) || c.is_control()
+}
+
 /// The names Windows keeps for devices, which no file there can have (with or
 /// without an end).
 const RESERVED: [&str; 22] = [
@@ -218,10 +244,7 @@ pub fn check_name(raw: &str) -> Result<String, String> {
             "That name is too long: at most {MAX_NAME_BYTES} letters"
         ));
     }
-    if name
-        .chars()
-        .any(|c| FORBIDDEN.contains(&c) || c.is_control())
-    {
+    if name.chars().any(is_forbidden) {
         return Err("A name can't have any of / \\ : * ? \" < > | in it".to_owned());
     }
     if name.starts_with('.') {
@@ -235,6 +258,19 @@ pub fn check_name(raw: &str) -> Result<String, String> {
         return Err(format!("{first} is a name that Windows keeps for itself"));
     }
     Ok(name.to_owned())
+}
+
+/// `raw` as a name [`check_name`] would take, as far as that can be done by changing it:
+/// each character a name may not have is replaced by `-`, and the dots and spaces at its
+/// ends are taken off. (It can still be empty, too long, or a name Windows keeps.)
+pub fn cleaned_name(raw: &str) -> String {
+    let replaced: String = raw
+        .chars()
+        .map(|c| if is_forbidden(c) { '-' } else { c })
+        .collect();
+    replaced
+        .trim_matches(|c: char| c == '.' || c.is_whitespace())
+        .to_owned()
 }
 
 /// The name of an item of `kind`: as [`check_name`], and one that, with the end the
@@ -285,9 +321,65 @@ mod tests {
             ("invoices 2026.json", "invoices 2026", ItemKind::Document),
             ("log.ndjson", "log", ItemKind::Document),
             ("log.jsonl", "log", ItemKind::Document),
+            ("daily orders.url", "daily orders", ItemKind::Url),
         ] {
             assert_eq!(kind_of(file), Some((name.to_owned(), kind)), "{file}");
         }
+    }
+
+    #[test]
+    fn a_web_address_is_a_file_that_ends_in_url_whatever_the_case_of_the_end() {
+        let parsed = parse_file_name("Orders.URL").unwrap();
+        assert_eq!(parsed.name, "Orders");
+        assert_eq!(parsed.kind, ItemKind::Url);
+        assert_eq!(parsed.ext, ".URL");
+        // The name keeps its own dots, and what looks like another end before the `.url`.
+        for (file, name) in [
+            ("v1.2.url", "v1.2"),
+            ("orders.json.url", "orders.json"),
+            ("orders.schema.url", "orders.schema"),
+            ("orders.sample.url", "orders.sample"),
+            ("a.url.url", "a.url"),
+        ] {
+            assert_eq!(
+                kind_of(file),
+                Some((name.to_owned(), ItemKind::Url)),
+                "{file}"
+            );
+        }
+        // …and a file that only looks like one is not.
+        for file in [
+            ".url",
+            "url",
+            ".hidden.url",
+            "a.url.bak",
+            "a.urls",
+            "a.url ",
+        ] {
+            assert_eq!(kind_of(file), None, "{file:?}");
+        }
+        // A sample is never a web address.
+        assert_eq!(kind_of("a.sample.json"), None);
+    }
+
+    #[test]
+    fn a_web_address_has_no_sample_and_is_told_so_by_its_kind_alone() {
+        use Engine::*;
+        for kind in [
+            ItemKind::Query(Jq),
+            ItemKind::Query(JsonPath),
+            ItemKind::Query(JmesPath),
+            ItemKind::Query(JsonPointer),
+            ItemKind::Schema,
+            ItemKind::Patch,
+            ItemKind::Document,
+        ] {
+            assert!(kind.takes_sample(), "{kind:?}");
+        }
+        assert!(!ItemKind::Url.takes_sample());
+        assert_eq!(ItemKind::Url.suffix(), ".url");
+        assert_eq!(ItemKind::Url.badge(), "url");
+        assert_eq!(ItemKind::Url.what(), "web address");
     }
 
     #[test]
@@ -368,6 +460,7 @@ mod tests {
             ItemKind::Schema,
             ItemKind::Patch,
             ItemKind::Document,
+            ItemKind::Url,
         ] {
             let file = format!("some name{}", kind.suffix());
             let parsed = parse_file_name(&file).unwrap();
@@ -397,8 +490,56 @@ mod tests {
         assert_eq!(Group::default(), Group::All);
         assert_eq!(
             Group::ALL.map(Group::label),
-            ["All", "Queries", "Schemas", "Patches", "Docs"]
+            ["All", "Queries", "Schemas", "Patches", "Docs", "URLs"]
         );
+    }
+
+    #[test]
+    fn the_urls_chip_takes_the_web_addresses_and_nothing_else_takes_them_but_all() {
+        assert!(Group::Urls.takes(ItemKind::Url));
+        for kind in [
+            ItemKind::Query(Engine::Jq),
+            ItemKind::Schema,
+            ItemKind::Patch,
+            ItemKind::Document,
+        ] {
+            assert!(!Group::Urls.takes(kind), "{kind:?}");
+        }
+        assert!(Group::All.takes(ItemKind::Url));
+        for group in [
+            Group::Queries,
+            Group::Schemas,
+            Group::Patches,
+            Group::Documents,
+        ] {
+            assert!(!group.takes(ItemKind::Url), "{group:?}");
+        }
+        assert_eq!(Group::ALL.last(), Some(&Group::Urls), "after Docs");
+    }
+
+    #[test]
+    fn a_name_that_is_made_to_fit_is_taken_by_the_rules_unless_it_is_empty_or_too_long() {
+        for (raw, name) in [
+            ("a/b", "a-b"),
+            ("a\\b:c*d?e\"f<g>h|i", "a-b-c-d-e-f-g-h-i"),
+            ("tab\there\nnewline\u{7f}", "tab-here-newline-"),
+            ("  .hidden. ", "hidden"),
+            ("...", ""),
+            (" . . ", ""),
+            ("plain name", "plain name"),
+            ("café – naïve ✓", "café – naïve ✓"),
+            ("v1.2", "v1.2"),
+            ("-a-", "-a-"),
+        ] {
+            let cleaned = cleaned_name(raw);
+            assert_eq!(cleaned, name, "{raw:?}");
+            if !cleaned.is_empty() {
+                assert_eq!(check_name(&cleaned).as_deref(), Ok(name), "{raw:?}");
+            }
+        }
+        // Not made to fit: how long it is, and the names Windows keeps.
+        assert!(check_name(&cleaned_name(&"a".repeat(MAX_NAME_BYTES + 1))).is_err());
+        assert!(check_name(&cleaned_name("con")).is_err());
     }
 
     #[test]
@@ -479,6 +620,23 @@ mod tests {
         assert!(check_item_name("a.sample", ItemKind::Schema).is_ok());
         assert!(check_item_name("a.sample", document).is_err());
         assert_eq!(check_item_name(" ok ", document).as_deref(), Ok("ok"));
+        // A web address ends in `.url`, which none of those is the end of, and has the same
+        // rules for the rest of its name.
+        let url = ItemKind::Url;
+        for name in [
+            "a.schema",
+            "a.patch",
+            "a.sample",
+            "a.url",
+            "orders.json",
+            "v1.2",
+        ] {
+            assert!(check_item_name(name, url).is_ok(), "{name}");
+        }
+        assert_eq!(check_item_name(" ok ", url).as_deref(), Ok("ok"));
+        for bad in ["", "a/b", ".hidden", "ends.", "NUL"] {
+            assert!(check_item_name(bad, url).is_err(), "{bad:?}");
+        }
     }
 
     #[test]

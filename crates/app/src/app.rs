@@ -126,6 +126,7 @@ macro_rules! workspace_env {
                 .query_engine
                 .unwrap_or_else(|| jsonquery_query::Kind::detect(&$app.query_text)),
             doc: $app.doc.as_ref(),
+            source_text: &$app.source_input,
             sample_limit: $app.settings.limits.tools(),
             front: if $app.tools.page_in_front() {
                 workspace_pane::Front::Tool($app.tools.current_tool())
@@ -3571,6 +3572,12 @@ impl App {
                 workspace_pane::Action::OpenDocument(path) => {
                     self.tools.show_query();
                     self.open_file(path);
+                }
+                workspace_pane::Action::OpenUrl(url) => {
+                    self.tools.show_query();
+                    // What was said of the last load is not said of this one.
+                    self.load_error = None;
+                    self.open_url(url);
                 }
                 workspace_pane::Action::WriteDocument { doc, to } => {
                     let _ = self.cmd_tx.send(Command::SaveFile {
