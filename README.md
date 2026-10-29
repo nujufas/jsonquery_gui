@@ -416,7 +416,7 @@ files on its window.
 - The script finds jsonquery by itself: the program next to it, the snap, or
   the Arch package. If you keep an AppImage somewhere, name it (make it
   executable first with `chmod +x`):
-  `bash jsonquery-x11.sh ~/Apps/jsonquery_gui-0.5.2-x86_64.AppImage`
+  `bash jsonquery-x11.sh ~/Apps/jsonquery_gui-0.5.3-x86_64.AppImage`
 - **Moved or updated the program?** Run the script again; it rewrites the
   entry.
 - `bash jsonquery-x11.sh run` starts jsonquery under X11 once, without adding
