@@ -153,7 +153,7 @@ patches and validates documents too. Built in Rust with
 
 ## Tools
 
-The 🛠 icon in the toolbar opens the **Tools** window: five small utilities,
+The 🛠 icon in the toolbar opens the **Tools** window: six small utilities,
 each on a tab of its own, laid out like the main window — a command row with
 the tool's main button and its options, what goes in on the left, what came
 out on the right, and a status bar that says what happened. JSON goes into a
@@ -177,7 +177,7 @@ and takes the file in one of its boxes, **Json Query** runs the query and opens 
 as the document (several files go to Merge, whose tab comes to the front). Where the
 Tools are is remembered.
 
-![The Tools docked in the main window: the row of tabs with Json Query first, and Diff JSON in front](docs/images/screenshot-tools-docked.png)
+![The Tools docked in the main window: the row of tabs with Json Query first and Create Schema last, and Diff JSON in front](docs/images/screenshot-tools-docked.png)
 
 ### Merge JSON
 
@@ -242,7 +242,7 @@ typed (a value, a member, nothing to take the line out, several to put them in) 
 in the document and compared again. A document that a move or an edit changed says
 so, and the **Save…** over its column writes it to a file — either, or both.
 
-![Diff JSON: two versions of a configuration side by side, with the added, removed and changed lines marked, two arrows one over the other between the sides at every difference, a line picked in the left document and, in the right one, the same line with a caret in it and a new value being typed over it](docs/images/screenshot-tools-diff.png)
+![Diff JSON: two versions of a configuration side by side, with the added, removed and changed lines marked and two arrows one over the other between the sides at every difference](docs/images/screenshot-tools-diff.png)
 
 ### Patch JSON
 
@@ -261,7 +261,7 @@ that is open in the main window, **Show in main window** reveals a problem
 there. Nothing is ever fetched: a `$ref` has to
 point inside the schema.
 
-![Validate Schema: a document checked against a schema, six problems listed with their pointers](docs/images/screenshot-tools-validate.png)
+![Validate Schema: a document checked against a schema, six problems listed with their pointers; the first one is picked, and the value that is wrong is highlighted in the document and the keyword that said so in the schema](docs/images/screenshot-tools-validate.png)
 
 ### Create Schema
 
@@ -275,6 +275,8 @@ against the document, and **Use in Validate** checks it there. Click a pattern t
 see where it is in the document and the schema, and to change it, make it a plain
 string, or restore it; click an enum to leave values out, add others, or make it a
 plain string — or edit the schema's text itself.
+
+![Create Schema: a list of orders and the schema made of it, with a pattern for the order ids, a date-time, a uuid, an email and an IPv4 address among the patterns and enums listed under it; the ids' pattern is open under the list, and highlighted in the schema and, at its first place, in the document](docs/images/screenshot-tools-create.png)
 
 ## Known limitations
 
