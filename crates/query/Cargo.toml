@@ -17,6 +17,8 @@ jmespath = { version = "0.5.0", features = ["sync"] }
 # file: a schema pasted into a viewer should not be able to do either.
 jsonschema = { version = "0.56", default-features = false, features = ["arbitrary-precision"] }
 jsonpath-rust = "1.0.10"
+# The patterns Create Schema looks for in strings (the crate the validator is built on).
+regex = "1.13.1"
 jsonquery-core = { path = "../core" }
 serde_json = { version = "1.0.151", features = ["arbitrary_precision", "preserve_order"] }
 thiserror = "2.0.20"

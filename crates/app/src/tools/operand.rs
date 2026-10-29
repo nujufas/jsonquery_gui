@@ -11,6 +11,7 @@
 //!
 //! Format uses one box; Diff, Patch and Validate use two.
 
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -19,7 +20,7 @@ use jsonquery_core::{Document, DocumentSource};
 
 use super::jobs::Input;
 use super::shared::Env;
-use super::widgets::{file_name, header, note_box, text_box, ERROR, STACK_GAP};
+use super::widgets::{file_name, header, note_box, text_box, Mark, ERROR, STACK_GAP};
 use crate::app::human_bytes;
 
 /// The most text the box takes. egui lays out a whole text box at once, so a
@@ -28,6 +29,7 @@ use crate::app::human_bytes;
 /// `Env::tool_bytes`).
 pub(super) const TEXT_LIMIT: u64 = 1024 * 1024;
 
+#[derive(Clone)]
 enum Content {
     /// Whatever is in the text box.
     Text,
@@ -65,6 +67,8 @@ pub(super) struct Operand {
     /// its size (Format writes it out as it goes), and so takes the open one
     /// when it is.
     takes_documents_on_disk: bool,
+    /// The part of the text the page points out, until it is edited.
+    mark: Option<Mark>,
 }
 
 impl Operand {
@@ -81,6 +85,7 @@ impl Operand {
             changed: false,
             problem: None,
             takes_documents_on_disk: false,
+            mark: None,
         }
     }
 
@@ -122,6 +127,7 @@ impl Operand {
     pub fn set_text(&mut self, text: impl Into<String>) {
         self.text = text.into();
         self.content = Content::Text;
+        self.mark = None;
         self.name = None;
         self.file = None;
         self.path = None;
@@ -205,6 +211,17 @@ impl Operand {
         self.file = Some(name);
         self.path = Some(path.to_owned());
         self.changed = false;
+    }
+
+    /// The text in the box, when it is shown there: not a file or a document
+    /// that is only named.
+    pub fn shown_text(&self) -> Option<&str> {
+        matches!(self.content, Content::Text).then_some(self.text.as_str())
+    }
+
+    /// Point out `range` of the text, and scroll to it; or nothing.
+    pub fn set_mark(&mut self, range: Option<Range<usize>>) {
+        self.mark = range.map(Mark::reveal);
     }
 
     #[cfg(test)]
@@ -308,6 +325,18 @@ impl Operand {
         self.problem = None;
     }
 
+    /// Hold what `other` holds (not its title): the same text, file or document.
+    pub fn copy_from(&mut self, other: &Operand) {
+        self.text.clone_from(&other.text);
+        self.content = other.content.clone();
+        self.name.clone_from(&other.name);
+        self.file.clone_from(&other.file);
+        self.path.clone_from(&other.path);
+        self.changed = other.changed;
+        self.problem = None;
+        self.mark = None;
+    }
+
     /// Exchange what two boxes hold (not their titles).
     pub fn swap_with(&mut self, other: &mut Operand) {
         std::mem::swap(&mut self.text, &mut other.text);
@@ -317,6 +346,7 @@ impl Operand {
         std::mem::swap(&mut self.path, &mut other.path);
         std::mem::swap(&mut self.changed, &mut other.changed);
         std::mem::swap(&mut self.problem, &mut other.problem);
+        std::mem::swap(&mut self.mark, &mut other.mark);
     }
 
     /// Draw the header and the box, which fill the height there is. True when
@@ -329,7 +359,9 @@ impl Operand {
         let accent = dragging && drop_target;
         match &self.content {
             Content::Text => {
-                if text_box(ui, self.id, &mut self.text, self.hint, None, accent) {
+                let mark = self.mark.as_mut();
+                if text_box(ui, self.id, &mut self.text, self.hint, None, accent, mark) {
+                    self.mark = None;
                     self.name = None;
                     self.file = None;
                     self.path = None;

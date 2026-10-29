@@ -2476,6 +2476,7 @@ fn the_tools_window_lists_every_tool_and_each_opens_its_page() {
         ("Diff JSON", "Compare"),
         ("Patch JSON", "Apply"),
         ("Validate Schema", "Validate"),
+        ("Create Schema", "Create"),
     ];
     for (tab, _) in pages {
         assert!(is_drawn(&h, tab), "{tab}: {:?}", h.texts());
@@ -4274,6 +4275,759 @@ fn a_schema_that_cannot_be_used_is_explained() {
 }
 
 #[test]
+fn a_click_on_a_problem_points_it_out_in_the_document_and_the_schema() {
+    // Long enough to scroll, with a problem at either end.
+    let mut records = vec![r#"  {"ip": "10.0.0.0"}"#.to_owned()];
+    records.extend((1..39).map(|i| format!(r#"  {{"id": {i}, "ip": "10.0.0.{i}"}}"#)));
+    records.push(r#"  {"id": 39, "ip": "192.168.0.355"}"#.to_owned());
+    let document = format!("[\n{}\n]", records.join(",\n"));
+    let schema = r#"{
+  "type": "array",
+  "items": {
+    "required": ["id"],
+    "properties": {"ip": {"type": "string", "format": "ipv4"}}
+  }
+}"#;
+    let mut h = Harness::new();
+    open_tool(&mut h, Tool::Validate);
+    h.app.tools.fill(Tool::Validate, "Document", &document);
+    h.app.tools.fill(Tool::Validate, "Schema", schema);
+    h.settle();
+    press(&mut h, "Validate");
+    wait_for(&mut h, "the problems", |h| is_drawn(h, "2 problems"));
+    assert_eq!(pointed_out(&h, &document), None, "nothing yet");
+
+    press(&mut h, "/39/ip");
+    // The scroll is animated; give it time to arrive.
+    h.pause(0.5);
+    assert_eq!(
+        pointed_out(&h, &document),
+        Some((r#""192.168.0.355""#.to_owned(), true))
+    );
+    assert_eq!(
+        pointed_out(&h, schema),
+        Some((r#""format": "ipv4""#.to_owned(), true))
+    );
+
+    // A member that is missing: the object it is missing from, back at the top.
+    press(&mut h, "/0");
+    h.pause(0.5);
+    assert_eq!(
+        pointed_out(&h, &document),
+        Some((r#"{"ip": "10.0.0.0"}"#.to_owned(), true))
+    );
+    assert_eq!(
+        pointed_out(&h, schema),
+        Some((r#""required": ["id"]"#.to_owned(), true))
+    );
+
+    // An edited document has no problems, and nothing pointed out.
+    let field = rect_of(&h, "Document");
+    h.click(field.min.x + 20.0, field.max.y + 14.0);
+    h.type_text(" ");
+    h.settle();
+    assert!(!is_drawn(&h, "2 problems"));
+    let edited = h.app.tools.box_text(Tool::Validate, "Document");
+    assert_eq!(pointed_out(&h, &edited), None);
+    assert_eq!(pointed_out(&h, schema), None);
+}
+
+// The tutorial's Tools tab.
+
+/// Click the text drawn last as `text`: the one in the window on top (the tutorial's,
+/// where the main window's row of tabs has the same names).
+fn press_on_top(h: &mut Harness, text: &str) {
+    let at = text_rects(&h.shapes)
+        .into_iter()
+        .rfind(|(t, _)| t == text)
+        .unwrap_or_else(|| panic!("{text:?} is drawn: {:?}", h.texts()))
+        .1
+        .center();
+    h.click(at.x, at.y);
+}
+
+/// The tutorial open on its Tools tab, at the lesson `lesson` of the topic `topic`.
+fn tools_lesson(h: &mut Harness, topic: &str, lesson: &str) {
+    let ctx = h.ctx.clone();
+    h.app.tutorial.open_or_focus(&ctx);
+    h.settle();
+    press(h, "Tools");
+    assert!(
+        is_drawn(h, "The Tools window"),
+        "the tab opens on its first lesson: {:?}",
+        h.texts()
+    );
+    press_on_top(h, topic);
+    press_on_top(h, lesson);
+}
+
+#[test]
+fn a_tools_lesson_of_the_tutorial_shows_its_samples_and_what_the_tool_makes_of_them() {
+    let mut h = Harness::new();
+    tools_lesson(&mut h, "Diff JSON", "Two versions of a document");
+    for text in [
+        "Version 1.4 and 1.5 of a service's settings",
+        "Left",
+        "Right",
+        "Result — 2 added · 1 removed · 3 changed",
+        "▶ Try it",
+        "Load samples",
+    ] {
+        assert!(is_drawn(&h, text), "{text:?}: {:?}", h.texts());
+    }
+    assert!(is_drawn_containing(&h, "removed /env/DEBUG"));
+    assert!(!h.app.tools.is_open(), "nothing is put anywhere by looking");
+}
+
+#[test]
+fn try_it_on_a_tools_lesson_puts_the_samples_in_the_tool_and_runs_it() {
+    let mut h = Harness::new();
+    tools_lesson(&mut h, "Diff JSON", "Two versions of a document");
+    press(&mut h, "▶ Try it");
+    wait_for(&mut h, "the comparison", |h| is_drawn(h, "Changes (6)"));
+    assert!(h.app.tools.in_window());
+    assert_eq!(h.app.tools.current_tool(), Tool::Diff);
+    let left = h.app.tools.box_text(Tool::Diff, "Left");
+    assert!(left.contains("\"version\": \"1.4.0\""), "{left}");
+    assert!(
+        is_drawn(&h, "Put the samples in Diff JSON and ran it."),
+        "the tutorial says so: {:?}",
+        h.texts()
+    );
+}
+
+#[test]
+fn load_samples_puts_a_merge_lesson_s_files_in_the_docked_merge_page_without_running_it() {
+    let mut h = Harness::new();
+    dock_tools(&mut h, Tool::Format);
+    h.app.tools.show_query();
+    h.settle();
+    tools_lesson(&mut h, "Merge JSON", "Append files");
+    // The lesson has two examples: the first one's button.
+    press(&mut h, "Load samples");
+    h.settle();
+    assert!(h.app.tools.page_in_front(), "the Merge tab is in front");
+    assert_eq!(h.app.tools.current_tool(), Tool::Merge);
+    for file in ["orders-jan.json", "orders-feb.json"] {
+        assert!(is_drawn(&h, file), "{file}: {:?}", h.texts());
+    }
+    assert!(!is_drawn(&h, "array · 3 items"), "not merged yet");
+    // (The tutorial's window is over the page.)
+    h.app.tutorial.close();
+    h.settle();
+    press(&mut h, "Merge");
+    wait_for(&mut h, "the merge", |h| is_drawn(h, "array · 3 items"));
+}
+
+// Create Schema.
+
+/// The Create Schema page with `document` in its box, and its schema made.
+fn created_schema(document: &str, patterns: &str) -> Harness {
+    let mut h = Harness::new();
+    open_tool(&mut h, Tool::Create);
+    h.app.tools.fill(Tool::Create, "Document", document);
+    h.settle();
+    press(&mut h, "Create");
+    wait_for(&mut h, "the schema", |h| is_drawn(h, patterns));
+    h
+}
+
+#[test]
+fn creating_a_schema_shows_it_and_under_it_the_patterns_found_in_the_strings() {
+    let mut h = Harness::new();
+    open_tool(&mut h, Tool::Create);
+    assert!(is_drawn(&h, "The schema appears here"), "{:?}", h.texts());
+    assert!(is_drawn(
+        &h,
+        "What the strings were found to be appears here"
+    ));
+    // The heading of the list (and not the option of the same name, which is above it).
+    let heading = text_rects(&h.shapes)
+        .into_iter()
+        .filter(|(t, _)| t == "Patterns")
+        .map(|(_, r)| r)
+        .max_by(|a, b| a.min.y.total_cmp(&b.min.y))
+        .expect("the list's heading");
+    assert!(
+        heading.min.y > h.screen.y * 0.4,
+        "below the room the schema has, before there is one: {heading:?}"
+    );
+
+    let h = created_schema(
+        r#"[{"id": "123e4567-e89b-12d3-a456-426614174000", "day": "2024-01-15", "tags": "a,b", "n": 1},
+            {"id": "c56a4180-65aa-42ec-a945-5fd21dec0538", "day": "2024-02-01", "tags": "c", "n": 2}]"#,
+        "Patterns (3)",
+    );
+    assert!(
+        is_drawn_containing(&h, "\"format\": \"uuid\""),
+        "{:?}",
+        h.texts()
+    );
+    for text in [
+        ".[].id",
+        "uuid · format uuid",
+        ".[].day",
+        "date · format date",
+        ".[].tags",
+        "comma-separated: words",
+    ] {
+        assert!(is_drawn(&h, text), "{text:?}: {:?}", h.texts());
+    }
+    // The patterns are under the schema, in the same pane.
+    let (schema, patterns) = (rect_of(&h, "Schema"), rect_of(&h, "Patterns (3)"));
+    assert!(schema.max.y < patterns.min.y, "{schema:?} {patterns:?}");
+    assert!(
+        (schema.min.x - patterns.min.x).abs() < 1.0,
+        "{schema:?} {patterns:?}"
+    );
+    assert!(
+        (patterns.min.y - heading.min.y).abs() < 1.0,
+        "where it was: {patterns:?} {heading:?}"
+    );
+    assert!(rect_of(&h, ".[].id").min.y > patterns.max.y);
+    // What the status bar says.
+    assert!(is_drawn(&h, "4 properties · 3 patterns"), "{:?}", h.texts());
+    assert!(is_drawn(&h, "The document fits it"));
+}
+
+/// The schema the Create Schema page has now, read as JSON.
+fn created_schema_now(h: &Harness) -> serde_json::Value {
+    serde_json::from_str(&h.app.tools.created_schema().expect("a schema")).expect("JSON")
+}
+
+/// Put `text` in the box of the open pattern, in place of what is there, and press
+/// Enter.
+fn type_pattern(h: &mut Harness, text: &str) {
+    let field = rect_of(h, "Restore");
+    // The box is the row above the buttons.
+    h.click(field.center().x + 150.0, field.min.y - 12.0);
+    h.key(egui::Key::A, egui::Modifiers::COMMAND);
+    h.type_text(text);
+    h.key(egui::Key::Enter, egui::Modifiers::NONE);
+    h.settle();
+}
+
+const IDS_AND_ZIPS: &str = r#"[{"id": "123e4567-e89b-12d3-a456-426614174000", "zip": "90210"},
+    {"id": "c56a4180-65aa-42ec-a945-5fd21dec0538", "zip": "10001"}]"#;
+
+#[test]
+fn a_click_on_a_pattern_opens_it_to_change_make_plain_and_put_back() {
+    let mut h = created_schema(IDS_AND_ZIPS, "Patterns (2)");
+    assert!(!is_drawn(&h, "Apply"), "nothing is open yet");
+    press(&mut h, ".[].id");
+    for text in ["Pattern of", "Apply", "Plain string", "Restore"] {
+        assert!(is_drawn(&h, text), "{text:?}: {:?}", h.texts());
+    }
+    let found = "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$";
+    assert!(is_drawn(&h, found), "the expression is in the box");
+    // The list is above what is open.
+    assert!(rect_of(&h, ".[].zip").max.y < rect_of(&h, "Apply").min.y);
+
+    // An expression of one's own.
+    type_pattern(&mut h, "^[0-9a-f-]{36}$");
+    let schema = created_schema_now(&h);
+    assert_eq!(
+        schema["items"]["properties"]["id"]["pattern"],
+        "^[0-9a-f-]{36}$"
+    );
+    assert_eq!(schema["items"]["properties"]["id"]["format"], "uuid");
+    assert!(is_drawn(&h, "uuid · edited"), "{:?}", h.texts());
+    assert!(is_drawn(&h, "edited"), "the schema says so");
+    assert!(is_drawn(&h, "Edited — Use in Validate checks it"));
+
+    // Plain: a string of any kind.
+    press(&mut h, "Plain string");
+    let schema = created_schema_now(&h);
+    assert_eq!(
+        schema["items"]["properties"]["id"],
+        serde_json::json!({"type": "string"})
+    );
+    assert!(is_drawn(&h, "string · was uuid"), "{:?}", h.texts());
+    // The box is empty, so Apply (or Enter) does not put the pattern back.
+    assert!(!is_drawn(&h, found), "{:?}", h.texts());
+    press(&mut h, "Apply");
+    type_pattern(&mut h, "");
+    assert_eq!(
+        created_schema_now(&h)["items"]["properties"]["id"],
+        serde_json::json!({"type": "string"})
+    );
+    assert!(is_drawn(&h, "string · was uuid"), "{:?}", h.texts());
+    assert!(!is_drawn_containing(&h, "The pattern can't be used"));
+    // Nor does a click on it again.
+    press(&mut h, ".[].id");
+    assert!(!is_drawn(&h, found), "{:?}", h.texts());
+
+    // And back as it was found.
+    press(&mut h, "Restore");
+    let schema = created_schema_now(&h);
+    assert_eq!(schema["items"]["properties"]["id"]["pattern"], found);
+    assert_eq!(schema["items"]["properties"]["id"]["format"], "uuid");
+    assert!(is_drawn(&h, "uuid · format uuid"));
+
+    // Another row, and Reset: the schema as made, and nothing edited.
+    press(&mut h, ".[].zip");
+    press(&mut h, "Plain string");
+    assert!(is_drawn(&h, "string · was integer as text"));
+    press(&mut h, "Reset");
+    assert!(is_drawn(&h, "integer as text"));
+    assert!(is_drawn(&h, "The document fits it"), "{:?}", h.texts());
+    assert!(!is_drawn(&h, "edited"));
+}
+
+#[test]
+fn an_expression_that_cannot_be_used_is_said_and_changes_nothing() {
+    let mut h = created_schema(IDS_AND_ZIPS, "Patterns (2)");
+    let before = created_schema_now(&h);
+    press(&mut h, ".[].zip");
+    type_pattern(&mut h, "^[0-9{5}$");
+    assert!(
+        is_drawn_containing(&h, "The pattern can't be used:"),
+        "{:?}",
+        h.texts()
+    );
+    assert_eq!(created_schema_now(&h), before);
+    assert!(is_drawn(&h, "The document fits it"), "not edited");
+}
+
+#[test]
+fn the_schema_can_be_typed_in_and_text_that_is_not_json_is_said_and_not_checked() {
+    let mut h = created_schema(IDS_AND_ZIPS, "Patterns (2)");
+    // Into the box, at its start: a character that makes it no JSON.
+    let schema = rect_of(&h, "Schema");
+    h.click(schema.min.x + 4.0, schema.max.y + 14.0);
+    h.key(egui::Key::Home, egui::Modifiers::COMMAND);
+    h.type_text("x");
+    h.settle();
+    assert!(is_drawn_containing(&h, "Not JSON: "), "{:?}", h.texts());
+    assert!(is_drawn(&h, "Edited — Use in Validate checks it"));
+    // Use in Validate is not for it.
+    press(&mut h, "Use in Validate");
+    assert_eq!(h.app.tools.current_tool(), Tool::Create);
+    // Nor is a change of a pattern, which says why.
+    press(&mut h, ".[].zip");
+    press(&mut h, "Plain string");
+    assert!(
+        is_drawn(&h, "The schema is not JSON: put it right, or Reset"),
+        "{:?}",
+        h.texts()
+    );
+    press(&mut h, "Reset");
+    assert!(!is_drawn_containing(&h, "Not JSON: "));
+    assert!(h.app.tools.created_schema().unwrap().starts_with('{'));
+}
+
+#[test]
+fn use_in_validate_takes_the_schema_as_it_was_changed() {
+    let mut h = created_schema(IDS_AND_ZIPS, "Patterns (2)");
+    press(&mut h, ".[].zip");
+    type_pattern(&mut h, "^[0-9]{3}$");
+    let changed = h.app.tools.created_schema().unwrap();
+    press(&mut h, "Use in Validate");
+    wait_for(&mut h, "the check", |h| is_drawn(h, "2 problems"));
+    assert_eq!(h.app.tools.box_text(Tool::Validate, "Schema"), changed);
+}
+
+/// The part of the text box that holds `text` which is on a tint — pointed out
+/// — and whether it is in view (scrolled to). None when nothing is.
+fn pointed_out(h: &Harness, text: &str) -> Option<(String, bool)> {
+    fn walk<'a>(
+        shape: &'a egui::Shape,
+        clip: egui::Rect,
+        out: &mut Vec<(&'a egui::epaint::TextShape, egui::Rect)>,
+    ) {
+        match shape {
+            egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, clip, out)),
+            egui::Shape::Text(t) => out.push((t, clip)),
+            _ => {}
+        }
+    }
+    let mut texts = Vec::new();
+    for clipped in &h.shapes {
+        walk(&clipped.shape, clipped.clip_rect, &mut texts);
+    }
+    let (shape, clip) = texts
+        .into_iter()
+        .find(|(shape, _)| shape.galley.text() == text)
+        .unwrap_or_else(|| panic!("no box holds {text:?}"));
+    let section = shape
+        .galley
+        .job
+        .sections
+        .iter()
+        .find(|s| s.format.background != egui::Color32::TRANSPARENT)?;
+    let range = section.byte_range.start.0..section.byte_range.end.0;
+    let start = text[..range.start].chars().count();
+    let at = shape
+        .galley
+        .pos_from_cursor(egui::text::CCursor::new(start))
+        .translate(shape.pos.to_vec2());
+    Some((text[range].to_owned(), clip.contains(at.center())))
+}
+
+#[test]
+fn a_click_on_a_pattern_points_it_out_in_the_document_and_the_schema() {
+    // Long enough to scroll.
+    let lines: Vec<String> = (10..50)
+        .map(|i| {
+            format!(
+                "  {{\"id\": \"ORD-2024-000{i}\", \"zip\": \"{}\"}}",
+                10000 + i
+            )
+        })
+        .collect();
+    let document = format!("[\n{}\n]", lines.join(",\n"));
+    let mut h = created_schema(&document, "Patterns (2)");
+    assert_eq!(pointed_out(&h, &document), None, "nothing yet");
+
+    press(&mut h, ".[].id");
+    // The scroll is animated; give it time to arrive.
+    h.pause(0.5);
+    assert_eq!(
+        pointed_out(&h, &document),
+        Some(("\"ORD-2024-00010\"".to_owned(), true))
+    );
+    assert!(is_drawn(&h, "1 of 40"), "{:?}", h.texts());
+    let schema = h.app.tools.created_schema().unwrap();
+    assert_eq!(
+        pointed_out(&h, &schema),
+        Some(("\"pattern\": \"^ORD-[0-9]{4}-[0-9]{5}$\"".to_owned(), true))
+    );
+
+    // The one before the first is the last, at the end of the document.
+    press(&mut h, "⏶");
+    h.pause(0.5);
+    assert!(is_drawn(&h, "40 of 40"), "{:?}", h.texts());
+    assert_eq!(
+        pointed_out(&h, &document),
+        Some(("\"ORD-2024-00049\"".to_owned(), true)),
+        "scrolled to"
+    );
+    press(&mut h, "⏷");
+    h.pause(0.5);
+    assert!(is_drawn(&h, "1 of 40"));
+    assert_eq!(
+        pointed_out(&h, &document),
+        Some(("\"ORD-2024-00010\"".to_owned(), true)),
+        "and back up"
+    );
+
+    // Made plain, the schema of its place is pointed out.
+    press(&mut h, "Plain string");
+    h.pause(0.5);
+    let schema = h.app.tools.created_schema().unwrap();
+    let (place, shown) = pointed_out(&h, &schema).expect("its place");
+    assert!(place.starts_with("\"id\": {") && shown, "{place}");
+
+    // Another pattern.
+    press(&mut h, ".[].zip");
+    assert_eq!(
+        pointed_out(&h, &document).map(|(t, _)| t),
+        Some("\"10010\"".to_owned())
+    );
+
+    // A document that is edited has no schema, and nothing pointed out.
+    let field = rect_of(&h, "Document");
+    h.click(field.min.x + 20.0, field.max.y + 14.0);
+    h.type_text(" ");
+    h.settle();
+    assert!(is_drawn(&h, "The schema appears here"));
+    let edited = h.app.tools.box_text(Tool::Create, "Document");
+    assert_eq!(pointed_out(&h, &edited), None);
+}
+
+#[test]
+fn a_pattern_of_keys_points_out_the_keys_it_was_found_in() {
+    let document = r#"{"daily": {"2024-01-15": 3, "2024-01-16": 5}, "first": "2024-01-15"}"#;
+    let mut h = created_schema(document, "Patterns (2)");
+    press(&mut h, ".daily");
+    // The keys, and not the same text where it is a value.
+    let (key, _) = pointed_out(&h, document).expect("the first key");
+    assert_eq!(key, "\"2024-01-15\"");
+    assert!(is_drawn(&h, "1 of 2"), "{:?}", h.texts());
+    let marked =
+        |h: &Harness| pointed_out(h, &h.app.tools.created_schema().unwrap()).map(|(t, _)| t);
+    let expression = created_schema_now(&h)["properties"]["daily"]["patternProperties"]
+        .as_object()
+        .and_then(|patterns| patterns.keys().next().cloned())
+        .expect("the keys' pattern");
+    assert_eq!(marked(&h), Some(format!("\"{expression}\"")));
+    press(&mut h, "Any key");
+    assert_eq!(marked(&h), Some("\"additionalProperties\"".to_owned()));
+}
+
+const TICKETS: &str = r#"[{"id": "T-1", "status": "open"},
+    {"id": "T-2", "status": "closed"},
+    {"id": "T-3", "status": "open"}]"#;
+
+/// The page with a schema of `document` made with Enums, once `list` (the
+/// list's heading) is drawn.
+fn created_with_enums(document: &str, list: &str) -> Harness {
+    let mut h = Harness::new();
+    open_tool(&mut h, Tool::Create);
+    h.app.tools.fill(Tool::Create, "Document", document);
+    h.settle();
+    press(&mut h, "Enums");
+    press(&mut h, "Create");
+    wait_for(&mut h, "the schema", |h| is_drawn(h, list));
+    h
+}
+
+/// The enum of `.status` in the schema now.
+fn status_now(h: &Harness) -> serde_json::Value {
+    created_schema_now(h)["items"]["properties"]["status"].clone()
+}
+
+#[test]
+fn an_enum_is_listed_and_a_click_opens_its_values_and_points_them_out() {
+    let mut h = created_with_enums(TICKETS, "Patterns and enums (2)");
+    assert!(is_drawn(&h, "enum: open, closed"), "{:?}", h.texts());
+    assert!(is_drawn(&h, "2 properties · 1 pattern · 1 enum"));
+    press(&mut h, ".[].status");
+    for text in [
+        "Enum of",
+        "open",
+        "closed",
+        "Add",
+        "Plain string",
+        "Restore",
+    ] {
+        assert!(is_drawn(&h, text), "{text:?}: {:?}", h.texts());
+    }
+    assert!(!is_drawn(&h, "Apply"), "an enum has no expression");
+    // Its values in the document, and its enum in the schema.
+    assert!(is_drawn(&h, "1 of 3"), "{:?}", h.texts());
+    assert_eq!(pointed_out(&h, TICKETS).unwrap().0, "\"open\"");
+    press(&mut h, "⏷");
+    assert_eq!(pointed_out(&h, TICKETS).unwrap().0, "\"closed\"");
+    let schema = h.app.tools.created_schema().unwrap();
+    let (marked, _) = pointed_out(&h, &schema).expect("the enum");
+    assert!(marked.starts_with("\"enum\": ["), "{marked}");
+    // The values are under the list, above the box.
+    assert!(rect_of(&h, ".[].status").max.y < rect_of(&h, "closed").min.y);
+    assert!(rect_of(&h, "closed").max.y < rect_of(&h, "Add").min.y);
+}
+
+#[test]
+fn an_enum_loses_a_value_gains_another_is_made_plain_and_put_back() {
+    let mut h = created_with_enums(TICKETS, "Patterns and enums (2)");
+    press(&mut h, ".[].status");
+
+    // Unticked: left out, and still there to tick again.
+    press(&mut h, "closed");
+    assert_eq!(status_now(&h)["enum"], serde_json::json!(["open"]));
+    assert!(is_drawn(&h, "enum: open · edited"), "{:?}", h.texts());
+    assert!(is_drawn(&h, "closed"));
+    assert!(is_drawn(&h, "Edited — Use in Validate checks it"));
+
+    // Put in: written in the box, and Enter. The box is empty again, and what is
+    // typed next goes in it.
+    type_pattern(&mut h, "waiting");
+    assert_eq!(
+        status_now(&h)["enum"],
+        serde_json::json!(["open", "waiting"])
+    );
+    assert!(is_drawn(&h, "waiting"));
+    assert!(is_drawn(&h, "Another value"), "{:?}", h.texts());
+    // One that is in it already is refused.
+    h.type_text("open");
+    h.key(egui::Key::Enter, egui::Modifiers::NONE);
+    h.settle();
+    assert!(
+        is_drawn(&h, "\"open\" is in the enum already"),
+        "{:?}",
+        h.texts()
+    );
+    assert_eq!(
+        status_now(&h)["enum"],
+        serde_json::json!(["open", "waiting"])
+    );
+
+    // Ticked again, a value found goes back in its place; one put in, unticked,
+    // goes.
+    press(&mut h, "closed");
+    assert_eq!(
+        status_now(&h)["enum"],
+        serde_json::json!(["open", "closed", "waiting"])
+    );
+    press(&mut h, "waiting");
+    assert!(!is_drawn(&h, "waiting"), "{:?}", h.texts());
+    assert!(is_drawn(&h, "enum: open, closed"), "as it was found");
+
+    // A string of any kind; a tick makes it an enum again, of that one.
+    press(&mut h, "Plain string");
+    assert_eq!(status_now(&h), serde_json::json!({"type": "string"}));
+    assert!(is_drawn(&h, "string · was enum"), "{:?}", h.texts());
+    let schema = h.app.tools.created_schema().unwrap();
+    let (marked, _) = pointed_out(&h, &schema).expect("its place");
+    assert!(marked.starts_with("\"status\": {"), "{marked}");
+    press(&mut h, "closed");
+    assert_eq!(status_now(&h)["enum"], serde_json::json!(["closed"]));
+
+    // And back as it was found.
+    press(&mut h, "Restore");
+    assert_eq!(
+        status_now(&h)["enum"],
+        serde_json::json!(["open", "closed"])
+    );
+    assert!(is_drawn(&h, "enum: open, closed"));
+}
+
+#[test]
+fn an_open_enum_has_its_room_in_a_small_window_however_its_values_wrap() {
+    // Values long enough to take a row each.
+    let names = ["ann", "bob", "cleo", "dmitri", "eve", "farah"];
+    let values: Vec<String> = names
+        .iter()
+        .map(|n| format!("\"{n}.longname@example.org\""))
+        .flat_map(|value| [value.clone(), value])
+        .collect();
+    let document = format!("[{}]", values.join(", "));
+    // Docked, in the main window as small as it gets.
+    let mut h = Harness::new();
+    h.screen = egui::vec2(700.0, 420.0);
+    dock_tools(&mut h, Tool::Create);
+    h.app.tools.fill(Tool::Create, "Document", &document);
+    h.settle();
+    press(&mut h, "Enums");
+    press(&mut h, "Create");
+    wait_for(&mut h, "the schema", |h| is_drawn(h, "Enums (1)"));
+    press(&mut h, ".[]");
+    let fits = |h: &Harness| {
+        let status = rect_of(h, "0 properties · 0 patterns · 1 enum");
+        let restore = rect_of(h, "Restore");
+        assert!(
+            restore.max.y < status.min.y,
+            "Restore {restore:?}, the status bar {status:?}"
+        );
+        assert!(rect_of(h, ".[]").max.y < rect_of(h, "Enum of").min.y);
+    };
+    // A row of the values, and the rest scroll; the buttons are there.
+    assert!(is_drawn(&h, "ann.longname@example.org"));
+    assert!(!is_drawn(&h, "bob.longname@example.org"), "it scrolls");
+    fits(&h);
+
+    // Taller, they have three rows.
+    h.screen = egui::vec2(700.0, 640.0);
+    h.settle();
+    let rows = ["ann", "bob", "cleo"].map(|n| rect_of(&h, &format!("{n}.longname@example.org")));
+    assert!(rows[1].min.y > rows[0].max.y && rows[2].min.y > rows[1].max.y);
+    fits(&h);
+}
+
+#[test]
+fn the_row_picked_stays_in_view_when_what_opens_under_the_list_makes_it_shorter() {
+    // Six rows, the enum last, on a page of the Tools window's size: what opens
+    // under the list leaves it four.
+    let document = r#"[
+        {"id": "ORD-1357-24681", "day": "2024-03-15", "who": "123e4567-e89b-12d3-a456-426614174000",
+         "ip": "192.168.1.21", "tags": "red,blue", "status": "open"},
+        {"id": "ORD-1357-24682", "day": "2024-03-16", "who": "c56a4180-65aa-42ec-a945-5fd21dec0538",
+         "ip": "172.16.4.35", "tags": "green", "status": "closed"},
+        {"id": "ORD-1357-24683", "day": "2024-03-17", "who": "7d4a6e8f-1b3c-4d5e-9f7a-5b8c7d9e3f4a",
+         "ip": "10.1.2.3", "tags": "", "status": "open"}]"#;
+    let mut h = Harness::new();
+    h.screen = egui::vec2(900.0, 580.0);
+    open_tool(&mut h, Tool::Create);
+    h.app.tools.fill(Tool::Create, "Document", document);
+    h.settle();
+    press(&mut h, "Enums");
+    press(&mut h, "Create");
+    wait_for(&mut h, "the schema", |h| {
+        is_drawn(h, "Patterns and enums (6)")
+    });
+    // The path is in the row and on the line of what is open.
+    let drawn = |h: &Harness, path: &str| {
+        text_rects(&h.shapes)
+            .into_iter()
+            .filter(|(t, _)| t == path)
+            .map(|(_, r)| r)
+            .collect::<Vec<_>>()
+    };
+    press(&mut h, ".[].status");
+    let heading = rect_of(&h, "Enum of");
+    let rows = drawn(&h, ".[].status");
+    assert_eq!(
+        rows.len(),
+        2,
+        "the row, and the line of what is open: {rows:?}"
+    );
+    assert!(
+        rows[0].max.y <= heading.min.y,
+        "the row {rows:?} is above what is open {heading:?}"
+    );
+    assert!(
+        drawn(&h, ".[].id").is_empty(),
+        "the list was scrolled for it"
+    );
+
+    // It is not held there: the list scrolls back up.
+    let tags = drawn(&h, ".[].tags")[0].center();
+    h.pointer(tags.x, tags.y);
+    h.frame_with(vec![egui::Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Point,
+        delta: egui::vec2(0.0, 400.0),
+        phase: egui::TouchPhase::Move,
+        modifiers: egui::Modifiers::NONE,
+    }]);
+    h.settle();
+    assert_eq!(drawn(&h, ".[].id").len(), 1, "{:?}", h.texts());
+    assert_eq!(drawn(&h, ".[].status").len(), 1, "only on the line");
+}
+
+#[test]
+fn a_document_whose_strings_are_nothing_in_particular_has_no_patterns_and_says_so() {
+    let h = created_schema(r#"{"name": "Ada Lovelace", "n": 1}"#, "Patterns (0)");
+    assert!(
+        is_drawn(
+            &h,
+            "No dates, ids, addresses, codes or lists were found in the strings"
+        ),
+        "{:?}",
+        h.texts()
+    );
+    assert!(is_drawn(&h, "2 properties · 0 patterns"));
+}
+
+#[test]
+fn an_option_drops_the_schema_made_without_it() {
+    let mut h = created_schema(r#"["a", "b", "a"]"#, "Patterns (0)");
+    assert!(!is_drawn_containing(&h, "\"enum\""));
+    press(&mut h, "Enums");
+    assert!(is_drawn(&h, "The schema appears here"), "{:?}", h.texts());
+    press(&mut h, "Create");
+    wait_for(&mut h, "the schema again", |h| {
+        is_drawn_containing(h, "\"enum\"")
+    });
+}
+
+#[test]
+fn use_in_validate_checks_the_document_against_the_schema_made_of_it() {
+    let document = r#"{"when": "2024-01-15T10:30:00Z", "ip": "10.0.0.1"}"#;
+    let mut h = created_schema(document, "Patterns (2)");
+    press(&mut h, "Use in Validate");
+    wait_for(&mut h, "the check", |h| {
+        is_drawn(h, "The document is valid")
+    });
+    assert_eq!(h.app.tools.current_tool(), Tool::Validate);
+    assert_eq!(h.app.tools.box_text(Tool::Validate, "Document"), document);
+    let schema = h.app.tools.box_text(Tool::Validate, "Schema");
+    assert!(schema.contains("\"format\": \"date-time\""), "{schema}");
+    assert!(schema.contains("\"format\": \"ipv4\""), "{schema}");
+}
+
+#[test]
+fn a_document_to_make_a_schema_of_that_is_not_json_is_reported_with_its_box() {
+    let mut h = Harness::new();
+    open_tool(&mut h, Tool::Create);
+    h.app.tools.fill(Tool::Create, "Document", "[1,");
+    h.settle();
+    press(&mut h, "Create");
+    wait_for(&mut h, "the error", |h| {
+        h.texts().iter().any(|(t, _)| t.starts_with("Document: "))
+    });
+}
+
+#[test]
 fn the_two_boxes_of_a_page_are_stacked_under_the_command_row() {
     for (tool, first, second, button) in [
         (Tool::Patch, "Document", "Patch", "Apply"),
@@ -5315,6 +6069,7 @@ fn clicking_the_website_button_opens_the_website_in_the_browser_whichever_tab_is
         "Diff JSON",
         "Patch JSON",
         "Validate Schema",
+        "Create Schema",
     ] {
         press(&mut h, tab);
         let opened = h.opened.len();
@@ -6827,13 +7582,14 @@ fn the_limits_and_the_interface_are_kept_together_and_neither_loses_the_other() 
 use crate::tools::Place;
 
 /// The tabs of the main window while the Tools are docked in it, left to right.
-const TABS: [&str; 6] = [
+const TABS: [&str; 7] = [
     tools::QUERY_TAB,
     "Merge JSON",
     "Format JSON",
     "Diff JSON",
     "Patch JSON",
     "Validate Schema",
+    "Create Schema",
 ];
 
 /// The Tools, docked and on `tool`'s tab.
@@ -6964,7 +7720,7 @@ fn the_tools_window_has_a_button_that_docks_the_tools_in_the_main_window() {
     let dock = h.pop_buttons(tools::DOCK_ICON);
     assert_eq!(dock.len(), 1, "{dock:?}");
     assert!(h.pop_buttons(tools::UNDOCK_ICON).is_empty());
-    let last_tab = rect_of(&h, "Validate Schema");
+    let last_tab = rect_of(&h, "Create Schema");
     assert!(dock[0].x > last_tab.right(), "{:?} {last_tab:?}", dock[0]);
     assert!((dock[0].y - last_tab.center().y).abs() < 4.0);
     assert!(
@@ -7537,6 +8293,7 @@ fn the_docked_tools_have_the_same_pages_as_the_window() {
         ("Diff JSON", "Compare"),
         ("Patch JSON", "Apply"),
         ("Validate Schema", "Validate"),
+        ("Create Schema", "Create"),
     ];
     for (tab, button) in pages {
         press(&mut h, tab);
@@ -7622,12 +8379,15 @@ fn whatever_the_tools_or_the_tutorial_put_in_jsonquery_brings_its_tab_forward() 
     // A lesson the tutorial loads and runs.
     dock_tools(&mut h, Tool::Validate);
     assert!(h.app.tools.page_in_front());
-    h.app.apply_tutorial_request(crate::tutorial::LoadRequest {
-        kind: jsonquery_query::Kind::Jq,
-        data: None,
-        query: Some(".b"),
-        run: false,
-    });
+    h.app.apply_tutorial_request(
+        &ctx,
+        crate::tutorial::Request::Query(crate::tutorial::LoadRequest {
+            kind: jsonquery_query::Kind::Jq,
+            data: None,
+            query: Some(".b"),
+            run: false,
+        }),
+    );
     assert!(!h.app.tools.page_in_front());
     assert_eq!(h.app.query_text, ".b");
 

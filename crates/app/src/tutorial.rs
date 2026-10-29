@@ -1,9 +1,10 @@
 //! The tutorial window: a second native window (an egui *viewport*) with one
-//! tab per query dialect, a topic tree on the left and the selected lesson on
-//! the right. The lessons themselves are data in `jsonquery_query::tutorial`
-//! (and unit-tested there against the real engines); this file is only
-//! presentation plus the hand-off that lets a reader push an example's data
-//! and/or query into the main window to practise with.
+//! tab per query dialect and one for the Tools, a topic tree on the left and the
+//! selected lesson on the right. The lessons themselves are data in
+//! `jsonquery_query::tutorial` (and unit-tested there against the real engines
+//! and tools); this file is only presentation plus the hand-off that lets a
+//! reader push an example's data and/or query into the main window — or a Tools
+//! lesson's samples into its tool's page (`tools_tab.rs`) — to practise with.
 //!
 //! On a desktop it is a *deferred* viewport — eframe redraws the window by
 //! itself and calls back into the app through its lock (`App::satellite_frame`)
@@ -18,18 +19,33 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use eframe::egui::{self, text::LayoutJob, text::TextFormat, Color32, RichText, TextWrapMode};
-use jsonquery_query::tutorial::{self as content, Example, Lesson, Outcome, Span};
+use jsonquery_query::tutorial::tools::{self as tool_lessons, ToolExample, ToolOutcome};
+use jsonquery_query::tutorial::{self as content, Example, Outcome, Span};
 use jsonquery_query::Kind;
 
 use crate::query_highlight::part_color;
+
+mod tools_tab;
 
 /// How long the "Loaded in the main window" confirmation stays in the
 /// tutorial's status bar.
 const NOTICE_FOR: Duration = Duration::from_secs(5);
 
-/// What the reader asked to push into the main window. The window applies
-/// it (`App::apply_tutorial_request`): pinning the engine to `kind`,
-/// replacing the source document and/or the query text, and optionally
+/// What the reader asked for: the main window applies it
+/// (`App::apply_tutorial_request`).
+pub enum Request {
+    /// Data and/or a query for the main window.
+    Query(LoadRequest),
+    /// A Tools lesson's samples for its tool's page, which is set as the lesson
+    /// has it, shown, and — with `run` — run.
+    Tool {
+        example: &'static ToolExample,
+        run: bool,
+    },
+}
+
+/// What the reader asked to push into the main window: pinning the engine to
+/// `kind`, replacing the source document and/or the query text, and optionally
 /// running the query once the data has loaded.
 pub struct LoadRequest {
     pub kind: Kind,
@@ -38,16 +54,84 @@ pub struct LoadRequest {
     pub run: bool,
 }
 
+/// A tab of the window: a query dialect's lessons, or the Tools'.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Tab {
+    Query(Kind),
+    Tools,
+}
+
+impl Tab {
+    /// Left to right: the dialects, then the Tools.
+    const ALL: [Tab; 5] = [
+        Tab::Query(Kind::ALL[0]),
+        Tab::Query(Kind::ALL[1]),
+        Tab::Query(Kind::ALL[2]),
+        Tab::Query(Kind::ALL[3]),
+        Tab::Tools,
+    ];
+
+    /// Its place in [`Tab::ALL`].
+    fn slot(self) -> usize {
+        Self::ALL.iter().position(|t| *t == self).unwrap_or(0)
+    }
+
+    fn title(self) -> &'static str {
+        match self {
+            Tab::Query(kind) => content::title(kind),
+            Tab::Tools => "Tools",
+        }
+    }
+
+    fn tagline(self) -> &'static str {
+        match self {
+            Tab::Query(kind) => content::tagline(kind),
+            Tab::Tools => tool_lessons::tagline(),
+        }
+    }
+
+    /// Each topic's title, with the titles of its lessons.
+    fn outline(self) -> Vec<(&'static str, Vec<&'static str>)> {
+        match self {
+            Tab::Query(kind) => content::topics(kind)
+                .iter()
+                .map(|t| (t.title, t.lessons.iter().map(|l| l.title).collect()))
+                .collect(),
+            Tab::Tools => tool_lessons::TOPICS
+                .iter()
+                .map(|t| (t.title, t.lessons.iter().map(|l| l.title).collect()))
+                .collect(),
+        }
+    }
+
+    /// Whether lesson `l` of topic `t` mentions `needle` (lower-cased).
+    fn lesson_matches(self, t: usize, l: usize, needle: &str) -> bool {
+        match self {
+            Tab::Query(kind) => content::topics(kind)
+                .get(t)
+                .and_then(|topic| topic.lessons.get(l))
+                .is_some_and(|lesson| content::lesson_matches(lesson, needle)),
+            Tab::Tools => tool_lessons::TOPICS
+                .get(t)
+                .and_then(|topic| topic.lessons.get(l))
+                .is_some_and(|lesson| tool_lessons::lesson_matches(lesson, needle)),
+        }
+    }
+}
+
 pub struct Tutorial {
     open: bool,
-    tab: Kind,
-    /// Selected (topic, lesson) for each tab, indexed like `Kind::ALL`, so
+    tab: Tab,
+    /// Selected (topic, lesson) for each tab, indexed like `Tab::ALL`, so
     /// switching tabs returns to where the reader left off.
-    selected: [(usize, usize); 4],
+    selected: [(usize, usize); 5],
     filter: String,
     /// Live results, computed once per (dialect, data, query) — the sample
     /// documents are tiny, but there's no reason to recompile every frame.
     outcomes: HashMap<(Kind, &'static str, &'static str), Outcome>,
+    /// What the tools make of the Tools lessons' samples, once per (topic,
+    /// lesson, example).
+    tool_outcomes: HashMap<(usize, usize, usize), ToolOutcome>,
     notice: Option<(String, Instant)>,
     /// Scroll the lesson pane back to the top on the next frame (a new
     /// lesson or tab was picked).
@@ -55,7 +139,7 @@ pub struct Tutorial {
     /// A topic to force open in the tree for one frame (Next/Previous moved
     /// into it), so the selected lesson is never hidden inside a collapsed
     /// topic.
-    reveal: Option<(Kind, usize)>,
+    reveal: Option<(Tab, usize)>,
     /// The Explanation row under the pointer, as (example index, part
     /// index): its fragment is drawn brighter in the query. Read a frame
     /// late, which is imperceptible.
@@ -67,10 +151,11 @@ impl Default for Tutorial {
     fn default() -> Self {
         Self {
             open: false,
-            tab: Kind::Jq,
-            selected: [(0, 0); 4],
+            tab: Tab::Query(Kind::Jq),
+            selected: [(0, 0); 5],
             filter: String::new(),
             outcomes: HashMap::new(),
+            tool_outcomes: HashMap::new(),
             notice: None,
             scroll_to_top: false,
             reveal: None,
@@ -82,10 +167,6 @@ impl Default for Tutorial {
 
 pub(crate) fn viewport_id() -> egui::ViewportId {
     egui::ViewportId::from_hash_of("jsonquery_tutorial_window")
-}
-
-fn tab_index(kind: Kind) -> usize {
-    Kind::ALL.iter().position(|k| *k == kind).unwrap_or(0)
 }
 
 impl Tutorial {
@@ -124,8 +205,8 @@ impl Tutorial {
 
     /// One frame of the window when it is a window of its own, redrawn by
     /// eframe by itself. Returns what the reader asked to load into the main
-    /// window, if anything.
-    pub fn window_frame(&mut self, ui: &mut egui::Ui) -> Option<LoadRequest> {
+    /// window or the Tools, if anything.
+    pub fn window_frame(&mut self, ui: &mut egui::Ui) -> Option<Request> {
         self.contents(ui)
     }
 
@@ -134,7 +215,7 @@ impl Tutorial {
     /// redraw by themselves. Returns what the reader asked to load into the
     /// main window, if anything — already focused, so the result of pressing ▶
     /// is visible straight away.
-    pub fn show(&mut self, ctx: &egui::Context) -> Option<LoadRequest> {
+    pub fn show(&mut self, ctx: &egui::Context) -> Option<Request> {
         if !self.open {
             return None;
         }
@@ -156,7 +237,7 @@ impl Tutorial {
         request
     }
 
-    fn contents(&mut self, ui: &mut egui::Ui) -> Option<LoadRequest> {
+    fn contents(&mut self, ui: &mut egui::Ui) -> Option<Request> {
         let mut request = None;
 
         egui::Panel::top("tutorial_tabs").show(ui, |ui| self.tab_bar(ui));
@@ -169,13 +250,28 @@ impl Tutorial {
         egui::CentralPanel::default().show(ui, |ui| request = self.lesson_view(ui));
 
         if let Some(r) = &request {
-            let what = match (r.data.is_some(), r.query.is_some(), r.run) {
-                (true, true, true) => "Loaded the data and query into the main window and ran it.",
-                (true, true, false) => "Loaded the data and query into the main window.",
-                (true, false, _) => "Loaded the sample data into the main window.",
-                (false, _, _) => "Loaded the query into the main window.",
+            let what = match r {
+                Request::Query(r) => match (r.data.is_some(), r.query.is_some(), r.run) {
+                    (true, true, true) => {
+                        "Loaded the data and query into the main window and ran it.".to_owned()
+                    }
+                    (true, true, false) => {
+                        "Loaded the data and query into the main window.".to_owned()
+                    }
+                    (true, false, _) => "Loaded the sample data into the main window.".to_owned(),
+                    (false, _, _) => "Loaded the query into the main window.".to_owned(),
+                },
+                Request::Tool { example, run: true } => {
+                    format!("Put the samples in {} and ran it.", example.tool().label())
+                }
+                Request::Tool {
+                    example,
+                    run: false,
+                } => {
+                    format!("Put the samples in {}.", example.tool().label())
+                }
             };
-            self.notice = Some((what.to_owned(), Instant::now()));
+            self.notice = Some((what, Instant::now()));
         }
         request
     }
@@ -184,16 +280,16 @@ impl Tutorial {
         ui.add_space(6.0);
         ui.horizontal(|ui| {
             ui.spacing_mut().button_padding = egui::vec2(14.0, 6.0);
-            for kind in Kind::ALL {
-                let text = RichText::new(content::title(kind)).size(15.0);
-                if ui.selectable_label(self.tab == kind, text).clicked() && self.tab != kind {
-                    self.tab = kind;
+            for tab in Tab::ALL {
+                let text = RichText::new(tab.title()).size(15.0);
+                if ui.selectable_label(self.tab == tab, text).clicked() && self.tab != tab {
+                    self.tab = tab;
                     self.scroll_to_top = true;
                 }
             }
         });
         ui.add_space(2.0);
-        ui.weak(content::tagline(self.tab));
+        ui.weak(self.tab.tagline());
         ui.add_space(6.0);
     }
 
@@ -206,6 +302,12 @@ impl Tutorial {
             Some((text, _)) => {
                 ui.colored_label(ui.visuals().hyperlink_color, text);
                 ui.ctx().request_repaint_after(NOTICE_FOR);
+            }
+            None if self.tab == Tab::Tools => {
+                ui.weak(
+                    "▶ Try it puts the samples in the tool's page and runs it — then change \
+                     them and run it again.",
+                );
             }
             None => {
                 ui.weak(
@@ -226,21 +328,17 @@ impl Tutorial {
         ui.add_space(4.0);
 
         let needle = self.filter.trim().to_lowercase();
-        let kind = self.tab;
-        let slot = tab_index(kind);
+        let tab = self.tab;
+        let slot = tab.slot();
         let reveal = self.reveal.take();
 
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 let mut any = false;
-                for (t, topic) in content::topics(kind).iter().enumerate() {
-                    let matching: Vec<usize> = topic
-                        .lessons
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, l)| content::lesson_matches(l, &needle))
-                        .map(|(i, _)| i)
+                for (t, (topic, lessons)) in tab.outline().into_iter().enumerate() {
+                    let matching: Vec<usize> = (0..lessons.len())
+                        .filter(|&l| tab.lesson_matches(t, l, &needle))
                         .collect();
                     if matching.is_empty() {
                         continue;
@@ -250,18 +348,15 @@ impl Tutorial {
                     // Filtering shows every match, so force topics open while
                     // it's active; otherwise only the topic holding the
                     // selected lesson starts open.
-                    let force_open = !needle.is_empty() || reveal == Some((kind, t));
-                    egui::CollapsingHeader::new(RichText::new(topic.title).strong())
-                        .id_salt(("tutorial_topic", kind, t))
+                    let force_open = !needle.is_empty() || reveal == Some((tab, t));
+                    egui::CollapsingHeader::new(RichText::new(topic).strong())
+                        .id_salt(("tutorial_topic", tab, t))
                         .default_open(self.selected[slot].0 == t)
                         .open(force_open.then_some(true))
                         .show(ui, |ui| {
                             for l in matching {
                                 let picked = self.selected[slot] == (t, l);
-                                if ui
-                                    .selectable_label(picked, topic.lessons[l].title)
-                                    .clicked()
-                                {
+                                if ui.selectable_label(picked, lessons[l]).clicked() {
                                     self.selected[slot] = (t, l);
                                     self.scroll_to_top = true;
                                 }
@@ -274,9 +369,17 @@ impl Tutorial {
             });
     }
 
-    fn lesson_view(&mut self, ui: &mut egui::Ui) -> Option<LoadRequest> {
-        let kind = self.tab;
-        let slot = tab_index(kind);
+    fn lesson_view(&mut self, ui: &mut egui::Ui) -> Option<Request> {
+        match self.tab {
+            Tab::Query(kind) => self.query_lesson_view(ui, kind).map(Request::Query),
+            Tab::Tools => self.tools_lesson_view(ui),
+        }
+    }
+
+    /// A lesson of a query dialect's tab.
+    fn query_lesson_view(&mut self, ui: &mut egui::Ui, kind: Kind) -> Option<LoadRequest> {
+        let tab = Tab::Query(kind);
+        let slot = tab.slot();
         let topics = content::topics(kind);
         let (t, l) = self.selected[slot];
         let (t, l) = if topics.get(t).is_some_and(|topic| l < topic.lessons.len()) {
@@ -339,18 +442,18 @@ impl Tutorial {
             }
 
             if !lesson.tips.is_empty() {
-                tips(ui, lesson);
+                tips(ui, lesson.tips);
                 ui.add_space(10.0);
             }
 
             ui.separator();
-            go_to = self.pager(ui, kind, (t, l));
+            go_to = self.pager(ui, tab, (t, l));
             ui.add_space(8.0);
         });
 
         if let Some((nt, nl)) = go_to {
             self.selected[slot] = (nt, nl);
-            self.reveal = Some((kind, nt));
+            self.reveal = Some((tab, nt));
             self.scroll_to_top = true;
         }
         if self.hovered != hovered_before {
@@ -523,16 +626,17 @@ impl Tutorial {
     fn pager(
         &self,
         ui: &mut egui::Ui,
-        kind: Kind,
+        tab: Tab,
         current: (usize, usize),
     ) -> Option<(usize, usize)> {
-        let order: Vec<(usize, usize)> = content::topics(kind)
+        let outline = tab.outline();
+        let order: Vec<(usize, usize)> = outline
             .iter()
             .enumerate()
-            .flat_map(|(t, topic)| (0..topic.lessons.len()).map(move |l| (t, l)))
+            .flat_map(|(t, (_, lessons))| (0..lessons.len()).map(move |l| (t, l)))
             .collect();
         let pos = order.iter().position(|p| *p == current)?;
-        let title_of = |(t, l): (usize, usize)| content::topics(kind)[t].lessons[l].title;
+        let title_of = |(t, l): (usize, usize)| outline[t].1[l];
 
         let mut go_to = None;
         ui.horizontal(|ui| {
@@ -642,9 +746,9 @@ fn result_box(ui: &mut egui::Ui, kind: Kind, example: &Example, outcome: &Outcom
 }
 
 /// "Good to know" bullets.
-fn tips(ui: &mut egui::Ui, lesson: &Lesson) {
+fn tips(ui: &mut egui::Ui, tips: &[&str]) {
     ui.label(RichText::new("Good to know").strong());
-    for tip in lesson.tips {
+    for tip in tips {
         ui.horizontal_top(|ui| {
             ui.label("•");
             prose(ui, tip);

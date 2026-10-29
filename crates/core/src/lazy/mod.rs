@@ -642,6 +642,14 @@ impl Child<'_> {
             None => PathSegment::Index(self.index),
         }
     }
+
+    /// The bytes of the document its key is, quotes and all; none for an element
+    /// of an array.
+    pub fn key_range(&self) -> Option<Range<usize>> {
+        let key = self.key?;
+        let start = key.offset_in(self.node.tree.bytes()).checked_sub(1)?;
+        Some(start..start + key.len() + 2)
+    }
 }
 
 /// An object key, as it is written in the file.

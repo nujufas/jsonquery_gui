@@ -12,9 +12,16 @@
 //! make the app fetch a URL or read a file. A reference has to point inside the
 //! schema (`#/$defs/name`, an `$id` or an `$anchor` in it); the meta-schemas of
 //! the drafts are built in.
+//!
+//! A problem can be found in the texts that were checked: the value that is
+//! wrong in the document's, the keyword that said so in the schema's.
 
+use std::ops::Range;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use jsonquery_core::lazy::{self, LazyTree};
+use jsonquery_core::ValueKind;
+use jsonschema::error::ValidationErrorKind;
 use jsonschema::Draft;
 use serde_json::Value;
 
@@ -38,6 +45,9 @@ pub struct Problem {
     pub keyword: String,
     /// A JSON Pointer to that keyword in the schema.
     pub schema_path: String,
+    /// The members of the object at `path` that the schema does not allow, for
+    /// `additionalProperties` and `unevaluatedProperties`; empty for the rest.
+    pub unexpected: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -113,11 +123,17 @@ pub fn validate(
             more = true;
             break;
         }
+        let unexpected = match error.kind() {
+            ValidationErrorKind::AdditionalProperties { unexpected }
+            | ValidationErrorKind::UnevaluatedProperties { unexpected } => unexpected.clone(),
+            _ => Vec::new(),
+        };
         problems.push(Problem {
             path: error.instance_path().as_str().to_owned(),
             message: message_of(&error),
             keyword: error.kind().keyword().to_owned(),
             schema_path: error.schema_path().as_str().to_owned(),
+            unexpected,
         });
     }
     Ok(Report {
@@ -169,6 +185,55 @@ fn message_of(error: &jsonschema::ValidationError<'_>) -> String {
     message
 }
 
+/// Where in `document`, the text that was checked, `problem` is: the value its
+/// path points at — or, for members the schema does not allow, the first of
+/// them, key and value.
+pub fn place_in_document(problem: &Problem, document: &str) -> Option<Range<usize>> {
+    let tree = LazyTree::from_vec(document.as_bytes().to_vec()).ok()?;
+    let (node, _) = walk(&tree, &problem.path)?;
+    let unexpected = problem.unexpected.first();
+    match unexpected.and_then(|key| node.child_by_key(key)) {
+        Some(member) => Some(member.key_range()?.start..member.node.byte_range().end),
+        None => Some(node.byte_range()),
+    }
+}
+
+/// Where in `schema`, the text of the schema, the keyword that found `problem`
+/// is: its key and value.
+pub fn place_in_schema(problem: &Problem, schema: &str) -> Option<Range<usize>> {
+    let tree = LazyTree::from_vec(schema.as_bytes().to_vec()).ok()?;
+    let (node, member) = walk(&tree, &problem.schema_path)?;
+    Some(member?.key_range()?.start..node.byte_range().end)
+}
+
+/// The value `pointer` points at in `tree`, and the member or the item of an
+/// array it is (none for the whole).
+fn walk<'a>(
+    tree: &'a LazyTree,
+    pointer: &str,
+) -> Option<(lazy::Node<'a>, Option<lazy::Child<'a>>)> {
+    let mut node = tree.root();
+    let mut child = None;
+    for word in steps_of(pointer) {
+        let next = match node.kind() {
+            ValueKind::Object => node.child_by_key(&word)?,
+            ValueKind::Array => node.child(word.parse().ok()?)?,
+            _ => return None,
+        };
+        node = next.node;
+        child = Some(next);
+    }
+    Some((node, child))
+}
+
+/// The words of a JSON Pointer, as they were before they were written in it.
+pub(crate) fn steps_of(pointer: &str) -> impl Iterator<Item = String> + '_ {
+    pointer
+        .split('/')
+        .skip(1)
+        .map(|word| word.replace("~1", "/").replace("~0", "~"))
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -195,6 +260,29 @@ mod tests {
             .collect();
         found.sort_unstable();
         found
+    }
+
+    /// Problem `keyword` at `path` of checking `document` against `schema`, as
+    /// the texts are at the places it is found in them.
+    fn found_in<'a>(
+        schema: &'a str,
+        document: &'a str,
+        path: &str,
+        keyword: &str,
+    ) -> (Option<&'a str>, Option<&'a str>) {
+        let report = check(
+            &serde_json::from_str(schema).unwrap(),
+            &serde_json::from_str(document).unwrap(),
+        );
+        let problem = report
+            .problems
+            .iter()
+            .find(|p| p.path == path && p.keyword == keyword)
+            .unwrap_or_else(|| panic!("{path} {keyword} in {:?}", report.problems));
+        (
+            place_in_document(problem, document).map(|r| &document[r]),
+            place_in_schema(problem, schema).map(|r| &schema[r]),
+        )
     }
 
     fn person_schema() -> Value {
@@ -247,6 +335,67 @@ mod tests {
             "{}",
             minimum.schema_path
         );
+    }
+
+    #[test]
+    fn a_problem_is_found_in_the_texts_that_were_checked() {
+        let schema = r##"{
+  "type": "array",
+  "items": {
+    "type": "object",
+    "properties": {
+      "id": {"type": "integer"},
+      "ip": {"type": "string", "format": "ipv4"},
+      "tags": {"type": "array", "items": {"$ref": "#/$defs/tag"}},
+      "a/b": {"type": "integer"}
+    },
+    "required": ["id"],
+    "additionalProperties": false
+  },
+  "$defs": {"tag": {"type": "string", "maxLength": 3}}
+}"##;
+        let document = r#"[
+  {"id": 1, "ip": "10.0.0.1"},
+  {"id": 2, "ip": "192.168.0.355", "tags": ["ok", "long one"], "a/b": "x", "extra": [1, 2]},
+  {"ip": "10.0.0.2"}
+]"#;
+        let at = |path, keyword| found_in(schema, document, path, keyword);
+        assert_eq!(
+            at("/1/ip", "format"),
+            (Some(r#""192.168.0.355""#), Some(r#""format": "ipv4""#))
+        );
+        // A key with a slash in it.
+        assert_eq!(
+            at("/1/a~1b", "type"),
+            (Some(r#""x""#), Some(r#""type": "integer""#))
+        );
+        // Through a reference: the keyword where it is written.
+        assert_eq!(
+            at("/1/tags/1", "maxLength"),
+            (Some(r#""long one""#), Some(r#""maxLength": 3"#))
+        );
+        // A member that is not allowed is that member…
+        assert_eq!(
+            at("/1", "additionalProperties"),
+            (
+                Some(r#""extra": [1, 2]"#),
+                Some(r#""additionalProperties": false"#)
+            )
+        );
+        // …and one that is missing, the object it is missing from.
+        assert_eq!(
+            at("/2", "required"),
+            (Some(r#"{"ip": "10.0.0.2"}"#), Some(r#""required": ["id"]"#))
+        );
+        // The whole document.
+        assert_eq!(
+            found_in(r#"{"type": "string"}"#, " 5 ", "", "type"),
+            (Some("5"), Some(r#""type": "string""#))
+        );
+        // A text that is not the one checked has it nowhere.
+        let report = check(&json!({"items": {"type": "string"}}), &json!([1]));
+        assert_eq!(place_in_document(&report.problems[0], "[]"), None);
+        assert_eq!(place_in_schema(&report.problems[0], "{}"), None);
     }
 
     #[test]

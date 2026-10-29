@@ -5,14 +5,16 @@
 //!
 //! The command row has the Validate button and the option to check formats; the
 //! left pane is the document and the schema, one above the other; the right pane
-//! is the list of problems. A problem in the document that is open in the main
-//! window can be shown there: that puts its JSON Pointer in the query box.
+//! is the list of problems. A click on a problem points it out in the boxes: the
+//! value that is wrong in the document, the keyword that said so in the schema.
+//! A problem in the document that is open in the main window can be shown there:
+//! that puts its JSON Pointer in the query box.
 
 use std::sync::Arc;
 
 use eframe::egui::{self, Align, Layout, Rect, RichText};
 use jsonquery_core::Document;
-use jsonquery_query::schema::{Problem, MAX_PROBLEMS};
+use jsonquery_query::schema::{self, Problem, MAX_PROBLEMS};
 
 use super::jobs::{Job, Validated};
 use super::operand::{deliver, dropped_files, stacked, Operand};
@@ -82,9 +84,38 @@ impl Validate {
         self.start()
     }
 
+    /// Check what `document` holds against `schema`, a schema made on the Create
+    /// Schema page: both are put in the boxes, and the check started.
+    pub(super) fn check(&mut self, document: &Operand, schema: &str) -> Option<Request> {
+        self.document.copy_from(document);
+        self.schema.set_text(schema);
+        self.changed();
+        self.start()
+    }
+
+    /// The samples of a lesson of the tutorial in the boxes, formats checked or
+    /// not; and, with `run`, the check started.
+    pub(super) fn use_sample(
+        &mut self,
+        document: &str,
+        schema: &str,
+        check_formats: bool,
+        run: bool,
+    ) -> Option<Request> {
+        self.document.set_text(document);
+        self.schema.set_text(schema);
+        self.check_formats = check_formats;
+        self.changed();
+        if run {
+            self.start()
+        } else {
+            None
+        }
+    }
+
     /// The answer to a [`Request::Job`] for this page.
     pub(super) fn done(&mut self, gen: u64, result: Result<Validated, String>) {
-        self.selected = None;
+        self.unselect();
         self.run.finish(gen, result);
     }
 
@@ -112,8 +143,37 @@ impl Validate {
 
     /// What was found no longer matches what is on the page.
     fn changed(&mut self) {
-        self.selected = None;
+        self.unselect();
         self.run.clear();
+    }
+
+    /// Pick problem `index`, and point it out where it is in the boxes (when
+    /// they show their text): in the document, and in the schema.
+    fn select(&mut self, index: usize) {
+        self.selected = Some(index);
+        let Some(problem) = self
+            .run
+            .outcome()
+            .and_then(|v| v.report.problems.get(index))
+        else {
+            return;
+        };
+        let place = |operand: &Operand, find: fn(&Problem, &str) -> _| {
+            operand.shown_text().and_then(|text| find(problem, text))
+        };
+        let (in_document, in_schema) = (
+            place(&self.document, schema::place_in_document),
+            place(&self.schema, schema::place_in_schema),
+        );
+        self.document.set_mark(in_document);
+        self.schema.set_mark(in_schema);
+    }
+
+    /// No problem is picked, or pointed out.
+    fn unselect(&mut self) {
+        self.selected = None;
+        self.document.set_mark(None);
+        self.schema.set_mark(None);
     }
 
     /// The Validate button and the option to check formats.
@@ -172,7 +232,7 @@ impl Validate {
 
     fn start(&mut self) -> Option<Request> {
         let (document, schema) = (self.document.input()?, self.schema.input()?);
-        self.selected = None;
+        self.unselect();
         let (gen, cancel) = self.run.start();
         Some(Request::Job {
             tool: Tool::Validate,
@@ -237,6 +297,7 @@ impl Validate {
 
         let open_doc = env.open_doc;
         let mut shown = None;
+        let mut clicked = None;
         result_area(
             ui,
             "validate",
@@ -250,9 +311,7 @@ impl Validate {
                     return;
                 }
                 let list = problems_list(ui, validated, self.selected);
-                if list.selected.is_some() {
-                    self.selected = list.selected;
-                }
+                clicked = list.selected;
                 if let Some(index) = list.opened {
                     if shows_in_main_window(validated, open_doc) {
                         shown = Some(index);
@@ -260,13 +319,16 @@ impl Validate {
                 }
             },
         );
+        if let Some(index) = clicked {
+            self.select(index);
+        }
         if let Some(index) = shown {
             if let Some(Ok(validated)) = &self.run.result {
                 return Some(Request::Show(validated.report.problems[index].path.clone()));
             }
         }
 
-        let validated = validated?;
+        let validated = self.run.outcome()?;
         match act? {
             Act::Show => {
                 let problem = validated.report.problems.get(self.selected?)?;
@@ -452,7 +514,7 @@ fn problem_row(
 
     let response = response
         .on_hover_text(format!(
-            "{}\n\nAt {}\nKeyword: {}\nIn the schema: {}",
+            "{}\n\nAt {}\nKeyword: {}\nIn the schema: {}\n\nClick to find it in the document and the schema",
             problem.message,
             path_or_document(&problem.path),
             problem.keyword,
@@ -506,6 +568,7 @@ mod tests {
             message: message.to_owned(),
             keyword: keyword.to_owned(),
             schema_path: format!("/{keyword}"),
+            unexpected: Vec::new(),
         }
     }
 

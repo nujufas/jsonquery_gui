@@ -24,6 +24,7 @@ mod jmespath;
 mod jq;
 mod jsonpath;
 mod pointer;
+pub mod tools;
 
 /// One highlighted fragment of an example's query plus what it does, e.g.
 /// `(".age > 30", "keep members older than 30")`. Fragments are matched

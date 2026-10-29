@@ -54,6 +54,24 @@ impl Format {
         [&mut self.input].into_iter().find(|o| o.title() == title)
     }
 
+    /// A sample of a lesson of the tutorial in the box, laid out as `options`
+    /// say; and, with `run`, formatted.
+    pub(super) fn use_sample(
+        &mut self,
+        text: &str,
+        options: Options,
+        run: bool,
+    ) -> Option<Request> {
+        self.input.set_text(text);
+        self.options = options;
+        self.run.clear();
+        if run {
+            self.start()
+        } else {
+            None
+        }
+    }
+
     /// The answer to a [`Request::Job`] for this page.
     pub(super) fn done(&mut self, gen: u64, result: Result<Formatted, String>) {
         self.run.finish(gen, result);

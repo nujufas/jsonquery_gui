@@ -31,6 +31,39 @@ use super::Request;
 use crate::app::human_bytes;
 use crate::worker::{describe, MergeOutcome};
 
+/// The folder, in the system's temporary one, that the tutorial's Merge samples
+/// are written to, a folder for each example.
+const SAMPLES_FOLDER: &str = "jsonquery-tutorial";
+
+/// Write the samples of a Merge lesson of the tutorial, which are files, to a
+/// folder of their own (the same each time for an example), and give where.
+pub(super) fn sample_files(
+    example: &jsonquery_query::tutorial::tools::ToolExample,
+) -> std::io::Result<Vec<PathBuf>> {
+    let name: String = example
+        .caption
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let folder = std::env::temp_dir().join(SAMPLES_FOLDER).join(name);
+    std::fs::create_dir_all(&folder)?;
+    example
+        .samples
+        .iter()
+        .map(|sample| {
+            let path = folder.join(sample.name);
+            std::fs::write(&path, sample.text)?;
+            Ok(path)
+        })
+        .collect()
+}
+
 const MOVE_UP: &str = "⏶";
 const MOVE_DOWN: &str = "⏷";
 const REMOVE: &str = "×";
@@ -72,6 +105,20 @@ impl Merge {
         if self.files.len() != before {
             self.inputs_changed();
         }
+    }
+
+    /// The files of a lesson of the tutorial and its filter, in place of what the
+    /// page had; and, with `run`, the merge started.
+    pub(super) fn use_sample(
+        &mut self,
+        files: Vec<PathBuf>,
+        filter: &str,
+        run: bool,
+    ) -> Option<Request> {
+        self.files = files;
+        self.filter = filter.to_owned();
+        self.inputs_changed();
+        run.then(|| self.start())
     }
 
     /// What was merged no longer matches the files or the filter.
@@ -154,6 +201,7 @@ impl Merge {
                 "a jq filter, e.g. add",
                 Some(3),
                 false,
+                None,
             );
         });
         ui.add_space(2.0);

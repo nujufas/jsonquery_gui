@@ -35,15 +35,17 @@ patches and validates documents too. Built in Rust with
   separate window with a lesson tree for each dialect. Every lesson has short
   examples with the query broken down piece by piece and a live result;
   **▶ Try it** loads an example's data and query into the main window so you
-  can edit and experiment. See [Tutorial](docs/tutorial.md).
+  can edit and experiment. A **Tools** tab teaches each tool with samples, and its
+  ▶ Try it puts them in the tool's page and runs it. See [Tutorial](docs/tutorial.md).
 
   ![The tutorial window on the jq lesson about select](docs/images/screenshot-tutorial.png)
 - **Tools** — the 🛠 icon next to the tutorial opens the Tools window, with a
-  tab for each of five utilities that go with the viewer: **Merge JSON**,
-  **Format JSON**, **Diff JSON**, **Patch JSON** and **Validate Schema**. Each
-  is shown in action under [Tools](#tools) below. They open in a window of their
-  own, or **docked** in the main window — the **⚓** button in their row of tabs gives
-  the main window a row of tabs: **Json Query** itself, then the five tools.
+  tab for each of six utilities that go with the viewer: **Merge JSON**,
+  **Format JSON**, **Diff JSON**, **Patch JSON**, **Validate Schema** and
+  **Create Schema**. Each is described under [Tools](#tools) below. They open in a
+  window of their own, or **docked** in the main window — the **⚓** button in their
+  row of tabs gives the main window a row of tabs: **Json Query** itself, then the
+  six tools.
 - **Workspace** — the button at the left end of the status bar shows a
   pane at the left of the window that keeps your own **queries, schemas, patches,
   documents and web addresses**, each (but an address) with an optional **sample**, in
@@ -254,11 +256,25 @@ operation that failed.
 
 Checks a document against a JSON Schema (drafts 4, 6, 7, 2019-09 and 2020-12,
 read from `$schema`) and lists every problem with its pointer and what is
-wrong. For the document that is open in the main window, **Show in main
-window** reveals a problem there. Nothing is ever fetched: a `$ref` has to
+wrong; click one to find it in the document and the schema. For the document
+that is open in the main window, **Show in main window** reveals a problem
+there. Nothing is ever fetched: a `$ref` has to
 point inside the schema.
 
 ![Validate Schema: a document checked against a schema, six problems listed with their pointers](docs/images/screenshot-tools-validate.png)
+
+### Create Schema
+
+Makes a JSON Schema of a document: the types of its values, the members of its
+objects and which every one has, and what its strings are — a date, a uuid, an
+email or IP address, a code of one shape (`ORD-2024-00017` →
+`^ORD-[0-9]{4}-[0-9]{5}$`), a list with commas between — as a `format` and a
+`pattern`. Objects keyed by ids or dates become maps, and `phone1`, `phone2` one
+pattern. The patterns found are listed under the schema; the schema is checked
+against the document, and **Use in Validate** checks it there. Click a pattern to
+see where it is in the document and the schema, and to change it, make it a plain
+string, or restore it; click an enum to leave values out, add others, or make it a
+plain string — or edit the schema's text itself.
 
 ## Known limitations
 

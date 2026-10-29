@@ -15,8 +15,9 @@ use crate::query_suggest::QuerySuggest;
 /// The size of the main window, in points, the first time the app starts.
 pub const DEFAULT_WINDOW: [f32; 2] = [1200.0, 800.0];
 
-/// The smallest the main window can be made, in points.
-pub const MIN_WINDOW: [f32; 2] = [640.0, 420.0];
+/// The smallest the main window can be made, in points: as wide as the row of tabs
+/// the Tools docked in it have, the tutorial's button and the theme's beside them.
+pub const MIN_WINDOW: [f32; 2] = [700.0, 420.0];
 
 /// What a saved width or height of the window may be. Beyond the largest there is
 /// no screen, and it is a number that something else has put there.

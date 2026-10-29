@@ -11,6 +11,7 @@ page of the selected one under them:
 | [Diff JSON](#diff-json) | Shows two documents side by side with what differs marked, lists the changes, and gives the JSON Patch for it. |
 | [Patch JSON](#patch-json) | Applies a JSON Patch (RFC 6902) or a JSON Merge Patch (RFC 7386) to a document. |
 | [Validate Schema](#validate-schema) | Checks a document against a JSON Schema and lists what does not fit. |
+| [Create Schema](#create-schema) | Makes a JSON Schema of a document, with the patterns its strings have: dates, uuids, addresses, codes, lists. |
 
 Every page has the same shape, and it is the main window's: the tabs on top (as
 its toolbar is), a command row under them with the page's main button and its
@@ -24,13 +25,17 @@ Buttons, text and spacing are the main window's own, so the two look like one
 program, and the window keeps its text short: what a choice does, and the
 limits, are in tooltips.
 
+The [tutorial](tutorial.md#the-tools-tab) (📖, `F1`) has a **Tools** tab: a few
+lessons for each tool, with samples, what the tool makes of them, and **▶ Try it**,
+which puts the samples in the tool's page and runs it there.
+
 ## In a window, or docked in the main window
 
 The Tools open in a window of their own, which can sit beside the main window or
 on a second screen. They can also be **docked**: the **⚓** button at the right
 end of their row of tabs moves them into the main window, which then has a row of
 tabs on top — **Json Query**, **Merge JSON**, **Format JSON**, **Diff JSON**,
-**Patch JSON** and **Validate Schema** — and shows what the tab in front holds, in
+**Patch JSON**, **Validate Schema** and **Create Schema** — and shows what the tab in front holds, in
 all the room there is. The tool they were on is the one in front.
 
 ![The Tools docked in the main window: the row of tabs with Json Query first, and Diff JSON in front over two documents side by side](images/screenshot-tools-docked.png)
@@ -67,7 +72,7 @@ tabs, on **Json Query**.
 
 ## Putting JSON in
 
-Format, Diff, Patch and Validate take their documents in the same kind of box.
+Format, Diff, Patch, Validate and Create Schema take their documents in the same kind of box.
 A box has four ways in:
 
 - **type or paste** the JSON into it;
@@ -430,6 +435,13 @@ is in the schema. The status bar says **Valid**, or how many problems there are
 — a thousand at most are listed. **Copy report** copies the list; the right-click
 menu of a row copies its path, its message, or the whole line.
 
+**Click a problem** and it is highlighted where it is, the boxes scrolled to it:
+in the document, the value that is wrong (for a member that is missing, the
+object it is missing from; for one that is not allowed, that member); in the
+schema, the keyword that said so (`"format": "ipv4"`), where it is written,
+under `$defs` too. A box that holds a file or the main window's document, and
+does not show its text, has nothing highlighted.
+
 - **Check formats** holds strings to their `format` (`email`, `date-time`,
   `uuid`…). The specification leaves that to the validator in recent drafts;
   most people want it, so it is on.
@@ -447,6 +459,119 @@ menu of a row copies its path, its message, or the whole line.
 
 The checking is done by the [`jsonschema`](https://crates.io/crates/jsonschema)
 crate.
+
+## Create Schema
+
+Make a JSON Schema of the **Document**. Press **Create** (or `Ctrl+Enter`); the
+schema is on the right, and under it the **Patterns** that were found in the
+strings, one to a row.
+
+The document is walked once, and what is seen at each place is summed up. The
+elements of an array are one place, so a list of a thousand orders makes one
+schema of an order:
+
+- **`type`** — every type a place had: `"string"`, `["number", "null"]`… Whole
+  numbers are `integer`, and `number` when there are others among them.
+- **`properties`** — the members of the objects, in the order they were first
+  seen, and under **`required`** those that every object of the place has.
+- **`items`** — what the elements of the arrays are, all of them together.
+
+With **Patterns** on, what a place's strings all are is said as a `format`, where
+JSON Schema has one, and always as a `pattern`, the regular expression they match:
+
+| Found | `format` | Example |
+|---|---|---|
+| date-time, date, time | `date-time`, `date`, `time` | `2024-01-15T10:30:00Z` |
+| date-time or time without zone | — | `2024-01-15 10:30` |
+| duration | `duration` | `P1DT2H` |
+| uuid | `uuid` | `123e4567-e89b-12d3-a456-426614174000` |
+| email, URL, host name | `email`, `uri`, `hostname` | `ada@example.com` |
+| IPv4 and IPv6 address | `ipv4`, `ipv6` | `192.168.0.1`, `2001:db8::1` |
+| MAC address, phone number, hex colour, JWT | — | `+44 20 7946 0958` |
+| version (semver), language tag, code, slug, hex string | — | `1.2.3`, `en-US`, `USD` |
+| integer, decimal or number written as text | — | `"90210"`, `"12.50"` |
+| text of one shape | — | `ORD-2024-00017` → `^ORD-[0-9]{4}-[0-9]{5}$` |
+| a list: items of one kind with `,`, `;` or `\|` between | — | `10.0.0.1, 10.0.0.2` |
+
+- A **shape** is letters, digits and the same marks between them, in the same
+  order in every string, with a digit somewhere (a name or a sentence is not a
+  code). Letters that several different strings all have are written as they are
+  (`ORD`), and a width is written when several different strings agree on it and
+  it is more than one character (`[0-9]{5}`); otherwise it is one or more (`+`).
+- A **list** is a string whose items, between commas, semicolons or bars, are all
+  of one kind — or of one shape, or words — with at least one string that has
+  two or more. It is empty, or one item or more: `^(?:[0-9]+(?:,[0-9]+)*)?$`; an
+  empty string is a list with no items. A space after the separator is allowed
+  when one had it.
+- The letters of a uuid or a hex string are written in the case they are in.
+- An object whose keys are **data** — two or more, all uuids, dates, numbers, codes,
+  or of one shape — is a map: its values are one schema under
+  `patternProperties`, keyed by the keys' pattern. So are members whose keys are a
+  **name and a number**, `phone1` and `phone2`: `^phone[0-9]+$`. The list says
+  these as *keys: uuid* and *numbered keys: phone1, phone2*.
+- The draft decides the formats: `uuid` and `duration` are 2019-09's, `date` and
+  `time` draft 7's; for an older draft the pattern is there alone.
+
+The other options:
+
+- **Draft** — what `$schema` says: 2020-12 (the default), 2019-09, 7, 6 or 4.
+- **Required** — list the members every object has (on).
+- **No other keys** — `additionalProperties: false`: allow no member but those seen.
+- **Enums** — up to ten different strings, some of them seen more than once, are
+  an `enum` (with `null` if it was there too) in place of a pattern.
+- **Bounds** — the least and the most seen: `minimum`/`maximum`,
+  `minLength`/`maxLength`, `minItems`/`maxItems`; the widths in the patterns
+  become `{least,most}`.
+
+The schema made is **checked against the document**, with formats, by the
+validator of Validate Schema. A `format` the validator holds a value to more
+strictly than the pattern does (a duration of weeks and days, `P1W2D`, is no RFC
+3339 duration) is taken out, and the pattern stays: the status bar says **The
+document fits it**.
+
+A row of the list has where (a path as jq writes it: `.orders[].id`; `[]` is every
+element of an array or every value of a map) and what was found, with its format;
+hover it for the pattern, and its right-click menu copies the pattern, the path or
+the row. **Copy list** copies them all, a row to a line, with tabs between.
+**Use in Validate** puts the document and the schema in Validate Schema's boxes,
+shows that page and checks the document; **Save…** writes the schema
+(`orders.schema.json`), and **Copy** copies it.
+
+### Changing the schema
+
+The schema made is yours to change before it is used:
+
+- **A pattern** — click its row and it opens under the list, its expression in a
+  box. Write another and press **Apply** (or Enter): it takes the place of the one
+  in the schema, and the row says *edited*. **Plain string** takes the `pattern` and
+  the `format` out, so the value is a string of any kind (*string · was uuid*), and
+  empties the box: **Apply** waits for an expression to be written there. For
+  the keys of a map or numbered keys it is **Any key**, which puts their values'
+  schema under `additionalProperties` (one pattern of an object's keys can be
+  that). **Restore** puts back what was found. An expression the validator cannot
+  read is refused, with the reason, and nothing is changed.
+
+  The click also shows where the pattern is. In the schema, its `pattern` (or its key
+  of `patternProperties`) is highlighted and scrolled to. In the document, so is the
+  first string it was found in (for keys, the first key), and the line of the open
+  pattern says which of how many it is (*1 of 40*); **⏶** and **⏷** go to the one
+  before and after, round from the last to the first. A document that is not
+  shown in its box (a big file, or the open document) has only the schema's.
+- **An enum** — with **Enums**, an enum is in the list too (*enum: open, closed*;
+  the heading says *Patterns and enums*). A click opens its values, each with a tick:
+  untick one to leave it out of the enum, tick it to put it back; the hover says how
+  many times it is in the document. Write another value in the box and press
+  **Add** (or Enter) to put it in. **Plain string** takes the `enum` out, so the
+  value is a string of any kind; **Restore** puts back the values found. It is
+  pointed out as a pattern is: its `enum` in the schema, its values in the document.
+- **The text** — the schema is in a box, and can be typed in like any other. Text
+  that is not JSON is said over the box (*Not JSON: …*), and Use in Validate waits
+  until it is put right. A change of a pattern writes the schema out again, in the
+  layout it was made in.
+
+**Copy**, **Save…** and **Use in Validate** take the schema as it is then. The
+status bar says **Edited — Use in Validate checks it** instead of *The document fits
+it*: only the schema that was made was checked. **Reset** undoes every change.
 
 ## Limits
 
@@ -468,9 +593,12 @@ crate.
 - The logic is in `crates/query`, one small module per tool, with its own unit
   tests: `merge` (jq `-s` through the embedded jaq), `reformat` (the printer),
   `diff` (the comparison and its RFC 6902 operations), `patch` (RFC 6902 and
-  RFC 7386, and JSON Pointer) and `schema` (a thin layer over `jsonschema`, built
-  without its network and file features). They work on `serde_json::Value` with
-  exact numbers.
+  RFC 7386, and JSON Pointer), `schema` (a thin layer over `jsonschema`, built
+  without its network and file features) and `infer` (Create Schema: the walk and
+  the schema in `infer.rs`, what strings have in common in `infer/text.rs`, and the
+  kinds of text, each a regular expression, in `infer/kinds.rs`, found with the
+  `regex` crate and written in the part of the syntax it and ECMA-262 read alike).
+  They work on `serde_json::Value` with exact numbers.
 - The window is `crates/app/src/tools.rs` and `crates/app/src/tools/`: one file
   per page, `operand.rs` for the box JSON goes in, `widgets.rs` for the shared
   look and `jobs.rs` for the work the worker thread does. The jobs run on the

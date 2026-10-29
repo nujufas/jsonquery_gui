@@ -83,7 +83,7 @@ mod tests {
     fn the_window_opens_at_the_size_it_always_has_the_first_time() {
         let window = main_window(&settings::Interface::default());
         assert_eq!(window.inner_size, Some(egui::vec2(1200.0, 800.0)));
-        assert_eq!(window.min_inner_size, Some(egui::vec2(640.0, 420.0)));
+        assert_eq!(window.min_inner_size, Some(egui::vec2(700.0, 420.0)));
         assert_ne!(window.maximized, Some(true));
     }
 
@@ -118,6 +118,6 @@ mod tests {
             ..Default::default()
         };
         let window = main_window(&interface);
-        assert_eq!(window.inner_size, Some(egui::vec2(640.0, 420.0)));
+        assert_eq!(window.inner_size, Some(egui::vec2(700.0, 420.0)));
     }
 }

@@ -23,7 +23,7 @@ use crate::settings_window::SettingsWindow;
 use crate::text_menu;
 use crate::tools::{self, Place, Tools};
 use crate::tree_view::{RowAction, TreeView};
-use crate::tutorial::{LoadRequest, Tutorial};
+use crate::tutorial::{self, Tutorial};
 use crate::worker::{self, Command, CopyTarget, Event, SearchRoot};
 use crate::workspace_pane::{self, WorkspacePane};
 use crate::x11_alert::X11Alert;
@@ -1525,11 +1525,21 @@ impl App {
         self.last_query_cancelled = true;
     }
 
-    /// Apply what the tutorial window asked for: pin the engine to the
-    /// lesson's dialect (a bare `office.city` would otherwise be
+    /// Apply what the tutorial window asked for: for a query lesson, pin the
+    /// engine to the lesson's dialect (a bare `office.city` would otherwise be
     /// auto-detected as jq), put the query in the box, and/or replace the
-    /// source document — running the query once that document has loaded.
-    fn apply_tutorial_request(&mut self, request: LoadRequest) {
+    /// source document — running the query once that document has loaded; for
+    /// a Tools lesson, put its samples in its tool's page, show it and run it.
+    fn apply_tutorial_request(&mut self, ctx: &egui::Context, request: tutorial::Request) {
+        let request = match request {
+            tutorial::Request::Query(request) => request,
+            tutorial::Request::Tool { example, run } => {
+                if let Some(request) = self.tools.try_example(ctx, example, run) {
+                    self.apply_tools_request(ctx, request);
+                }
+                return;
+            }
+        };
         // What it loads and runs is for the main window's own tab to show.
         self.tools.show_query();
         if let Some(query) = request.query {

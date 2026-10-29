@@ -6,8 +6,10 @@
 //! status bar at the bottom. Buttons, spacing, text sizes and margins are
 //! egui's own; nothing here is bigger than the main window's.
 
+use std::ops::Range;
 use std::path::Path;
 
+use eframe::egui::text::{LayoutJob, TextFormat};
 use eframe::egui::{self, Align, Color32, Layout, Margin, Shape, StrokeKind, TextStyle};
 
 use super::shared::Run;
@@ -111,7 +113,8 @@ pub(super) fn run_button<T>(
 /// that fills the room it is given (or is `rows` lines tall) and scrolls when
 /// its text is longer. Its frame is painted around the viewport, so it stays
 /// put while the text scrolls. `accent` outlines it, to say a dragged file would
-/// land here. True when the text changed.
+/// land here. `mark` is a part of the text to point out (see [`Mark`]). True
+/// when the text changed.
 pub(super) fn text_box(
     ui: &mut egui::Ui,
     id: &str,
@@ -119,6 +122,7 @@ pub(super) fn text_box(
     hint: &str,
     rows: Option<usize>,
     accent: bool,
+    mark: Option<&mut Mark>,
 ) -> bool {
     // The height of a line as the text box counts it.
     let line = ui.text_style_height(&TextStyle::Monospace) + ui.spacing().extra_text_line_spacing;
@@ -150,19 +154,39 @@ pub(super) fn text_box(
         bottom: TEXT_MARGIN.bottom + leftover.clamp(0.0, 100.0).floor() as i8,
         ..TEXT_MARGIN
     };
+    // A mark of text that is no longer there (or that cuts a character) is none.
+    let mark = mark.filter(|mark| text.get(mark.range.clone()).is_some());
     let output = egui::ScrollArea::vertical()
         .id_salt(format!("{id}_scroll"))
         .auto_shrink([false, false])
         .min_scrolled_height(line)
         .show(&mut inner, |ui| {
-            egui::TextEdit::multiline(&mut *text)
+            let marked = mark.as_ref().map(|mark| mark.range.clone());
+            let mut layouter = |ui: &egui::Ui, buffer: &dyn egui::TextBuffer, wrap_width: f32| {
+                let job = marked_text(ui, buffer.as_str(), marked.clone(), wrap_width);
+                ui.fonts_mut(|fonts| fonts.layout_job(job))
+            };
+            let mut edit = egui::TextEdit::multiline(&mut *text)
                 .id_salt(format!("{id}_edit"))
                 .code_editor()
                 .desired_rows(fitting)
                 .desired_width(f32::INFINITY)
                 .frame(egui::Frame::NONE.inner_margin(margin))
-                .hint_text(hint)
-                .show(ui)
+                .hint_text(hint);
+            if mark.is_some() {
+                edit = edit.layouter(&mut layouter);
+            }
+            let output = edit.show(ui);
+            if let Some(mark) = mark.filter(|mark| mark.reveal) {
+                mark.reveal = false;
+                let start = output.galley.text()[..mark.range.start].chars().count();
+                let at = output
+                    .galley
+                    .pos_from_cursor(egui::text::CCursor::new(start))
+                    .translate(output.galley_pos.to_vec2());
+                ui.scroll_to_rect(at, Some(Align::Center));
+            }
+            output
         })
         .inner;
     crate::text_menu::attach(&output.response, text, crate::text_menu::Kind::Typed);
@@ -186,6 +210,63 @@ pub(super) fn text_box(
         ),
     );
     output.response.changed()
+}
+
+/// A part of the text of a box to point out — where a pattern was found — in
+/// the colour the main window's query box gives a step of a query.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct Mark {
+    /// Its bytes.
+    pub range: Range<usize>,
+    /// Scroll it into view the next time the box is drawn.
+    pub reveal: bool,
+}
+
+impl Mark {
+    /// The part `range`, to be scrolled to.
+    pub fn reveal(range: Range<usize>) -> Self {
+        Self {
+            range,
+            reveal: true,
+        }
+    }
+}
+
+/// The text of a text box laid out as the box lays it out, with the part
+/// `marked` on a tint.
+fn marked_text(
+    ui: &egui::Ui,
+    text: &str,
+    marked: Option<Range<usize>>,
+    wrap_width: f32,
+) -> LayoutJob {
+    let font_id = TextStyle::Monospace.resolve(ui.style());
+    let row_height = ui.fonts_mut(|fonts| fonts.row_height(&font_id));
+    let plain = TextFormat {
+        line_height: Some(row_height + ui.spacing().extra_text_line_spacing),
+        color: ui
+            .visuals()
+            .override_text_color
+            .unwrap_or_else(|| ui.visuals().widgets.inactive.text_color()),
+        font_id,
+        ..Default::default()
+    };
+    let mut job = LayoutJob::default();
+    job.wrap.max_width = wrap_width;
+    job.keep_trailing_whitespace = true;
+    match marked.filter(|range| text.get(range.clone()).is_some()) {
+        Some(range) => {
+            let lit = TextFormat {
+                background: crate::query_highlight::part_color(0, ui.visuals().dark_mode, true),
+                ..plain.clone()
+            };
+            job.append(&text[..range.start], 0.0, plain.clone());
+            job.append(&text[range.clone()], 0.0, lit);
+            job.append(&text[range.end..], 0.0, plain);
+        }
+        None => job.append(text, 0.0, plain),
+    }
+    job
 }
 
 /// What stands in a text box that holds something it can't show: a line of what

@@ -23,6 +23,7 @@ mod convert;
 pub mod diff;
 mod errors;
 pub mod highlight;
+pub mod infer;
 pub mod jmespath_engine;
 pub mod jq;
 mod jq_ext;

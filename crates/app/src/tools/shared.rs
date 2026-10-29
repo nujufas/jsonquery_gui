@@ -79,7 +79,7 @@ pub(super) struct Env<'a> {
 }
 
 /// A job on the worker thread and the last answer to one: the bookkeeping the
-/// Format, Diff, Patch and Validate pages share.
+/// Format, Diff, Patch, Validate and Create Schema pages share.
 pub(super) struct Run<T> {
     /// Which job the page is waiting on (or last got an answer for). The worker
     /// answers with the `gen` it was given, and an answer to an older job is

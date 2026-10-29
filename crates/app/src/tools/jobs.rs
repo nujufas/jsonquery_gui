@@ -1,4 +1,4 @@
-//! The work behind the Format, Diff, Patch and Validate pages. A page collects
+//! The work behind the Format, Diff, Patch, Validate and Create Schema pages. A page collects
 //! what it has — documents typed or pasted in, files, the document open in the
 //! main window — and its options into a [`Job`]; the worker thread runs it
 //! ([`run`]) and answers with an [`Outcome`]. None of it touches the UI.
@@ -17,7 +17,7 @@ use anyhow::{bail, Context};
 use jsonquery_core::{Content, Document, DocumentSource, DuplicateKeys};
 use jsonquery_query::diff::{self, Change, Side, SideBySide, TooLong};
 use jsonquery_query::reformat::{self, Indent};
-use jsonquery_query::{patch, schema};
+use jsonquery_query::{infer, patch, schema};
 use serde_json::Value;
 
 use super::line_edit::{self, Edit};
@@ -254,6 +254,10 @@ pub enum Job {
         schema: Input,
         check_formats: bool,
     },
+    Create {
+        document: Input,
+        options: infer::Options,
+    },
 }
 
 /// Differences to move from one document into the other before comparing: what
@@ -274,6 +278,7 @@ pub enum Outcome {
     Diff(Compared),
     Patch(Patched),
     Validate(Validated),
+    Create(Created),
 }
 
 /// The first part of a text, for a box that cannot show all of it.
@@ -383,6 +388,20 @@ pub struct Validated {
     /// The document that was checked, when it was the one open in the main
     /// window — which is what a problem's path can be shown in.
     pub open: Option<Arc<Document>>,
+    pub elapsed: Duration,
+}
+
+pub struct Created {
+    /// The schema, as text.
+    pub text: Arc<str>,
+    pub preview: Preview,
+    /// The patterns found, in the order of the schema.
+    pub found: Vec<infer::Found>,
+    /// How many members of objects the schema names.
+    pub properties: usize,
+    /// What is still wrong with the document against the schema: nothing, but
+    /// for a fault.
+    pub problems: usize,
     pub elapsed: Duration,
 }
 
@@ -565,6 +584,25 @@ fn run_job(job: Job, cancel: &AtomicBool, limits: &FileLimits) -> anyhow::Result
             Ok(Outcome::Validate(Validated {
                 report,
                 open,
+                elapsed: start.elapsed(),
+            }))
+        }
+        Job::Create { document, options } => {
+            check_size(&[&document], limits)?;
+            let loaded = document.load(limits).context("Document")?;
+            stop_if_cancelled(cancel)?;
+            let created =
+                infer::create(loaded.held.value(), options, cancel).map_err(|e| match e {
+                    infer::Error::Cancelled => anyhow::anyhow!("cancelled"),
+                    other => anyhow::anyhow!("{other}"),
+                })?;
+            let text = reformat::render(&created.schema, &reformat::Options::default());
+            Ok(Outcome::Create(Created {
+                preview: Preview::of(&text),
+                text: text.into(),
+                found: created.found,
+                properties: created.properties,
+                problems: created.problems,
                 elapsed: start.elapsed(),
             }))
         }
@@ -1647,6 +1685,32 @@ mod tests {
             panic!("should fail")
         };
         assert!(error.starts_with("The schema can't be used: "), "{error}");
+    }
+
+    #[test]
+    fn creating_a_schema_of_a_document() {
+        let Ok(Outcome::Create(c)) = go(Job::Create {
+            document: text(r#"[{"id": "123e4567-e89b-12d3-a456-426614174000", "n": 1}, {"n": 2}]"#),
+            options: infer::Options::default(),
+        }) else {
+            panic!("should create")
+        };
+        let schema: Value = serde_json::from_str(&c.text).unwrap();
+        assert_eq!(schema["items"]["required"], json!(["n"]));
+        assert_eq!(schema["items"]["properties"]["id"]["format"], "uuid");
+        assert_eq!(c.properties, 2);
+        assert_eq!(c.found.len(), 1);
+        assert_eq!(c.problems, 0);
+        assert_eq!(c.preview.text, &*c.text);
+
+        // A document that is not JSON is named as the other pages name theirs.
+        let Err(error) = go(Job::Create {
+            document: text("[1,"),
+            options: infer::Options::default(),
+        }) else {
+            panic!("should fail")
+        };
+        assert!(error.starts_with("Document: "), "{error}");
     }
 
     #[test]

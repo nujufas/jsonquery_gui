@@ -1,14 +1,15 @@
 # Tutorial
 
 jsonquery ships with a built-in tutorial for all four query dialects — jq,
-JSON Pointer, JSONPath and JMESPath. Click the 📖 icon in the toolbar (next
-to the 💡 autocomplete toggle) or press `F1`; it opens in its own window so it
-can sit beside the main one.
+JSON Pointer, JSONPath and JMESPath — and for the [Tools](tools.md). Click the
+📖 icon in the toolbar (next to the 💡 autocomplete toggle) or press `F1`; it
+opens in its own window so it can sit beside the main one.
 
 ## What you see
 
-- **Four tabs** across the top — **jq** (the default), **JSON Pointer**,
-  **JSONPath**, **JMESPath**. Each tab remembers the lesson you were on.
+- **Five tabs** across the top — **jq** (the default), **JSON Pointer**,
+  **JSONPath**, **JMESPath** and **Tools** (see [The Tools tab](#the-tools-tab)).
+  Each tab remembers the lesson you were on.
 - **A topic tree** on the left: topics (expand/collapse) containing lessons.
   The filter box narrows it by lesson title, summary or example query.
 - **The lesson** on the right: a one- or two-sentence summary, one to three
@@ -48,13 +49,47 @@ auto-detected as jq. Loading brings the main window to the front and shows a
 confirmation in the tutorial's status bar. The last lesson of each dialect is
 a **cheat sheet** whose rows each have their own ▶.
 
+## The Tools tab
+
+A topic for each tool — **Merge JSON**, **Format JSON**, **Diff JSON**, **Patch
+JSON**, **Validate Schema** and **Create Schema** — after a first page on the Tools
+window itself. Each lesson has one or two examples, and each example shows:
+
+| Piece | What it is |
+|---|---|
+| **The tool and its options** | Which page, and how it is set: a Merge's filter, Format's indent, the kind of patch, the options of Create Schema. |
+| **The samples** | The documents the page takes, under the name of the box they go in (*Left*, *Schema*…) — or, for Merge, of the file. |
+| **Result** | What the tool makes of them, *live*: the same code the page runs — a merged document, the differences and their patch, the problems, a schema and the patterns found. An example that fails on purpose (a patch whose `test` does not hold) says so. |
+| **What to look at** | A few points on the result. |
+
+| Button | Effect |
+|---|---|
+| **▶ Try it** | Puts the samples in the tool's page, sets the page as the example has it, shows the page (its window, or its tab when the Tools are docked) and runs it. |
+| **Load samples** | The same, without running it — to change something first. |
+
+Merge works on files, so its samples are written first, a folder for each example
+in the system's temporary folder (`jsonquery-tutorial/<the example>/`), and the
+files go in the Merge list. The lessons:
+
+| Topic | Lessons |
+|---|---|
+| Getting started | The Tools window |
+| Merge JSON | Append files · Deep-merge settings · Your own filter (`group_by`, `$files`) |
+| Format JSON | Pretty-print and minify · Sort keys and ASCII only |
+| Diff JSON | Two versions of a document · Arrays and the order of keys |
+| Patch JSON | Operations (RFC 6902) · All or nothing · Merge patch (RFC 7386) |
+| Validate Schema | A document that fits · What does not fit · References with `$defs` |
+| Create Schema | From a document to a schema · Patterns in strings · Lists, maps and numbered keys · Enums and bounds |
+
 ## Where the content lives
 
 | | |
 |---|---|
 | `crates/query/src/tutorial/mod.rs` | The content model (`Topic` → `Lesson` → `Example`), the shared sample documents, and the pure helpers: running an example, formatting a result, splitting a query into highlighted segments, and the tiny inline-markup parser. No egui. |
 | `crates/query/src/tutorial/{jq,pointer,jsonpath,jmespath}.rs` | One `static TOPICS` per dialect — the lessons themselves. |
+| `crates/query/src/tutorial/tools.rs` | The Tools tab: its `TOPICS` (`ToolTopic` → `ToolLesson` → `ToolExample`, each with a `Setting` and its `Sample`s) and `run`, which runs an example's tool on its samples. No egui. |
 | `crates/app/src/tutorial.rs` | The window: tabs, tree, lesson view, and the hand-off to the main window. |
+| `crates/app/src/tutorial/tools_tab.rs` | The Tools tab's lesson view. `Tools::try_example` (in `tools.rs`) puts an example's samples in its page; `App::apply_tutorial_request` hands it over. |
 | `crates/app/src/query_highlight.rs` | The chip palette (`part_color`), shared with the main window's query box, which tints the query you type the same way — its steps come from `jsonquery_query::highlight` instead of a lesson's hand-written fragments. |
 | `App::apply_tutorial_request` in `app.rs` | Applies a load request. *▶ Try it* sets `run_after_load`, because loading a document is asynchronous and finishing a load cancels any query already running — so the query is started from the `Loaded` event. |
 
@@ -108,6 +143,19 @@ table and stream lessons do), pin it in a test, as
 
 ```sh
 cargo test -p jsonquery-query tutorial::tests::dump_every_example -- --ignored --nocapture
+```
+
+A Tools example is a `ToolExample`: a caption, a `Setting` (the tool and its
+options), its samples, named as the page's boxes are (`Tool::boxes`) — or as
+files, for Merge — and the notes on what to look at. `cargo test -p
+jsonquery-query tutorial::tools` checks that every example runs as declared, that
+every sample is JSON and goes in a box of its page, that every tool has a topic,
+and, in `what_the_notes_say_is_what_comes_out`, that what the notes say of the
+results is what the tools make. The app's `every_tools_lesson_of_the_tutorial_fills_its_page_as_it_says_and_runs_it`
+checks that ▶ Try it fills each page as the example says. To proof-read:
+
+```sh
+cargo test -p jsonquery-query tutorial::tools::tests::dump_every_tool_example -- --ignored --nocapture
 ```
 
 ## Known gaps the lessons work around

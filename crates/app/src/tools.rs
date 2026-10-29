@@ -7,7 +7,9 @@
 //!   JSON Patch (`diff.rs`);
 //! * **Patch JSON** — apply a JSON Patch or a JSON Merge Patch (`patch.rs`);
 //! * **Validate Schema** — check a document against a JSON Schema
-//!   (`validate.rs`).
+//!   (`validate.rs`);
+//! * **Create Schema** — make a JSON Schema of a document, with the patterns its
+//!   strings have (`create.rs`).
 //!
 //! The logic of each is in `crates/query` and the work runs on the worker
 //! thread (`jobs.rs`); a page here only collects what the tool needs, shows what
@@ -45,6 +47,7 @@
 //! `Tools::status_bar`), and leaves the files dropped on it and the keys pressed in
 //! it to the page in front.
 
+mod create;
 mod diff;
 mod format;
 pub(crate) mod jobs;
@@ -63,10 +66,12 @@ use std::sync::Arc;
 
 use eframe::egui::{self, RichText};
 use jsonquery_core::Document;
+use jsonquery_query::tutorial::tools::{self as lessons, Setting, ToolExample};
 
 use crate::pane_header;
 use crate::settings::FileLimits;
 use crate::worker::MergeOutcome;
+use create::Create;
 use diff::Diff;
 use format::Format;
 use jobs::{Job, Outcome};
@@ -130,15 +135,17 @@ pub enum Tool {
     Diff,
     Patch,
     Validate,
+    Create,
 }
 
 impl Tool {
-    const ALL: [Tool; 5] = [
+    const ALL: [Tool; 6] = [
         Tool::Merge,
         Tool::Format,
         Tool::Diff,
         Tool::Patch,
         Tool::Validate,
+        Tool::Create,
     ];
 
     fn label(self) -> &'static str {
@@ -148,7 +155,20 @@ impl Tool {
             Tool::Diff => "Diff JSON",
             Tool::Patch => "Patch JSON",
             Tool::Validate => "Validate Schema",
+            Tool::Create => "Create Schema",
         }
+    }
+}
+
+/// The page of a tool the tutorial's lessons are about.
+fn tool_of(tool: lessons::Tool) -> Tool {
+    match tool {
+        lessons::Tool::Merge => Tool::Merge,
+        lessons::Tool::Format => Tool::Format,
+        lessons::Tool::Diff => Tool::Diff,
+        lessons::Tool::Patch => Tool::Patch,
+        lessons::Tool::Validate => Tool::Validate,
+        lessons::Tool::Create => Tool::Create,
     }
 }
 
@@ -192,6 +212,7 @@ pub struct Tools {
     diff: Diff,
     patch: Patch,
     validate: Validate,
+    create: Create,
     shared: Shared,
     /// The most the tools take (see `Env::tool_bytes`).
     tool_bytes: u64,
@@ -213,6 +234,7 @@ impl Default for Tools {
             diff: Diff::default(),
             patch: Patch::default(),
             validate: Validate::default(),
+            create: Create::default(),
             shared: Shared::default(),
             tool_bytes: crate::settings::DEFAULT_TOOLS_BYTES,
             keep_bytes: jsonquery_core::LAZY_THRESHOLD,
@@ -346,7 +368,7 @@ impl Tools {
         let operand = match tool {
             Tool::Validate => self.validate.operand_ref(title),
             Tool::Patch => self.patch.operand_ref(title),
-            Tool::Merge | Tool::Format | Tool::Diff => None,
+            Tool::Merge | Tool::Format | Tool::Diff | Tool::Create => None,
         }?;
         operand.text_to_save()
     }
@@ -365,7 +387,46 @@ impl Tools {
         let request = match tool {
             Tool::Validate => self.validate.use_files(path, sample),
             Tool::Patch => self.patch.use_files(path, sample),
-            Tool::Merge | Tool::Format | Tool::Diff => None,
+            Tool::Merge | Tool::Format | Tool::Diff | Tool::Create => None,
+        };
+        self.show_tool(ctx, tool);
+        request
+    }
+
+    /// Put the samples of a Tools lesson of the tutorial in the page of its tool,
+    /// set the page as the lesson has it, and show the page — and, with `run`, run
+    /// it: what is asked of the app is given. (Merge's samples are files: they are
+    /// written to a folder of the system's temporary one first.)
+    pub fn try_example(
+        &mut self,
+        ctx: &egui::Context,
+        example: &ToolExample,
+        run: bool,
+    ) -> Option<Request> {
+        let text = |i: usize| example.samples.get(i).map_or("", |s| s.text);
+        let tool = tool_of(example.tool());
+        let request = match example.setting {
+            Setting::Merge { filter } => match merge::sample_files(example) {
+                Ok(paths) => self.merge.use_sample(paths, filter, run),
+                Err(error) => {
+                    self.shared.say(
+                        Tool::Merge,
+                        format!("Could not write the samples: {error}"),
+                        true,
+                    );
+                    None
+                }
+            },
+            Setting::Format(options) => self.format.use_sample(text(0), options, run),
+            Setting::Diff => self.diff.use_sample(text(0), text(1), run),
+            Setting::Patch { merge_patch } => {
+                self.patch.use_sample(text(0), text(1), merge_patch, run)
+            }
+            Setting::Validate { check_formats } => {
+                self.validate
+                    .use_sample(text(0), text(1), check_formats, run)
+            }
+            Setting::Create(options) => self.create.use_sample(text(0), options, run),
         };
         self.show_tool(ctx, tool);
         request
@@ -380,6 +441,7 @@ impl Tools {
             Tool::Diff => self.diff.operand(title),
             Tool::Patch => self.patch.operand(title),
             Tool::Validate => self.validate.operand(title),
+            Tool::Create => self.create.operand(title),
         };
         operand
             .unwrap_or_else(|| panic!("there is no box called {title:?} on {tool:?}"))
@@ -395,11 +457,18 @@ impl Tools {
             Tool::Diff => self.diff.operand(title),
             Tool::Patch => self.patch.operand(title),
             Tool::Validate => self.validate.operand(title),
+            Tool::Create => self.create.operand(title),
         };
         operand
             .unwrap_or_else(|| panic!("there is no box called {title:?} on {tool:?}"))
             .text()
             .to_owned()
+    }
+
+    /// The schema of the Create Schema page as it is now: as made, or as changed.
+    #[cfg(test)]
+    pub fn created_schema(&self) -> Option<String> {
+        self.create.schema_text()
     }
 
     /// Read the file at `path` into the box called `title` on `tool`'s page, as
@@ -412,6 +481,7 @@ impl Tools {
             Tool::Diff => self.diff.operand(title),
             Tool::Patch => self.patch.operand(title),
             Tool::Validate => self.validate.operand(title),
+            Tool::Create => self.create.operand(title),
         };
         operand
             .unwrap_or_else(|| panic!("there is no box called {title:?} on {tool:?}"))
@@ -470,6 +540,13 @@ impl Tools {
                 gen,
                 pick(result, |o| match o {
                     Outcome::Validate(v) => Some(v),
+                    _ => None,
+                }),
+            ),
+            Tool::Create => self.create.done(
+                gen,
+                pick(result, |o| match o {
+                    Outcome::Create(c) => Some(c),
                     _ => None,
                 }),
             ),
@@ -628,13 +705,22 @@ impl Tools {
             keep_bytes: self.keep_bytes,
             shared: &mut self.shared,
         };
-        let request = match self.tool {
+        let mut request = match self.tool {
             Tool::Merge => self.merge.ui(ui, &mut env),
             Tool::Format => self.format.ui(ui, &mut env),
             Tool::Diff => self.diff.ui(ui, &mut env),
             Tool::Patch => self.patch.ui(ui, &mut env),
             Tool::Validate => self.validate.ui(ui, &mut env),
+            Tool::Create => self.create.ui(ui, &mut env),
         };
+
+        // A schema made to be checked: the document and the schema go to Validate
+        // Schema, which shows and checks them.
+        if let Some(schema) = self.create.take_handoff() {
+            request = self.validate.check(self.create.document(), &schema);
+            self.tool = Tool::Validate;
+            ui.ctx().request_repaint();
+        }
 
         // A save the window asked for: remember which, to say how it went.
         if let Some(
@@ -693,6 +779,7 @@ impl Tools {
                 Tool::Diff => self.diff.status_line(ui),
                 Tool::Patch => self.patch.status_line(ui),
                 Tool::Validate => self.validate.status_line(ui),
+                Tool::Create => self.create.status_line(ui),
             };
             if let Some(notice) = self.shared.notice_for(self.tool) {
                 if said {
@@ -716,7 +803,7 @@ pub fn button(ui: &mut egui::Ui, tools: &mut Tools) {
     if ui
         .button(icon)
         .on_hover_text(
-            "Tools — merge, format, diff, patch and validate JSON.\n\
+            "Tools — merge, format, diff, patch, validate, create schemas.\n\
              Drop several files on the window to merge them.",
         )
         .clicked()
@@ -891,9 +978,87 @@ mod tests {
                 "Format JSON",
                 "Diff JSON",
                 "Patch JSON",
-                "Validate Schema"
+                "Validate Schema",
+                "Create Schema"
             ]
         );
+    }
+
+    #[test]
+    fn every_tools_lesson_of_the_tutorial_fills_its_page_as_it_says_and_runs_it() {
+        use jobs::Job;
+        let ctx = egui::Context::default();
+        let examples = lessons::TOPICS
+            .iter()
+            .flat_map(|t| t.lessons)
+            .flat_map(|l| l.examples);
+        for example in examples {
+            let at = example.caption;
+            let tool = tool_of(example.tool());
+            let mut tools = Tools::default();
+            let request = tools.try_example(&ctx, example, true);
+            assert!(tools.is_open(), "{at}: the page is shown");
+            assert_eq!(tools.current_tool(), tool, "{at}");
+            match (request, example.setting) {
+                (Some(Request::Merge { paths, filter, .. }), Setting::Merge { filter: wanted }) => {
+                    assert_eq!(filter, wanted, "{at}");
+                    assert_eq!(paths.len(), example.samples.len(), "{at}");
+                    for (path, sample) in paths.iter().zip(example.samples) {
+                        assert_eq!(
+                            path.file_name().and_then(|n| n.to_str()),
+                            Some(sample.name),
+                            "{at}"
+                        );
+                        assert_eq!(std::fs::read_to_string(path).unwrap(), sample.text, "{at}");
+                    }
+                }
+                (
+                    Some(Request::Job {
+                        tool: asked, job, ..
+                    }),
+                    setting,
+                ) => {
+                    assert_eq!(asked, tool, "{at}");
+                    match (job, setting) {
+                        (Job::Format { options, .. }, Setting::Format(wanted)) => {
+                            assert_eq!(options, wanted, "{at}")
+                        }
+                        (Job::Diff { take, edit, .. }, Setting::Diff) => {
+                            assert!(take.is_none() && edit.is_none(), "{at}")
+                        }
+                        (
+                            Job::Patch { merge_patch, .. },
+                            Setting::Patch {
+                                merge_patch: wanted,
+                            },
+                        ) => {
+                            assert_eq!(merge_patch, wanted, "{at}")
+                        }
+                        (
+                            Job::Validate { check_formats, .. },
+                            Setting::Validate {
+                                check_formats: wanted,
+                            },
+                        ) => assert_eq!(check_formats, wanted, "{at}"),
+                        (Job::Create { options, .. }, Setting::Create(wanted)) => {
+                            assert_eq!(options, wanted, "{at}")
+                        }
+                        _ => panic!("{at}: the job of another tool"),
+                    }
+                    let boxes = example.tool().boxes();
+                    assert_eq!(boxes.len(), example.samples.len(), "{at}");
+                    for (title, sample) in boxes.iter().zip(example.samples) {
+                        assert_eq!(tools.box_text(tool, title), sample.text, "{at}: {title}");
+                    }
+                }
+                _ => panic!("{at}: no request, or one of another tool"),
+            }
+
+            // Loaded, and not run: nothing is asked of the app, and the page is there.
+            let mut tools = Tools::default();
+            assert!(tools.try_example(&ctx, example, false).is_none(), "{at}");
+            assert_eq!(tools.current_tool(), tool, "{at}");
+        }
     }
 
     #[test]

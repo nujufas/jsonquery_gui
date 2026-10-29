@@ -72,6 +72,26 @@ impl Patch {
         self.start()
     }
 
+    /// The samples of a lesson of the tutorial in the boxes, the patch of the
+    /// kind it is; and, with `run`, applied.
+    pub(super) fn use_sample(
+        &mut self,
+        document: &str,
+        patch: &str,
+        merge_patch: bool,
+        run: bool,
+    ) -> Option<Request> {
+        self.document.set_text(document);
+        self.patch.set_text(patch);
+        self.merge_patch = merge_patch;
+        self.run.clear();
+        if run {
+            self.start()
+        } else {
+            None
+        }
+    }
+
     /// The answer to a [`Request::Job`] for this page.
     pub(super) fn done(&mut self, gen: u64, result: Result<Patched, String>) {
         self.run.finish(gen, result);

@@ -154,6 +154,19 @@ impl Diff {
         }
     }
 
+    /// The samples of a lesson of the tutorial in the boxes; and, with `run`,
+    /// compared.
+    pub(super) fn use_sample(&mut self, left: &str, right: &str, run: bool) -> Option<Request> {
+        self.left.set_text(left);
+        self.right.set_text(right);
+        self.invalidate();
+        if run {
+            self.start()
+        } else {
+            None
+        }
+    }
+
     /// What was compared no longer matches what is on the page.
     fn invalidate(&mut self) {
         self.run.clear();

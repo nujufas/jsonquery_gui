@@ -740,6 +740,23 @@ fn keys_written_with_escapes_are_found() {
 }
 
 #[test]
+fn a_key_is_where_it_is_written_quotes_and_all() {
+    let text = "{ \"a\\u0062\" : 1,\n  \"c\": [2], \"c\": 3 }";
+    let tree = LazyTree::from_vec(text.as_bytes().to_vec()).unwrap();
+    let keys: Vec<&str> = tree
+        .root()
+        .children()
+        .map(|child| &text[child.key_range().unwrap()])
+        .collect();
+    // The key that is there twice is where it is first, with the last value.
+    assert_eq!(keys, ["\"a\\u0062\"", "\"c\""]);
+    let array = tree.root().child_by_key("c").unwrap().node;
+    assert_eq!(array.kind(), ValueKind::Number);
+    let tree = LazyTree::from_vec(b"[1, {\"x\": 2}]".to_vec()).unwrap();
+    assert!(tree.root().child(0).unwrap().key_range().is_none());
+}
+
+#[test]
 fn a_stream_of_values_is_an_array_of_them() {
     let tree = LazyTree::from_vec(b"{\"a\":1}\n{\"a\":2}\n[3]\n4".to_vec()).unwrap();
     assert_eq!(tree.top_level_values(), 4);

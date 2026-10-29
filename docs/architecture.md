@@ -87,13 +87,15 @@ merge; the tree's memory is freed once the file is written, but a process often 
 some of what it has freed, so the size of the app in a task manager falls back only in
 part, 1.37 GB to 0.91 GB there.)
 
-The window's other tools work the same way: **Format**, **Diff**, **Patch** and
-**Validate Schema** are functions over `serde_json::Value` in `crates/query`
+The window's other tools work the same way: **Format**, **Diff**, **Patch**,
+**Validate Schema** and **Create Schema** are functions over `serde_json::Value` in `crates/query`
 (`reformat`, `diff` — which also lays the two documents out side by side from
 the same edit tree the patch comes from (`diff/view.rs`), so what is marked is
 what is in the patch — `patch` — RFC 6902 and RFC 7386 — and `schema`, a thin
 layer over the `jsonschema` crate built without its network and file features,
-so a `$ref` can't make the app fetch anything). The app runs them on the worker
+so a `$ref` can't make the app fetch anything — and `infer`, which walks a document
+once into a summary of each place and writes the schema from it, then checks the
+document against it with `schema`). The app runs them on the worker
 thread as one kind of job (`Command::Tool`, answered by `Event::ToolDone`), with
 the open document shared rather than copied; a patched document opens as
 `DocumentSource::Derived`.
@@ -368,6 +370,7 @@ text on the clipboard.
 | `jsonpath-rust` | JSONPath (RFC 9535) engine. |
 | `jmespath` | JMESPath engine. |
 | `jsonschema` | JSON Schema validation for the Tools window's Validate Schema (drafts 4–2020-12), without its HTTP and file features. |
+| `regex` | The patterns Create Schema finds in strings (already there, under `jsonschema`). |
 | `crossbeam-channel` | UI ⇄ worker-thread messaging. |
 | `ring` | The SHA-256 of what the workspace keeps and the random bytes of an item's id (already there, under `ureq`'s TLS). |
 | `rfd` | Native file dialog behind the toolbar's "…" button, alongside OS-level drag-and-drop (handled directly by egui/winit). |

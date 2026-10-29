@@ -127,7 +127,7 @@ impl App {
                 self.apply_settings(settings);
             }
             if let Some(request) = self.tutorial.show(ctx) {
-                self.apply_tutorial_request(request);
+                self.apply_tutorial_request(ctx, request);
             }
             if let Some(request) = self.tools.show(ctx, self.doc.as_ref()) {
                 self.apply_tools_request(ctx, request);
@@ -187,10 +187,16 @@ impl App {
             }
             Satellite::Tutorial => {
                 if let Some(request) = self.tutorial.window_frame(ui) {
-                    self.apply_tutorial_request(request);
+                    let tool = matches!(request, tutorial::Request::Tool { .. });
+                    self.apply_tutorial_request(&ctx, request);
                     // Already in front, so the result of pressing ▶ is visible
-                    // straight away.
-                    ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Focus);
+                    // straight away: the main window, or the Tools in their own.
+                    let front = if tool && self.tools.in_window() {
+                        crate::tools::viewport_id()
+                    } else {
+                        egui::ViewportId::ROOT
+                    };
+                    ctx.send_viewport_cmd_to(front, egui::ViewportCommand::Focus);
                 }
             }
             Satellite::About => self.info_window.window_frame(ui),

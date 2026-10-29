@@ -101,7 +101,9 @@ is in [Architecture](architecture.md).
   way round. The same list is in the app, under ⓘ.
 - **[Tools](tools.md)** — the 🛠 window, which can be docked in the main window as
   tabs beside Json Query: merging several JSON files with a jq filter, formatting,
-  diffing, patching (RFC 6902 / 7386) and validating against a JSON Schema.
+  diffing, patching (RFC 6902 / 7386), validating against a JSON Schema, and making
+  a JSON Schema of a document, with the dates, ids, addresses and lists in its strings
+  as patterns.
 - **[Workspace](workspace.md)** — the pane at the left of the window that keeps your
   own queries, schemas, patches, documents and web addresses, each (but an address)
   with an optional sample, in folders you make; where they are kept (plain files, with
