@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/core",
     "crates/query",
+    "crates/mcp",
     "crates/app",
 ]
 # jaq-json with a few changes (see its JSONQUERY.md): a path dependency of crates/query, but

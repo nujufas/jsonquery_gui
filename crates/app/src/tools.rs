@@ -82,6 +82,25 @@ use validate::Validate;
 use widgets::ERROR;
 
 /// What the window asks the app to do.
+/// How a page is set when it is filled from outside ([`Tools::fill_page`]): the tool,
+/// and its options.
+#[cfg(feature = "mcp")]
+pub enum PageSetting {
+    Merge {
+        filter: String,
+    },
+    Format(jsonquery_query::reformat::Options),
+    Diff,
+    /// A JSON Merge Patch (RFC 7386) rather than a list of operations (RFC 6902).
+    Patch {
+        merge_patch: bool,
+    },
+    Validate {
+        check_formats: bool,
+    },
+    Create(jsonquery_query::infer::Options),
+}
+
 pub enum Request {
     /// Start a merge on the worker; its answer comes back to
     /// [`Tools::merge_done`] under the same `gen`.
@@ -148,7 +167,7 @@ impl Tool {
         Tool::Create,
     ];
 
-    fn label(self) -> &'static str {
+    pub fn label(self) -> &'static str {
         match self {
             Tool::Merge => "Merge JSON",
             Tool::Format => "Format JSON",
@@ -427,6 +446,44 @@ impl Tools {
                     .use_sample(text(0), text(1), check_formats, run)
             }
             Setting::Create(options) => self.create.use_sample(text(0), options, run),
+        };
+        self.show_tool(ctx, tool);
+        request
+    }
+
+    /// Put `texts` in the boxes of the page `setting` is for (Merge: `files` in its
+    /// list), set the page as `setting` says, and show it — and, with `run`, run it:
+    /// what is asked of the app is given. What the MCP server's `show_in_tool` does.
+    #[cfg(feature = "mcp")]
+    pub fn fill_page(
+        &mut self,
+        ctx: &egui::Context,
+        setting: &PageSetting,
+        texts: &[String],
+        files: Vec<PathBuf>,
+        run: bool,
+    ) -> Option<Request> {
+        let text = |i: usize| texts.get(i).map_or("", String::as_str);
+        let (tool, request) = match setting {
+            PageSetting::Merge { filter } => {
+                (Tool::Merge, self.merge.use_sample(files, filter, run))
+            }
+            PageSetting::Format(options) => {
+                (Tool::Format, self.format.use_sample(text(0), *options, run))
+            }
+            PageSetting::Diff => (Tool::Diff, self.diff.use_sample(text(0), text(1), run)),
+            PageSetting::Patch { merge_patch } => (
+                Tool::Patch,
+                self.patch.use_sample(text(0), text(1), *merge_patch, run),
+            ),
+            PageSetting::Validate { check_formats } => (
+                Tool::Validate,
+                self.validate
+                    .use_sample(text(0), text(1), *check_formats, run),
+            ),
+            PageSetting::Create(options) => {
+                (Tool::Create, self.create.use_sample(text(0), *options, run))
+            }
         };
         self.show_tool(ctx, tool);
         request

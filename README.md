@@ -374,6 +374,17 @@ fetch newer releases. On a Wayland desktop it also adds a **jsonquery (X11)**
 entry, for dropping files on the window (see
 [Dropping files on a Wayland desktop](#dropping-files-on-a-wayland-desktop)).
 
+### With an MCP server, for AI assistants
+
+Each release also has a build with **mcp** in its name (Linux tar.gz and Windows zip only): the
+app with a [Model Context Protocol](https://modelcontextprotocol.io) server, which an AI assistant
+(Claude Code, Claude Desktop, VS Code, Cursor, QuickAI…) can use to read and query what the app has
+open — or any JSON file, out of sight —, use the six Tools, and, if you allow it (Edit), show you its
+queries in the window and save in the workspace (asking you first before anything is deleted or
+replaced, unless you always allow it). Answers come a page at a time, of a size you set: small for a
+model that runs on your own computer. Start it with the 🔌 at the right of the status bar; it listens
+on this computer only, and by default may only look. See [MCP server](docs/mcp.md).
+
 ### Dropping files on a Wayland desktop
 
 Most current Linux desktops (Ubuntu, Fedora and others) run Wayland, where
@@ -463,6 +474,12 @@ Native release build for the current platform:
 ```sh
 cargo build --release -p jsonquery_gui
 # binary at target/release/jsonquery_gui
+```
+
+The build with the MCP server (see [MCP server](docs/mcp.md)):
+
+```sh
+cargo build --release -p jsonquery_gui -p jsonquery-mcp --features jsonquery_gui/mcp
 ```
 
 ## Development

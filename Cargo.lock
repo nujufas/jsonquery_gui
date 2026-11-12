@@ -1990,6 +1990,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "jsonquery-mcp"
+version = "0.5.3"
+dependencies = [
+ "jsonquery-core",
+ "jsonquery-query",
+ "serde_json",
+]
+
+[[package]]
 name = "jsonquery-query"
 version = "0.5.3"
 dependencies = [
@@ -2017,6 +2026,7 @@ dependencies = [
  "egui",
  "egui_extras",
  "jsonquery-core",
+ "jsonquery-mcp",
  "jsonquery-query",
  "rfd",
  "ring",

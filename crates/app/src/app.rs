@@ -29,6 +29,8 @@ use crate::workspace_pane::{self, WorkspacePane};
 use crate::x11_alert::X11Alert;
 
 mod issues_view;
+#[cfg(feature = "mcp")]
+mod mcp;
 mod satellites;
 
 /// Bounded live-preview cap (Architecture §7): the results tree never holds
@@ -324,6 +326,10 @@ pub struct App {
     /// The bottom panel — `Some` while it is shown: every match of a "Find
     /// All", or the candidates of a "Find in Source".
     hit_list: Option<HitList>,
+
+    /// The MCP server (`mcp.rs`): the 🔌 in the status bar, and the server it starts.
+    #[cfg(feature = "mcp")]
+    mcp: mcp::Link,
 }
 
 /// What the window and its panes measure, as far as it is kept for the next start:
@@ -510,6 +516,8 @@ impl App {
             store.default_workspace_folder(),
             settings.workspace_folder.clone(),
         );
+        #[cfg(feature = "mcp")]
+        let mcp = mcp::Link::new(&store);
 
         Self {
             cmd_tx,
@@ -600,6 +608,8 @@ impl App {
             search_request: None,
             find_cursor: None,
             hit_list: None,
+            #[cfg(feature = "mcp")]
+            mcp,
         }
     }
 
@@ -2605,7 +2615,8 @@ impl App {
         // stays in the corner, then the 🌐 that opens the website, and the ⚙ that
         // opens the Settings, where they are whether the Tools are docked or not.
         // Then, docked, the 🗗 that undocks them (the one way out: the row of tabs
-        // has none), and last, on native Wayland, the alert (⚠).
+        // has none), then, on native Wayland, the alert (⚠), and last, in the build
+        // with the MCP server, its 🔌.
         //
         // With the page of a tool in front (the Tools docked), the status text is
         // the tool's: what the page says of its result, and the last thing it did.
@@ -2616,6 +2627,8 @@ impl App {
         let docked = self.tools.is_docked();
         let mut undock = false;
         let mut workspace_view = self.settings.interface.workspace;
+        #[cfg(feature = "mcp")]
+        let (mut mcp, limits) = (std::mem::take(&mut self.mcp), self.settings.limits);
         egui::Sides::new().shrink_right().show(
             ui,
             |ui| {
@@ -2634,11 +2647,19 @@ impl App {
                     undock = true;
                 }
                 x11_alert.ui(ui);
+                // Last, so that it moves none of the others: the build with the MCP
+                // server has them where the build without it has them.
+                #[cfg(feature = "mcp")]
+                mcp.button(ui, limits);
             },
         );
         self.info_window = info_window;
         self.settings_window = settings_window;
         self.x11_alert = x11_alert;
+        #[cfg(feature = "mcp")]
+        {
+            self.mcp = mcp;
+        }
         self.settings.interface.workspace = workspace_view;
         if undock {
             self.tools.request_place(Place::Window);
@@ -3357,7 +3378,10 @@ pub struct Shared(Arc<Mutex<App>>);
 
 impl Shared {
     pub fn new(cc: &eframe::CreationContext<'_>, store: Store, settings: Settings) -> Self {
-        Self(Arc::new(Mutex::new(App::new(cc, store, settings))))
+        let app = Arc::new(Mutex::new(App::new(cc, store, settings)));
+        #[cfg(feature = "mcp")]
+        mcp::Link::attach(&app, &cc.egui_ctx);
+        Self(app)
     }
 }
 
@@ -3397,6 +3421,9 @@ impl App {
         // frame it was pressed rather than the one after.
         self.handle_shortcuts(&ctx, None);
         self.dialogs(&ctx, egui::ViewportId::ROOT);
+        // What an assistant asks before it is done, over everything else.
+        #[cfg(feature = "mcp")]
+        self.mcp.questions(&ctx);
         if let Some(window) = self.raise_window.take() {
             ctx.send_viewport_cmd_to(window, egui::ViewportCommand::Focus);
         }

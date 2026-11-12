@@ -29,6 +29,8 @@
 
 mod drag;
 mod forms;
+#[cfg(feature = "mcp")]
+pub(crate) use forms::civil_from_days;
 mod icons;
 mod tree;
 
@@ -291,7 +293,7 @@ impl WorkspacePane {
     }
 
     /// The workspace, read if it was not yet.
-    fn workspace(&mut self) -> Option<&mut Workspace> {
+    pub(crate) fn workspace(&mut self) -> Option<&mut Workspace> {
         if self.workspace.is_none() {
             self.workspace = self.root().map(|root| Workspace::open(root.to_path_buf()));
             self.opened_first_level = false;
@@ -711,6 +713,15 @@ pub fn status_button(ui: &mut egui::Ui, shown: bool, tip: &str) -> bool {
         icons::side_panel(painter, c, if shown { color } else { weak });
     });
     response.on_hover_text(tip).clicked()
+}
+
+#[cfg(feature = "mcp")]
+impl WorkspacePane {
+    /// Do `action` as if the pane had asked for it: what the MCP server's
+    /// `workspace_open` does with what [`WorkspacePane::item_action`] gives.
+    pub fn act(&mut self, action: Action) {
+        self.actions.push(action);
+    }
 }
 
 /// What the tests look at, and the one thing they make the pane do.

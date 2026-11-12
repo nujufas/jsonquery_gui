@@ -789,9 +789,25 @@ impl WorkspacePane {
     /// as the document of the page), and run it. A web address is loaded from the web
     /// as the Source.
     fn open_item(&mut self, ctx: &egui::Context, path: &str, with_sample: bool) {
-        let Some(ws) = &self.workspace else { return };
+        match self.item_action(path, with_sample) {
+            Ok(Some(action)) => self.actions.push(action),
+            Ok(None) => {}
+            Err(e) => self.say(ctx, e, true),
+        }
+    }
+
+    /// What opening the item at `path` comes to (see `open_item`): none when there is
+    /// no such item, an error when it cannot be read.
+    pub(crate) fn item_action(
+        &self,
+        path: &str,
+        with_sample: bool,
+    ) -> Result<Option<Action>, String> {
+        let Some(ws) = &self.workspace else {
+            return Ok(None);
+        };
         let Some(item) = ws.item(path).cloned() else {
-            return;
+            return Ok(None);
         };
         let sample = if with_sample {
             item.sample.as_ref().map(|s| ws.abs(&s.path))
@@ -800,17 +816,11 @@ impl WorkspacePane {
         };
         let file = ws.abs(&item.path);
         let action = match item.kind {
-            ItemKind::Query(engine) => match ws.read_text(&item.path, QUERY_LIMIT) {
-                Ok(text) => Action::OpenQuery {
-                    id: item.id.clone(),
-                    engine,
-                    text,
-                    sample,
-                },
-                Err(e) => {
-                    self.say(ctx, e, true);
-                    return;
-                }
+            ItemKind::Query(engine) => Action::OpenQuery {
+                id: item.id.clone(),
+                engine,
+                text: ws.read_text(&item.path, QUERY_LIMIT)?,
+                sample,
             },
             ItemKind::Schema => Action::UseFiles {
                 tool: Tool::Validate,
@@ -823,21 +833,15 @@ impl WorkspacePane {
                 sample,
             },
             ItemKind::Document => Action::OpenDocument(file),
-            ItemKind::Url => match ws.read_text(&item.path, QUERY_LIMIT) {
-                Ok(text) => match address_in(&text) {
+            ItemKind::Url => {
+                let text = ws.read_text(&item.path, QUERY_LIMIT)?;
+                match address_in(&text) {
                     Some(address) => Action::OpenUrl(address.to_owned()),
-                    None => {
-                        self.say(ctx, NO_ADDRESS, true);
-                        return;
-                    }
-                },
-                Err(e) => {
-                    self.say(ctx, e, true);
-                    return;
+                    None => return Err(NO_ADDRESS.to_owned()),
                 }
-            },
+            }
         };
-        self.actions.push(action);
+        Ok(Some(action))
     }
 }
 

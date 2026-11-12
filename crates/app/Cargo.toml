@@ -8,6 +8,11 @@ license.workspace = true
 name = "jsonquery_gui"
 path = "src/main.rs"
 
+[features]
+# The MCP server: a button in the status bar that lets an AI assistant work with what
+# the app has open. Off unless asked for: only the build with "mcp" in its name has it.
+mcp = ["dep:jsonquery-mcp"]
+
 [dependencies]
 anyhow = "1.0.104"
 crossbeam-channel = "0.5.16"
@@ -16,6 +21,7 @@ egui = "0.36.1"
 egui_extras = "0.36.1"
 jsonquery-core = { path = "../core" }
 jsonquery-query = { path = "../query" }
+jsonquery-mcp = { path = "../mcp", optional = true }
 # SHA-256 of what the workspace keeps, and the random bytes of an item's id: the
 # crate that the TLS stack of `ureq` is already built on.
 ring = "0.17.14"

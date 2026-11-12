@@ -569,6 +569,33 @@ mod tests {
         );
     }
 
+    /// `jsonquery-mcp` finds `mcp.json` in the folder of the app's settings, and finds
+    /// that folder by itself: the way this file does.
+    #[cfg(feature = "mcp")]
+    #[test]
+    fn the_mcp_bridge_finds_the_folder_the_settings_are_in() {
+        let (home, named) = (rooted("/home/a"), rooted("/data/jq"));
+        let cases: [&[(&str, &str)]; 7] = [
+            &[("HOME", &home)],
+            &[(HOME_VARIABLE, &named), ("HOME", &home)],
+            &[(HOME_VARIABLE, "relative"), ("HOME", &home)],
+            &[(HOME_VARIABLE, ""), ("HOME", &home)],
+            &[("HOME", "relative/home")],
+            &[("USERPROFILE", &home), ("HOME", &named)],
+            &[],
+        ];
+        for pairs in cases {
+            for windows in [false, true] {
+                assert_eq!(
+                    jsonquery_mcp::bridge::app_folder(env(pairs), windows).map(|f| f.join(FILE)),
+                    settings_path(env(pairs), windows),
+                    "{pairs:?}, windows: {windows}"
+                );
+            }
+        }
+        assert_eq!(jsonquery_mcp::bridge::HOME_VARIABLE, HOME_VARIABLE);
+    }
+
     #[test]
     fn on_windows_the_home_is_the_profile() {
         let file = |pairs: &[(&str, &str)]| settings_path(env(pairs), true);

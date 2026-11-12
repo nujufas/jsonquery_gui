@@ -1,0 +1,17 @@
+[package]
+name = "jsonquery-mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The MCP server of the JsonQuery desktop app: the protocol, the tools and how they answer"
+
+# What an assistant that starts its MCP servers itself runs (Claude Desktop, QuickAI's
+# llama-server, …): it takes their calls to the app (see src/bridge.rs).
+[[bin]]
+name = "jsonquery-mcp"
+path = "src/main.rs"
+
+[dependencies]
+jsonquery-core = { path = "../core" }
+jsonquery-query = { path = "../query" }
+serde_json = { version = "1.0.151", features = ["arbitrary_precision", "preserve_order"] }

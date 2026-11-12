@@ -5615,6 +5615,77 @@ fn text_rect(h: &Harness, wanted: &str) -> Option<egui::Rect> {
         .map(|(_, rect)| rect)
 }
 
+// The build with the MCP server has its 🔌 last in the status bar, so that every
+// other button is where the build without it has it.
+#[cfg(feature = "mcp")]
+#[test]
+fn the_plug_comes_last_in_the_status_bar_and_opens_the_mcp_panel() {
+    let mut h = Harness::new();
+    let bar = h.panel("status_bar").expect("the status bar");
+    let info = text_rect(&h, "ℹ").expect("the (i) button");
+    let settings = text_rect(&h, "⚙").expect("the ⚙ button");
+    let plug = text_rect(&h, mcp::ICON).expect("the 🔌");
+    assert!(bar.contains(plug.center()), "in the status bar: {plug:?}");
+    assert!(
+        (plug.center().y - info.center().y).abs() < 2.0,
+        "on the (i)'s row: {plug:?} vs {info:?}"
+    );
+    assert!(
+        plug.max.x < settings.min.x && settings.min.x - plug.max.x < 24.0,
+        "next to the ⚙, at its left: {plug:?} vs {settings:?}"
+    );
+    // With the ⚠ of a Wayland desktop, it is at the ⚠'s left.
+    h.app.x11_alert = X11Alert::new(true);
+    h.settle();
+    let alert = text_rect(&h, "⚠").expect("the alert");
+    let plug = text_rect(&h, mcp::ICON).expect("the 🔌");
+    assert!(plug.max.x < alert.min.x, "{plug:?} vs {alert:?}");
+    h.app.x11_alert = X11Alert::new(false);
+    h.settle();
+
+    // A click opens the panel, whose Start starts the server and Stop stops it.
+    h.app.mcp.use_port(0);
+    let plug = text_rect(&h, mcp::ICON).expect("the 🔌");
+    assert!(h.text_pos("MCP server").is_none());
+    h.click(plug.center().x, plug.center().y);
+    assert!(h.text_pos("MCP server").is_some(), "the panel");
+    // The panel hangs above the 🔌, which is drawn a pixel bigger while it is hovered (and
+    // the panel with it): what is compared is with the pointer away from it.
+    h.pointer(10.0, 10.0);
+    h.settle();
+    let title = h.text_pos("MCP server").expect("the panel's title");
+    let new_token = h.text_pos("New token").expect("New token");
+    let start = h.text_pos("Start").expect("Start");
+    h.click(start.x + 4.0, start.y + 4.0);
+    assert!(h.app.mcp.is_running(), "started");
+    h.pointer(10.0, 10.0);
+    h.settle();
+    let stop = h.text_pos("Stop").expect("Stop, once it runs");
+    // It keeps its height (the port's box is taller than the address that takes its
+    // place): running, nothing in it has moved.
+    for (what, before, now) in [
+        (
+            "the title",
+            title,
+            h.text_pos("MCP server").expect("the title"),
+        ),
+        ("Start/Stop", start, stop),
+        (
+            "New token",
+            new_token,
+            h.text_pos("New token").expect("New token"),
+        ),
+    ] {
+        assert!(
+            (before.y - now.y).abs() < 0.5,
+            "{what} moved: {before:?} -> {now:?}"
+        );
+    }
+    h.click(stop.x + 4.0, stop.y + 4.0);
+    assert!(!h.app.mcp.is_running(), "stopped");
+    assert!(h.text_pos("Start").is_some(), "the panel stays open");
+}
+
 #[test]
 fn on_wayland_the_alert_sits_beside_the_settings_button_and_moves_nothing() {
     let mut h = Harness::new();

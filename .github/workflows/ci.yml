@@ -45,6 +45,15 @@ jobs:
       - name: Test
         run: cargo test --workspace
 
+      # The build with the MCP server (the feature `mcp`, a download of the GitHub
+      # release only): the app's lints and its tests once more, with the server in it.
+      # (The server's own crate is tested by the step above.)
+      - name: Clippy (MCP build)
+        run: cargo clippy -p jsonquery_gui --features mcp --all-targets -- -D warnings
+
+      - name: Test (MCP build)
+        run: cargo test -p jsonquery_gui --features mcp
+
       - name: Build (release)
         run: cargo build --release -p jsonquery_gui
 

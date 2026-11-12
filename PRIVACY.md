@@ -1,6 +1,6 @@
 # Privacy policy: jsonquery gui
 
-_Last updated: 2026-10-22_
+_Last updated: 2026-11-11_
 
 jsonquery gui ("the app") is a desktop program for browsing and querying JSON files on your own
 computer. This policy covers the app however you install it: the Microsoft Store, GitHub Releases,
@@ -54,6 +54,33 @@ through do their own data collection, independent of anything the app does — s
   item. The app writes these only when you choose to save, import or change something in the
   workspace, only in that folder (or where you choose, for Export), and never sends them anywhere.
   They stay until you delete them: they are ordinary files in an ordinary folder.
+
+## The build with the MCP server
+
+The build with **mcp** in its name (a download of the GitHub release only) can also act as a
+[Model Context Protocol](https://modelcontextprotocol.io) server for an AI assistant you choose,
+such as Claude Code, Claude Desktop, VS Code or QuickAI. See [docs/mcp.md](docs/mcp.md).
+
+- **Off until you start it.** The server runs only after you start it with the 🔌 in the status bar
+  (or tick **Start it with JsonQuery**), and only while the app runs. It listens on `127.0.0.1`, so
+  it cannot be reached from another computer, and it answers only requests that carry its token.
+- **What the assistant gets.** An assistant you connect can read what the app has open — the
+  document, the query and its results, the items and samples of your workspace — and, if you set
+  **Allow** to **Edit**, read files of your computer and open them in the app. What it reads is sent to
+  that assistant, and so to whoever runs its AI model (for a cloud assistant, its provider), under
+  their policies. Nothing is sent to the developer. A local model, such as QuickAI's, keeps it on
+  your computer.
+- **What it may change.** Only with **Allow** set to **Edit** can the assistant save, move or delete
+  in your workspace, write a file, or have the app load a document from a web address (the app then
+  connects to that address, as when you type it in the Source field). The app asks you first, each
+  time, before anything is deleted or replaced, a file is written outside the workspace, or an
+  address is fetched — unless you tick **Always allow** (in the panel, or in the question), after
+  which it does them without asking until you untick it.
+- **What is kept.** The port, a random token, whether to start with the app, what the assistant is
+  allowed, whether to always allow it and the size of an answer are kept in `mcp.json`, beside
+  `settings.json`, readable only by you (where the system has file modes). The last 50 calls are
+  listed in the panel while the app runs, and what the assistant's last query or tool made is kept
+  in memory for its next calls while the server runs; neither is kept after it stops.
 
 ## Stores and package managers
 
