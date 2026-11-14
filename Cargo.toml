@@ -11,7 +11,7 @@ members = [
 exclude = ["third_party/jaq-json"]
 
 [workspace.package]
-version = "0.5.3"
+version = "0.5.4"
 edition = "2021"
 license = "MIT"
 
