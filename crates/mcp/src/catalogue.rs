@@ -1514,12 +1514,14 @@ fn named_input(text: &str) -> Option<Input> {
     })
 }
 
-/// A string that names none of those: a JSON file by its full path, the JSON it holds,
-/// or text.
+/// A string that names none of those: a JSON file by its full path (on this system: on
+/// Windows one starts with its drive; or from the home, `~`), the JSON it holds, or
+/// text.
 fn text_input(text: &str) -> Input {
     let trimmed = text.trim();
     let path = Path::new(trimmed);
-    let json_file = path.is_absolute()
+    let full = path.is_absolute() || trimmed.starts_with("~/") || trimmed.starts_with("~\\");
+    let json_file = full
         && !trimmed.contains('\n')
         && path.extension().and_then(|e| e.to_str()).is_some_and(|e| {
             ["json", "jsonl", "ndjson", "geojson"].contains(&e.to_ascii_lowercase().as_str())
@@ -1884,6 +1886,16 @@ mod tests {
         parse(name, Some(&args)).expect("a tool")
     }
 
+    /// The full path of a file `name` on this system (on Windows one starts with its
+    /// drive: "/data/…" is not one there).
+    fn full_path(name: &str) -> String {
+        if cfg!(windows) {
+            format!(r"C:\data\{name}")
+        } else {
+            format!("/data/{name}")
+        }
+    }
+
     #[test]
     fn every_tool_is_listed_once_with_an_object_schema() {
         let list = tool_list();
@@ -2226,9 +2238,19 @@ mod tests {
             input_of(json!("{\"a\": [1, 2]}")),
             Ok(Input::Json(json!({"a": [1, 2]})))
         );
+        let orders = full_path("orders.JSON");
         assert_eq!(
-            input_of(json!("/data/orders.JSON")),
-            Ok(Input::File("/data/orders.JSON".into()))
+            input_of(json!(orders)),
+            Ok(Input::File(orders.as_str().into()))
+        );
+        assert_eq!(
+            input_of(json!("~/data/orders.json")),
+            Ok(Input::File("~/data/orders.json".into()))
+        );
+        // A path that is not a full one is not taken for a file.
+        assert_eq!(
+            input_of(json!("data/orders.json")),
+            Ok(Input::Text("data/orders.json".into()))
         );
         // Text that is not JSON is given to the tool, which says what is wrong with it.
         assert_eq!(
@@ -2303,9 +2325,10 @@ mod tests {
             open(json!({"text": [1, 2]})),
             (None, Some("[1,2]".to_owned()))
         );
+        let data = full_path("data.json");
         assert_eq!(
-            open(json!({"text": "/home/me/data.json"})),
-            (Some("/home/me/data.json".into()), None)
+            open(json!({ "text": data })),
+            (Some(data.as_str().into()), None)
         );
         assert_eq!(
             open(json!({"file": "/a/b.json"})),
