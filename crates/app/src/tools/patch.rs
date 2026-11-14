@@ -61,6 +61,12 @@ impl Patch {
             .find(|o| o.title() == title)
     }
 
+    /// A document from the workspace, in the Document box.
+    pub(super) fn open_document(&mut self, path: &Path) {
+        self.document.load_file(path);
+        self.run.clear();
+    }
+
     /// The patch in the file `patch`, from the workspace; and, if there is a file
     /// `document` too, the document to patch, and the patch applied.
     pub(super) fn use_files(&mut self, patch: &Path, document: Option<&Path>) -> Option<Request> {

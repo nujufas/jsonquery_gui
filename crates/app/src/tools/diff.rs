@@ -236,6 +236,17 @@ impl Diff {
         }
     }
 
+    /// A document from the workspace, in a side as a dropped file goes: the first that
+    /// is empty, else the right.
+    pub(super) fn open_document(&mut self, path: &std::path::Path) {
+        if deliver(
+            &mut [&mut self.left, &mut self.right],
+            vec![path.to_owned()],
+        ) {
+            self.invalidate();
+        }
+    }
+
     pub(super) fn ui(&mut self, ui: &mut egui::Ui, env: &mut Env) -> Option<Request> {
         if env.own_input
             && deliver(

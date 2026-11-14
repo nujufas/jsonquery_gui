@@ -516,20 +516,53 @@ fn what_is_typed_in_the_filter_narrows_the_list_and_the_chips_narrow_it_to_a_sor
 }
 
 #[test]
-fn a_page_of_the_tools_narrows_the_list_to_what_it_uses_and_the_first_tab_to_everything() {
+fn the_chips_stay_as_the_user_set_them_whichever_page_is_in_front() {
     let (mut h, file) = start("ws-chips", OPEN);
-    dock_tools(&mut h, Tool::Validate);
+    // A schema opened from the list brings its page forward, and the list stays whole:
+    // nothing narrows it but the user.
+    dock_tools_on_jsonquery(&mut h);
+    let at = row_at(&h, "orders");
+    h.double_click(at.x, at.y);
+    assert!(h.app.tools.page_in_front());
+    assert_eq!(h.app.tools.current_tool(), Tool::Validate);
+    assert_eq!(h.app.workspace_pane.group(), Group::All);
+    assert!(is_drawn(&h, "orders") && is_drawn(&h, "scratch"));
+    // Narrowed by the user, it stays so whatever page comes in front.
+    press(&mut h, "Schemas");
     assert_eq!(h.app.workspace_pane.group(), Group::Schemas);
-    assert!(is_drawn(&h, "orders") && !is_drawn(&h, "scratch"));
-    open_tool(&mut h, Tool::Patch);
     let ctx = h.ctx.clone();
     h.app.tools.open_on(&ctx, Tool::Patch);
     h.settle();
-    assert_eq!(h.app.workspace_pane.group(), Group::Patches);
-    assert!(is_drawn(&h, "bump") && !is_drawn(&h, "orders"));
+    assert_eq!(h.app.workspace_pane.group(), Group::Schemas);
     press(&mut h, "Json Query");
-    assert_eq!(h.app.workspace_pane.group(), Group::All);
-    assert!(is_drawn(&h, "scratch"));
+    assert_eq!(h.app.workspace_pane.group(), Group::Schemas);
+    assert!(is_drawn(&h, "orders") && !is_drawn(&h, "scratch"));
+    forget_settings(&file);
+}
+
+#[test]
+fn a_document_opens_on_the_page_in_front_and_as_the_source_with_the_first_tab() {
+    let people = r#"[{"name": "Ann"}]"#;
+    let (mut h, file) = start_with_more("ws-doc-page", OPEN, &[("people.json", people)]);
+    dock_tools(&mut h, Tool::Validate);
+    pick(&mut h, "people");
+    assert!(is_drawn(&h, "Open in Validate"), "{:?}", h.texts());
+    let at = row_at(&h, "people");
+    h.double_click(at.x, at.y);
+    assert!(h.app.tools.page_in_front(), "the page stays in front");
+    assert_eq!(h.app.tools.current_tool(), Tool::Validate);
+    assert_eq!(
+        h.app
+            .tools
+            .text_in_box(Tool::Validate, "Document")
+            .as_deref(),
+        Some(people),
+        "in the box the page checks"
+    );
+    // With the first tab in front, it is the Source, as it always was.
+    press(&mut h, "Json Query");
+    pick(&mut h, "people");
+    assert!(is_drawn(&h, "Open as Source"), "{:?}", h.texts());
     forget_settings(&file);
 }
 

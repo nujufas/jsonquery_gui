@@ -35,9 +35,8 @@ only the strip is shown, because there is no room beside it.
   read (a file that could not be read, a link that is not followed).
 - **A filter** narrows the list to the items whose name, or whose folder's name,
   has what you type; the **chips** narrow it to one sort of item: *All*, *Queries*,
-  *Schemas*, *Patches*, *Docs* or *URLs*. With the Tools docked, the chips follow the
-  page in front: *Schemas* on **Validate Schema**, *Patches* on **Patch JSON**, *All* on
-  **Json Query**.
+  *Schemas*, *Patches*, *Docs* or *URLs*. They change only when you click one: opening
+  an item, or another page coming in front, leaves them as they are.
 - **The list** has the folders first, each with how many items are in it, and the
   items under them. A tag says what an item is (`jq`, `JP` for JSONPath, `JM` for
   JMESPath, `PT` for JSON Pointer, `schema`, `patch`, `json`, `url`), and a paperclip
@@ -52,7 +51,7 @@ only the strip is shown, because there is no room beside it.
 | a query | `.jq`, `.jsonpath`, `.jmespath`, `.jsonptr` | in the query box, and the language of the box is the one the end says |
 | a schema | `.schema.json` | in the **Schema** box of Validate Schema, whose page is shown |
 | a patch | `.patch.json` | in the **Patch** box of Patch JSON, whose page is shown |
-| a document | `.json`, `.ndjson`, `.jsonl` | as the Source (a document has no sample) |
+| a document | `.json`, `.ndjson`, `.jsonl` | as the Source; with the page of a tool in front (the Tools docked), on that page: in its **Document** box (**Input** in Format JSON; in Diff JSON the first empty side, else the right; in Merge JSON one more file). A document has no sample |
 | a web address | `.url` | **loaded from the web** as the Source (it has no sample either) |
 
 *Open with sample* does the same and opens the item's **sample** as well: as the

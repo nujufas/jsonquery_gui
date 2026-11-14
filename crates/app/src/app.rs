@@ -3605,8 +3605,14 @@ impl App {
                     }
                 }
                 workspace_pane::Action::OpenDocument(path) => {
-                    self.tools.show_query();
-                    self.open_file(path);
+                    // With the page of a tool in front, the document is for that page.
+                    if self.tools.page_in_front() {
+                        let tool = self.tools.current_tool();
+                        self.tools.open_document(ctx, tool, &path);
+                    } else {
+                        self.tools.show_query();
+                        self.open_file(path);
+                    }
                 }
                 workspace_pane::Action::OpenUrl(url) => {
                     self.tools.show_query();

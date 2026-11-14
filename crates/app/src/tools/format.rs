@@ -77,6 +77,12 @@ impl Format {
         self.run.finish(gen, result);
     }
 
+    /// A document from the workspace, in the Input box.
+    pub(super) fn open_document(&mut self, path: &std::path::Path) {
+        self.input.load_file(path);
+        self.run.clear();
+    }
+
     pub(super) fn ui(&mut self, ui: &mut egui::Ui, env: &mut Env) -> Option<Request> {
         if env.own_input && deliver(&mut [&mut self.input], dropped_files(ui.ctx())) {
             self.run.clear();

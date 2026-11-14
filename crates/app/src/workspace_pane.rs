@@ -220,8 +220,6 @@ pub struct WorkspacePane {
     renaming: Option<(String, String)>,
     /// What the query box was last filled from.
     opened: Option<Opened>,
-    /// What the pane was told the main window shows, to see it change.
-    front: Option<Front>,
     /// The picked item's first lines, and for which version of it.
     preview: Option<(String, String)>,
     /// The rows of the list as drawn last, as places to put a carried row down on.
@@ -258,7 +256,6 @@ impl WorkspacePane {
             selected: None,
             renaming: None,
             opened: None,
-            front: None,
             preview: None,
             spots: Vec::new(),
             dwell: None,
@@ -402,7 +399,6 @@ impl WorkspacePane {
     /// item that is picked.
     pub fn pane(&mut self, ui: &mut egui::Ui, env: &Env<'_>) {
         let ctx = ui.ctx().clone();
-        self.follow_the_page(env.front);
         self.read_again_on_focus(&ctx);
         self.workspace();
 
@@ -420,7 +416,7 @@ impl WorkspacePane {
                 self.notice_ui(ui);
             });
         let list = ui.available_height().max(40.0);
-        self.tree_ui(ui, list, env.query_area, &mut events);
+        self.tree_ui(ui, list, env.query_area, env.front, &mut events);
         self.apply(&ctx, env, events);
     }
 
@@ -447,24 +443,6 @@ impl WorkspacePane {
             icons::side_panel(ui.painter(), rect.center(), ui.visuals().weak_text_color());
             response.on_hover_text("Workspace — your saved queries, schemas and samples");
         });
-    }
-
-    /// A page of the Tools being in front, the chips that narrow the list are set to
-    /// what the page uses; once, when the page changes.
-    fn follow_the_page(&mut self, front: Front) {
-        if self.front == Some(front) {
-            return;
-        }
-        let first = self.front.is_none();
-        self.front = Some(front);
-        if first {
-            return;
-        }
-        self.group = match front {
-            Front::Tool(Tool::Validate) => Group::Schemas,
-            Front::Tool(Tool::Patch) => Group::Patches,
-            Front::Query | Front::Tool(_) => Group::All,
-        };
     }
 
     /// The window got the focus back: read the folder again.

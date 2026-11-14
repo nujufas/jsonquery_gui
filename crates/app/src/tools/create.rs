@@ -243,6 +243,12 @@ impl Create {
         request
     }
 
+    /// A document from the workspace, in the Document box.
+    pub(super) fn open_document(&mut self, path: &std::path::Path) {
+        self.document.load_file(path);
+        self.changed();
+    }
+
     /// What was made no longer matches what is on the page.
     fn changed(&mut self) {
         self.unselect();

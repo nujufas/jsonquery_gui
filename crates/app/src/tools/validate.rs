@@ -84,6 +84,12 @@ impl Validate {
         self.start()
     }
 
+    /// A document from the workspace, in the Document box.
+    pub(super) fn open_document(&mut self, path: &std::path::Path) {
+        self.document.load_file(path);
+        self.changed();
+    }
+
     /// Check what `document` holds against `schema`, a schema made on the Create
     /// Schema page: both are put in the boxes, and the check started.
     pub(super) fn check(&mut self, document: &Operand, schema: &str) -> Option<Request> {

@@ -211,6 +211,7 @@ impl WorkspacePane {
         ui: &mut egui::Ui,
         height: f32,
         query_area: Option<Rect>,
+        front: Front,
         events: &mut Vec<Event>,
     ) {
         // The folders at the top start open, once for each workspace that is read.
@@ -258,7 +259,7 @@ impl WorkspacePane {
                             }
                         }
                         for row in &rows[range] {
-                            self.row_ui(ui, row, &folders, &mut renaming, events);
+                            self.row_ui(ui, row, &folders, &mut renaming, front, events);
                         }
                     })
                     .inner_rect
@@ -413,6 +414,7 @@ impl WorkspacePane {
         row: &Row,
         folders: &[String],
         renaming: &mut Option<(String, String)>,
+        front: Front,
         events: &mut Vec<Event>,
     ) {
         // A row is dragged to move it — not the one that is being renamed.
@@ -459,7 +461,7 @@ impl WorkspacePane {
         }
         response.context_menu(|ui| {
             events.push(Event::Select(row.path.clone()));
-            row_menu(ui, row, folders, events);
+            row_menu(ui, row, folders, front, events);
         });
     }
 
@@ -856,22 +858,40 @@ fn first_lines(text: &str) -> String {
 }
 
 /// What the two buttons under an item say, by what it is.
-fn labels(kind: ItemKind, _front: Front) -> (&'static str, &'static str) {
+fn labels(kind: ItemKind, front: Front) -> (&'static str, &'static str) {
     match kind {
         ItemKind::Query(_) => ("Open", "Open with sample"),
         ItemKind::Schema => ("Use as schema", "With its sample"),
         ItemKind::Patch => ("Use as patch", "With its sample"),
-        ItemKind::Document => ("Open as Source", "Open as Source"),
+        // A document goes to the page in front.
+        ItemKind::Document => {
+            let open = match front {
+                Front::Query => "Open as Source",
+                Front::Tool(Tool::Merge) => "Add to Merge",
+                Front::Tool(Tool::Format) => "Open in Format",
+                Front::Tool(Tool::Diff) => "Open in Diff",
+                Front::Tool(Tool::Patch) => "Open in Patch",
+                Front::Tool(Tool::Validate) => "Open in Validate",
+                Front::Tool(Tool::Create) => "Open in Create Schema",
+            };
+            (open, open)
+        }
         ItemKind::Url => ("Load from the web", "Load from the web"),
     }
 }
 
 /// The menu of a right click on a row.
-fn row_menu(ui: &mut egui::Ui, row: &Row, folders: &[String], events: &mut Vec<Event>) {
+fn row_menu(
+    ui: &mut egui::Ui,
+    row: &Row,
+    folders: &[String],
+    front: Front,
+    events: &mut Vec<Event>,
+) {
     let path = row.path.clone();
     match &row.what {
         What::Item { kind, has_sample } => {
-            let (open, open_with) = labels(*kind, Front::Query);
+            let (open, open_with) = labels(*kind, front);
             if ui.button(open).clicked() {
                 events.push(Event::Open {
                     path: path.clone(),

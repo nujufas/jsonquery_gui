@@ -412,6 +412,21 @@ impl Tools {
         request
     }
 
+    /// Open the document in the file `path`, from the workspace, on `tool`'s page: in
+    /// the box the page works on (Diff: the first side that is empty, else the right;
+    /// Merge: one more file in its list), and show the page.
+    pub fn open_document(&mut self, ctx: &egui::Context, tool: Tool, path: &Path) {
+        match tool {
+            Tool::Merge => self.merge.add([path.to_owned()]),
+            Tool::Format => self.format.open_document(path),
+            Tool::Diff => self.diff.open_document(path),
+            Tool::Patch => self.patch.open_document(path),
+            Tool::Validate => self.validate.open_document(path),
+            Tool::Create => self.create.open_document(path),
+        }
+        self.show_tool(ctx, tool);
+    }
+
     /// Put the samples of a Tools lesson of the tutorial in the page of its tool,
     /// set the page as the lesson has it, and show the page — and, with `run`, run
     /// it: what is asked of the app is given. (Merge's samples are files: they are
