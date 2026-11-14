@@ -68,9 +68,16 @@ impl Icon {
 
 /// The icon as a label, as high as a line of text (the question's title has it).
 pub(super) fn icon(ui: &mut egui::Ui) {
+    let color = ui.visuals().text_color();
+    icon_in(ui, color);
+}
+
+/// The icon as a label in `color`, as high as a line of text: where the tutorial's help
+/// shows it instead of saying what it looks like.
+pub(crate) fn icon_in(ui: &mut egui::Ui, color: egui::Color32) {
     let icon = Icon::new(ui, &egui::TextStyle::Body);
     let (rect, _) = ui.allocate_exact_size(icon.size(), egui::Sense::hover());
-    icon.paint(ui.painter(), rect, ui.visuals().text_color());
+    icon.paint(ui.painter(), rect, color);
 }
 
 /// What the icon is drawn in while an assistant works with the app.

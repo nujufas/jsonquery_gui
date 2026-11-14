@@ -31,6 +31,8 @@ use crate::x11_alert::X11Alert;
 mod issues_view;
 #[cfg(feature = "mcp")]
 mod mcp;
+#[cfg(feature = "mcp")]
+pub(crate) use mcp::icon_in as mcp_icon;
 mod satellites;
 
 /// Bounded live-preview cap (Architecture §7): the results tree never holds

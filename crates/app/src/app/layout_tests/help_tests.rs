@@ -118,6 +118,65 @@ fn the_mcp_tab_says_how_to_start_the_server_and_what_quickai_needs() {
     assert_eq!(h.app.tutorial.pictures_made(), 2);
 }
 
+/// The status bar's icon for the server, as the tutorial draws it (the plug; its "AI"
+/// beside it), where it is drawn.
+#[cfg(feature = "mcp")]
+fn plugs(h: &Harness) -> Vec<egui::Rect> {
+    text_rects(&h.shapes)
+        .into_iter()
+        .filter(|(t, _)| t == "🔌")
+        .map(|(_, rect)| rect)
+        .collect()
+}
+
+#[cfg(feature = "mcp")]
+#[test]
+fn the_help_shows_the_icon_where_it_speaks_of_it() {
+    let mut h = Harness::new();
+    help_tab(&mut h, "AI assistants");
+    // The tab's status line: the icon, then where it is.
+    let (_, line) = text_rects(&h.shapes)
+        .into_iter()
+        .rfind(|(t, _)| t.contains("in the main window's status bar opens the server's panel"))
+        .unwrap_or_else(|| panic!("the status line: {:?}", h.texts()));
+    assert!(
+        plugs(&h)
+            .iter()
+            .any(|p| p.max.x <= line.min.x + 1.0 && (p.center().y - line.center().y).abs() < 6.0),
+        "the icon starts the status line: {line:?}, {:?}",
+        plugs(&h)
+    );
+
+    press_on_top(&mut h, "Start the server");
+    h.settle();
+    // The lesson's heading: the tallest of the texts of its title (the list has it too).
+    let heading = text_rects(&h.shapes)
+        .into_iter()
+        .filter(|(t, _)| t == "Start the server")
+        .map(|(_, rect)| rect)
+        .max_by(|a, b| a.height().total_cmp(&b.height()))
+        .expect("the lesson's heading");
+    let (_, good_to_know) = text_rects(&h.shapes)
+        .into_iter()
+        .rfind(|(t, _)| t == "Good to know")
+        .expect("its tips");
+    let in_summary: Vec<_> = plugs(&h)
+        .into_iter()
+        .filter(|p| p.min.y > heading.max.y && p.max.y < good_to_know.min.y)
+        .collect();
+    assert_eq!(in_summary.len(), 2, "the summary shows the icon twice");
+    assert!(
+        is_drawn_containing(&h, "in the status bar opens the server's panel")
+            && is_drawn_containing(&h, "is green while an")
+    );
+    for words in ["plug with", "plug and", "The button with"] {
+        assert!(
+            !is_drawn_containing(&h, words),
+            "{words:?}: the icon, not words for it"
+        );
+    }
+}
+
 #[cfg(not(feature = "mcp"))]
 #[test]
 fn the_build_without_the_server_has_no_mcp_tab() {
@@ -137,7 +196,7 @@ fn tab_rect(h: &Harness, title: &str) -> egui::Rect {
 }
 
 #[test]
-fn the_tabs_are_one_row_in_the_window_as_it_opens_and_two_in_the_narrowest() {
+fn the_tabs_are_one_row_and_every_one_is_in_the_narrowest_window() {
     let mut h = Harness::new();
     help_tab(&mut h, "General");
     let (jq, general) = (tab_rect(&h, "jq"), tab_rect(&h, "General"));
@@ -147,7 +206,8 @@ fn the_tabs_are_one_row_in_the_window_as_it_opens_and_two_in_the_narrowest() {
         "General is last"
     );
 
-    // The narrowest the tutorial's window may be: every tab is in it, on two rows.
+    // The narrowest the tutorial's window may be: every tab is in it (a row of its own
+    // for those that do not fit, if the font is wider).
     let mut h = Harness::new();
     h.screen = egui::vec2(720.0, 600.0);
     help_tab(&mut h, "General");

@@ -382,10 +382,13 @@ impl Tutorial {
             }
             #[cfg(feature = "mcp")]
             None if self.tab == Tab::Mcp => {
-                ui.weak(
-                    "The plug with AI, left of the ⚙ in the main window's status bar, opens the \
-                     server's panel.",
-                );
+                // The icon itself, not words for it.
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 0.0;
+                    let color = ui.visuals().weak_text_color();
+                    crate::app::mcp_icon(ui, color);
+                    ui.weak(" in the main window's status bar opens the server's panel.");
+                });
             }
             None if self.tab.help().is_some() => {
                 ui.weak("Copy puts a command on the clipboard, to paste where it goes.");
@@ -1004,5 +1007,151 @@ mod tests {
             assert_eq!(tab.help().is_some(), tab.slot() >= 5, "{tab:?}");
             assert!(!tab.outline().is_empty(), "{tab:?}");
         }
+    }
+
+    /// A character no font of the window has is drawn as an empty box (the help once
+    /// had `ⓘ` for the About button, which is `ℹ`). Every text of every tab is checked
+    /// against the fonts it is drawn in: a label's in the proportional font, a prose's
+    /// too but for its arrows, which `push_text` draws in the monospace one, and a
+    /// command's, a query's or a sample's in the monospace font.
+    #[test]
+    fn every_character_the_tutorial_shows_has_a_glyph() {
+        #[derive(Default)]
+        struct Texts {
+            labels: Vec<(String, &'static str)>,
+            prose: Vec<(String, &'static str)>,
+            code: Vec<(String, &'static str)>,
+        }
+        let mut texts = Texts::default();
+        for tab in Tab::ALL {
+            let at = format!("the {} tab", tab.title());
+            texts.labels.push((at.clone(), tab.title()));
+            texts.labels.push((at.clone(), tab.tagline()));
+            match tab {
+                Tab::Query(kind) => {
+                    for topic in content::topics(kind) {
+                        texts.labels.push((at.clone(), topic.title));
+                        for lesson in topic.lessons {
+                            let at = format!("{at} › {}", lesson.title);
+                            texts.labels.push((at.clone(), lesson.title));
+                            texts.prose.push((at.clone(), lesson.summary));
+                            texts
+                                .prose
+                                .extend(lesson.tips.iter().map(|t| (at.clone(), *t)));
+                            for example in lesson.examples {
+                                texts.labels.push((at.clone(), example.caption));
+                                texts.code.push((at.clone(), example.data));
+                                texts.code.push((at.clone(), example.query));
+                                for &(fragment, explained) in example.parts {
+                                    texts.code.push((at.clone(), fragment));
+                                    texts.prose.push((at.clone(), explained));
+                                }
+                            }
+                            if let Some(sheet) = &lesson.cheat_sheet {
+                                texts.code.push((at.clone(), sheet.data));
+                                for &(query, meaning) in sheet.rows {
+                                    texts.code.push((at.clone(), query));
+                                    texts.prose.push((at.clone(), meaning));
+                                }
+                            }
+                        }
+                    }
+                }
+                Tab::Tools => {
+                    for topic in tool_lessons::TOPICS {
+                        texts.labels.push((at.clone(), topic.title));
+                        for lesson in topic.lessons {
+                            let at = format!("{at} › {}", lesson.title);
+                            texts.labels.push((at.clone(), lesson.title));
+                            texts.prose.push((at.clone(), lesson.summary));
+                            texts
+                                .prose
+                                .extend(lesson.tips.iter().map(|t| (at.clone(), *t)));
+                            for example in lesson.examples {
+                                texts.labels.push((at.clone(), example.caption));
+                                texts
+                                    .prose
+                                    .extend(example.notes.iter().map(|n| (at.clone(), *n)));
+                                for sample in example.samples {
+                                    texts.labels.push((at.clone(), sample.name));
+                                    texts.code.push((at.clone(), sample.text));
+                                }
+                            }
+                        }
+                    }
+                }
+                _ => {
+                    for topic in tab.help().unwrap_or_default() {
+                        texts.labels.push((at.clone(), topic.title));
+                        for lesson in topic.lessons {
+                            let at = format!("{at} › {}", lesson.title);
+                            texts.labels.push((at.clone(), lesson.title));
+                            texts.prose.push((at.clone(), lesson.summary));
+                            texts
+                                .prose
+                                .extend(lesson.tips.iter().map(|t| (at.clone(), *t)));
+                            for link in lesson.links {
+                                texts.labels.push((at.clone(), link.text));
+                            }
+                            for picture in lesson.pictures {
+                                texts.labels.push((at.clone(), picture.caption));
+                            }
+                            for snippet in lesson.snippets {
+                                texts.labels.push((at.clone(), snippet.caption));
+                                texts.code.push((at.clone(), snippet.text));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let ctx = egui::Context::default();
+        // A first pass makes the fonts; the font atlas it made is not drawn here.
+        ctx.run_ui(egui::RawInput::default(), |_| {})
+            .textures_delta
+            .clear();
+        // A character no font of the family has is drawn as the family's replacement,
+        // '◻': the same glyph of the atlas. (`Fonts::has_glyph` cannot say: it takes
+        // every character of the font that has '◻' for a missing one.)
+        let glyph = |font: &egui::FontId, c: char| {
+            ctx.fonts_mut(|fonts| {
+                let galley = fonts.layout_no_wrap(c.to_string(), font.clone(), Color32::WHITE);
+                galley
+                    .rows
+                    .first()
+                    .and_then(|row| row.row.glyphs.first())
+                    .map(|glyph| glyph.uv_rect)
+            })
+        };
+        let words = egui::FontId::proportional(14.0);
+        let mono = egui::FontId::monospace(14.0);
+        let mut missing = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        let mut check = |texts: &[(String, &'static str)],
+                         font_of: &dyn Fn(char) -> egui::FontId| {
+            for (at, text) in texts {
+                for c in text
+                    .chars()
+                    .filter(|c| !c.is_whitespace() && !"◻?".contains(*c))
+                {
+                    let font = font_of(c);
+                    if seen.insert((c, font.family.clone())) && glyph(&font, c) == glyph(&font, '◻')
+                    {
+                        missing.push(format!("{c:?} (U+{:04X}) in {at}", c as u32));
+                    }
+                }
+            }
+        };
+        check(&texts.labels, &|_| words.clone());
+        check(&texts.prose, &|c| {
+            if MONO_ONLY_GLYPHS.contains(&c) {
+                mono.clone()
+            } else {
+                words.clone()
+            }
+        });
+        check(&texts.code, &|_| mono.clone());
+        assert!(missing.is_empty(), "drawn as empty boxes: {missing:#?}");
     }
 }

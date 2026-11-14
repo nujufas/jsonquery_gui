@@ -12,6 +12,35 @@ use super::{code_frame, prose, tips, Tab, Tutorial};
 /// The room the Copy button takes at the right of a command's box.
 const COPY_ROOM: f32 = 64.0;
 
+/// Where a lesson's text has it, the status bar's icon for the MCP server (the plug
+/// with a small "AI") is drawn: the lesson shows the icon instead of saying what it
+/// looks like.
+#[cfg(feature = "mcp")]
+pub(super) const PLUG: char = '🔌';
+
+/// A lesson's prose, with the MCP server's icon drawn for each [`PLUG`] in it, in the
+/// flow of the text.
+fn prose_with_icons(ui: &mut egui::Ui, text: &str) {
+    #[cfg(feature = "mcp")]
+    if text.contains(PLUG) {
+        ui.horizontal_wrapped(|ui| {
+            // The text's own spaces part the words from the icon.
+            ui.spacing_mut().item_spacing.x = 0.0;
+            for (i, part) in text.split(PLUG).enumerate() {
+                if i > 0 {
+                    let color = ui.visuals().text_color();
+                    crate::app::mcp_icon(ui, color);
+                }
+                if !part.is_empty() {
+                    prose(ui, part);
+                }
+            }
+        });
+        return;
+    }
+    prose(ui, text);
+}
+
 impl Tutorial {
     /// A lesson of a help tab.
     pub(super) fn help_lesson_view(
@@ -42,7 +71,7 @@ impl Tutorial {
             ui.weak(format!("{} › {}", tab.title(), topic.title));
             ui.heading(lesson.title);
             ui.add_space(4.0);
-            prose(ui, lesson.summary);
+            prose_with_icons(ui, lesson.summary);
             ui.add_space(10.0);
 
             for link in lesson.links {

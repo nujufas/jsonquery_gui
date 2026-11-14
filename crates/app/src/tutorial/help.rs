@@ -251,7 +251,7 @@ pub static GENERAL_TOPICS: &[HelpTopic] = &[
             HelpLesson {
                 title: "Read more",
                 summary: "The README and the docs of the app's repository say more about each \
-                          part; ⓘ has the known issues and the privacy policy.",
+                          part; ℹ has the known issues and the privacy policy.",
                 links: &[
                     HelpLink {
                         text: "The docs",
@@ -261,6 +261,7 @@ pub static GENERAL_TOPICS: &[HelpTopic] = &[
                         text: "The command line, all of it",
                         url: "https://github.com/nujufas/jsonquery_gui/blob/master/docs/command-line.md",
                     },
+                    #[cfg(feature = "mcp")]
                     HelpLink {
                         text: "The MCP server, all of it",
                         url: "https://github.com/nujufas/jsonquery_gui/blob/master/docs/mcp.md",
@@ -314,10 +315,10 @@ pub static MCP_TOPICS: &[HelpTopic] = &[
             },
             HelpLesson {
                 title: "Start the server",
-                summary: "The button with a plug and *AI*, left of the ⚙ in the status bar, \
-                          opens the server's panel. *Start* starts it, at \
-                          `http://127.0.0.1:7457/mcp`. The button is green while an assistant \
-                          works with the app.",
+                // (Each 🔌 is drawn as the status bar's icon, the plug with "AI".)
+                summary: "🔌 in the status bar opens the server's panel. *Start* starts the \
+                          server, at `http://127.0.0.1:7457/mcp`. 🔌 is green while an \
+                          assistant works with the app.",
                 links: &[],
                 snippets: &[],
                 pictures: &[],
