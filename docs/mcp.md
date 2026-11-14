@@ -12,10 +12,9 @@ deleted, replaced, written outside the workspace or fetched from the web.
 
 It is in every build: the downloads of each
 [GitHub Release](https://github.com/nujufas/jsonquery_gui/releases), the AppImages, and the packages
-of the stores and package managers. Nothing of it runs until you start it. Each release also has
-builds without it, for a computer where no assistant should be able to reach the app:
-`jsonquery_gui_nomcp-<version>-linux-x86_64.tar.gz`, `…-linux-aarch64.tar.gz` and
-`…-windows-x86_64.zip`.
+of the stores and package managers. Nothing of it runs until you start it. For a computer where no
+assistant should be able to reach the app, build it without the server (see
+[Building it yourself](#building-it-yourself)).
 
 ## Starting it
 
@@ -294,8 +293,7 @@ cargo build --release -p jsonquery_gui -p jsonquery-mcp
 # target/release/jsonquery_gui, with the server, and target/release/jsonquery-mcp beside it
 ```
 
-The server is the app's cargo feature `mcp`, a default one. Without it, as the `_nomcp` downloads
-are:
+The server is the app's cargo feature `mcp`, a default one. Without it:
 
 ```sh
 cargo build --release -p jsonquery_gui --no-default-features

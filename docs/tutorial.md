@@ -60,8 +60,8 @@ to copy (each with a **Copy** button) and pictures:
   Read and Edit, adding it to Claude Code, Claude Desktop, VS Code, QuickAI (which
   needs Qwen3.5-9B-Q4_K_M or better, with 32K tokens of context or more; with a link
   to get it) and other assistants, with pictures of Claude Code, VS Code and QuickAI
-  set up and at work, what to ask, and large documents. Only in the builds that have
-  the server: not in the `_nomcp` ones.
+  set up and at work, what to ask, and large documents. Only in a build that has the
+  server (every download has it).
 - **General** — the [command line](command-line.md) (opening a document, running a
   query as it opens, opening a tool, help and mistakes), the keys, big files, the
   Workspace, and where to read more.

@@ -425,8 +425,8 @@ entry, for dropping files on the window (see
 ### Without the MCP server
 
 Every build has the [MCP server](docs/mcp.md) for AI assistants, which runs only once you start it.
-Each release also has builds without it, with **_nomcp** in their name (Linux tar.gz and Windows zip
-only), for a computer where no assistant should be able to reach the app.
+For a computer where no assistant should be able to reach the app, build it without the server (see
+[Building](#building)).
 
 ### Dropping files on a Wayland desktop
 
@@ -530,7 +530,7 @@ cargo build --release -p jsonquery_gui -p jsonquery-mcp
 # binaries at target/release/jsonquery_gui and target/release/jsonquery-mcp
 ```
 
-Without the MCP server, as the downloads with **_nomcp** in their name are:
+Without the MCP server:
 
 ```sh
 cargo build --release -p jsonquery_gui --no-default-features
