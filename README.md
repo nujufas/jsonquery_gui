@@ -3,10 +3,12 @@
 A native desktop tool for browsing and querying large JSON files — drag in a
 file (or paste JSON directly) and query it with **jq**, **JSON Pointer**,
 **JSONPath**, or **JMESPath**. A **Tools** window merges, formats, diffs,
-patches and validates documents too. Built in Rust with
+patches and validates documents too, and an AI assistant — even one that runs
+on your own computer, such as [QuickAI](#ai-assistants-mcp) — can work with what
+the app has open, through its MCP server. Built in Rust with
 [egui](https://github.com/emilk/egui)/[eframe](https://github.com/emilk/egui).
 
-![jsonquery: a multi-line jq query that filters, groups and reshapes a list of users, every step of it tinted, with the source and the results side by side](docs/images/screenshot.png)
+<img src="docs/images/screenshot.png" width="800" alt="jsonquery: a multi-line jq query that filters, groups and reshapes a list of users, every step of it tinted, with the source and the results side by side">
 
 ## Features
 
@@ -24,7 +26,8 @@ patches and validates documents too. Built in Rust with
   JSONPath, `."first name"` in JMESPath). Off by default — switch it on with
   the 💡 button in the toolbar.
 
-  ![Autocomplete inside select( offering the fields of each record, with a sample value for each](docs/images/screenshot-autocomplete.png)
+  <img src="docs/images/screenshot-autocomplete.png" width="800" alt="Autocomplete inside select( offering the fields of each record, with a sample value for each">
+
 - **Colour-coded queries** — the query box tints each step of what you type
   (`.[]`, `select(…)`, `sort_by(…)`, `.user.name`; a Pointer's `/segments`)
   in the same palette the tutorial uses, leaving pipes, commas and operators
@@ -38,7 +41,8 @@ patches and validates documents too. Built in Rust with
   can edit and experiment. A **Tools** tab teaches each tool with samples, and its
   ▶ Try it puts them in the tool's page and runs it. See [Tutorial](docs/tutorial.md).
 
-  ![The tutorial window on the jq lesson about select](docs/images/screenshot-tutorial.png)
+  <img src="docs/images/screenshot-tutorial.png" width="800" alt="The tutorial window on the jq lesson about select">
+
 - **Tools** — the 🛠 icon next to the tutorial opens the Tools window, with a
   tab for each of six utilities that go with the viewer: **Merge JSON**,
   **Format JSON**, **Diff JSON**, **Patch JSON**, **Validate Schema** and
@@ -60,9 +64,10 @@ patches and validates documents too. Built in Rust with
   comes later. Until you show it the window is as it always was. See
   [docs/workspace.md](docs/workspace.md).
 
-  ![The Workspace pane at the left of the window: folders of queries, schemas, patches and documents, each item with its kind and a paperclip when it has a sample, and under the list the one that is picked; beside it the query that was opened with its sample, run, with the source and the results](docs/images/screenshot-workspace.png)
+  <img src="docs/images/screenshot-workspace.png" width="800" alt="The Workspace pane at the left of the window: folders of queries, schemas, patches and documents, each item with its kind and a paperclip when it has a sample, and under the list the one that is picked; beside it the query that was opened with its sample, run, with the source and the results">
 
-  ![A query being dragged onto a folder of the pane: the folder is outlined and a label says where the query will go](docs/images/screenshot-workspace-drag.png)
+  <img src="docs/images/screenshot-workspace-drag.png" width="400" alt="A query being dragged onto a folder of the pane: the folder is outlined and a label says where the query will go">
+
 - **Streamed, cancellable queries** — results appear as jq produces them, so
   `first(...)`/`limit(...)` genuinely stop early; starting a new query aborts
   whatever was still running.
@@ -85,7 +90,8 @@ patches and validates documents too. Built in Rust with
   `@csv` query, and the file **Save…** wrote from it, open beside the window in
   a spreadsheet; end the query in `@tsv` and the rows are tab-separated.
 
-  ![A jq query that ends in @csv: its rows in the Results pane's Text view, and the users.csv that Save… wrote from them, opened in a spreadsheet beside the window](docs/images/screenshot-csv.png)
+  <img src="docs/images/screenshot-csv.png" width="800" alt="A jq query that ends in @csv: its rows in the Results pane's Text view, and the users.csv that Save… wrote from them, opened in a spreadsheet beside the window">
+
 - **Search** — `Ctrl+F` opens a Notepad++-style Find dialog with the cursor
   already in its field: a case-insensitive substring or regex search across
   the source or the results tree. **Find** (or `Enter`) jumps to each match in
@@ -93,7 +99,8 @@ patches and validates documents too. Built in Rust with
   wrapping past the last one; **Find All** lists every match in a panel below,
   where a click reveals it.
 
-  ![The Find dialog and its Find All list, with the selected match revealed in the source tree](docs/images/screenshot-search.png)
+  <img src="docs/images/screenshot-search.png" width="800" alt="The Find dialog and its Find All list, with the selected match revealed in the source tree">
+
 - **Find in Source** — right-click a result row to see where it came from.
   The row's key and value are matched against the source, and for array
   elements their position: one hit is revealed directly, several are listed
@@ -128,7 +135,8 @@ patches and validates documents too. Built in Rust with
   own on top (with **…**, **Load** and **Clear**), so a document can be opened
   from there. Shortcuts and search work in each window.
 
-  ![The Results pane popped out into a window of its own; the main window gives the Source pane the full width](docs/images/screenshot-popout.png)
+  <img src="docs/images/screenshot-popout.png" width="800" alt="The Results pane popped out into a window of its own; the main window gives the Source pane the full width">
+
 - **Light and dark themes**, switchable from the toolbar.
 - **Settings and a memory** — the ⚙ at the right end of the status bar opens a
   small window with the **limit on file sizes** that matters: from what size a
@@ -154,14 +162,42 @@ patches and validates documents too. Built in Rust with
   use the six Tools; if you allow it (Edit), it also shows you its queries in
   the window and saves in the workspace, asking you first before anything is
   deleted or replaced, unless you always allow it. Answers come a page at a
-  time, of a size you set: small for a model that runs on your own computer
-  (with QuickAI, use Qwen3.5-9B-Q4_K_M or better, with a context of 32K tokens
-  or more). The server listens on this computer only, runs only once you start
-  it, and by default may only look. See [MCP server](docs/mcp.md), and the 📖
-  tutorial's **AI assistants** tab.
+  time, of a size you set: small for a model that runs on your own computer.
+  The server listens on this computer only, runs only once you start it, and by
+  default may only look. See [AI assistants (MCP)](#ai-assistants-mcp) below,
+  [MCP server](docs/mcp.md), and the 📖 tutorial's **AI assistants** tab.
 - **Keyboard shortcuts** — `Ctrl+Enter` run/apply, `Ctrl+F` search,
   `Ctrl+S` save (both scoped to whichever panel you last clicked), `F1`
   tutorial.
+
+## AI assistants (MCP)
+
+Start JsonQuery's [MCP](https://modelcontextprotocol.io) server from the 🔌 in the status bar, and an
+AI assistant can read and query what the app has open — documents of any size, a page at a time —
+use the six Tools, and, if you allow it, put its query in the window for you to see.
+
+**With [QuickAI](https://quickai.everybodyai.dev), on your own computer.** QuickAI runs the model on
+your computer, so your documents stay on it. Here Qwen3.5-9B answers from the document open in
+JsonQuery, through JsonQuery's tools, then puts its query in JsonQuery's query box and runs it:
+
+<img src="docs/images/mcp-quickai-chat.png" width="800" alt="QuickAI, with Qwen3.5-9B running on this computer, answers from the document open in JsonQuery: 50 orders are open, 15,701.5 in all; then, asked to show them, it puts its jq query in JsonQuery's query box and runs it, and the JsonQuery window behind it shows the query and its 50 results">
+
+To set it up:
+
+1. In JsonQuery, click the 🔌 and **Start** the server (tick *Start it with JsonQuery* to have it
+   start with the app; allow *Edit* if the assistant may put queries in the window).
+2. Click the panel's **QuickAI** button: it copies the server's entry.
+3. In QuickAI's **MCP servers**, choose *Paste the JSON of a server's instructions*, paste it, and
+   **Add these**.
+
+<img src="docs/images/mcp-quickai-config.png" width="800" alt="QuickAI's MCP servers: the entry that JsonQuery's QuickAI button copied, pasted under &quot;Paste the JSON of a server's instructions&quot;, before Add these">
+
+Use Qwen3.5-9B-Q4_K_M or better (a bigger model, or one less quantized), with a context of 32K
+tokens or more: the tools take about 7K tokens before the first question, and an answer up to 6K
+more with the panel's *Answers* at 24 KB (choose 8 KB for a smaller context).
+
+Claude Code, Claude Desktop, VS Code and others are added the same way, each with its button in
+the panel: see [MCP server](docs/mcp.md), and the 📖 tutorial's **AI assistants** tab.
 
 ## Tools
 
@@ -189,7 +225,7 @@ and takes the file in one of its boxes, **Json Query** runs the query and opens 
 as the document (several files go to Merge, whose tab comes to the front). Where the
 Tools are is remembered.
 
-![The Tools docked in the main window: the row of tabs with Json Query first and Create Schema last, and Diff JSON in front](docs/images/screenshot-tools-docked.png)
+<img src="docs/images/screenshot-tools-docked.png" width="800" alt="The Tools docked in the main window: the row of tabs with Json Query first and Create Schema last, and Diff JSON in front">
 
 ### Merge JSON
 
@@ -202,7 +238,7 @@ de-duplicated, deep-merge objects, bundle by file name — or edit it into your
 own, and press **Merge**. The result can be saved, or opened in the main
 window.
 
-![Merge JSON: three monthly order files appended into one array of ten orders](docs/images/screenshot-tools-merge.png)
+<img src="docs/images/screenshot-tools-merge.png" width="800" alt="Merge JSON: three monthly order files appended into one array of ten orders">
 
 **Deep-merge objects** lays each file over the one before it, key by key all the
 way down: a later file wins a clash between plain values, a key that only one file
@@ -211,7 +247,7 @@ has is kept, and an array is replaced as a whole. Below, a `defaults.json`, a
 own can merge differently — [docs/tools.md](docs/tools.md#how-the-filter-sees-the-files)
 has one that joins the arrays too.
 
-![Merge JSON with Deep-merge objects: defaults.json, production.json and local.json laid over each other into one configuration, the nested keys merged, the later file's value winning, the array replaced](docs/images/screenshot-tools-merge-deep.png)
+<img src="docs/images/screenshot-tools-merge-deep.png" width="800" alt="Merge JSON with Deep-merge objects: defaults.json, production.json and local.json laid over each other into one configuration, the nested keys merged, the later file's value winning, the array replaced">
 
 ### Format JSON
 
@@ -219,7 +255,7 @@ Pretty-prints with 2 or 4 spaces or a tab, minifies, sorts the keys at every
 depth, and can write everything outside ASCII as `\uXXXX` escapes. Numbers come
 out exactly as they went in, however many digits they have.
 
-![Format JSON: a minified document pretty-printed with its keys sorted](docs/images/screenshot-tools-format.png)
+<img src="docs/images/screenshot-tools-format.png" width="800" alt="Format JSON: a minified document pretty-printed with its keys sorted">
 
 ### Diff JSON
 
@@ -254,7 +290,7 @@ typed (a value, a member, nothing to take the line out, several to put them in) 
 in the document and compared again. A document that a move or an edit changed says
 so, and the **Save…** over its column writes it to a file — either, or both.
 
-![Diff JSON: two versions of a configuration side by side, with the added, removed and changed lines marked and two arrows one over the other between the sides at every difference](docs/images/screenshot-tools-diff.png)
+<img src="docs/images/screenshot-tools-diff.png" width="800" alt="Diff JSON: two versions of a configuration side by side, with the added, removed and changed lines marked and two arrows one over the other between the sides at every difference">
 
 ### Patch JSON
 
@@ -262,7 +298,7 @@ Applies an RFC 6902 JSON Patch (a list of operations) or an RFC 7386 JSON Merge
 Patch to a document. A patch is all or nothing, and an error names the
 operation that failed.
 
-![Patch JSON: six operations applied to a document, the result on the right](docs/images/screenshot-tools-patch.png)
+<img src="docs/images/screenshot-tools-patch.png" width="800" alt="Patch JSON: six operations applied to a document, the result on the right">
 
 ### Validate Schema
 
@@ -273,7 +309,7 @@ that is open in the main window, **Show in main window** reveals a problem
 there. Nothing is ever fetched: a `$ref` has to
 point inside the schema.
 
-![Validate Schema: a document checked against a schema, six problems listed with their pointers; the first one is picked, and the value that is wrong is highlighted in the document and the keyword that said so in the schema](docs/images/screenshot-tools-validate.png)
+<img src="docs/images/screenshot-tools-validate.png" width="800" alt="Validate Schema: a document checked against a schema, six problems listed with their pointers; the first one is picked, and the value that is wrong is highlighted in the document and the keyword that said so in the schema">
 
 ### Create Schema
 
@@ -288,7 +324,7 @@ see where it is in the document and the schema, and to change it, make it a plai
 string, or restore it; click an enum to leave values out, add others, or make it a
 plain string — or edit the schema's text itself.
 
-![Create Schema: a list of orders and the schema made of it, with a pattern for the order ids, a date-time, a uuid, an email and an IPv4 address among the patterns and enums listed under it; the ids' pattern is open under the list, and highlighted in the schema and, at its first place, in the document](docs/images/screenshot-tools-create.png)
+<img src="docs/images/screenshot-tools-create.png" width="800" alt="Create Schema: a list of orders and the schema made of it, with a pattern for the order ids, a date-time, a uuid, an email and an IPv4 address among the patterns and enums listed under it; the ids' pattern is open under the list, and highlighted in the schema and, at its first place, in the document">
 
 ## Known limitations
 
