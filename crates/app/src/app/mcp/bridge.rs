@@ -1,8 +1,9 @@
 //! How an assistant that starts its MCP servers itself (Claude Desktop, QuickAI's
 //! llama-server) is to start `jsonquery-mcp`, the program that takes its calls to the
 //! app. That depends on how JsonQuery was installed: the program beside the app, a
-//! package manager's link to it on the `PATH`, the snap's command for it, or the
-//! AppImage itself with `mcp` first (its AppRun then starts the program inside).
+//! package manager's link to it on the `PATH`, the snap's command for it, the Microsoft
+//! Store package's command for it, or the AppImage itself with `mcp` first (its AppRun
+//! then starts the program inside).
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -64,6 +65,29 @@ fn find(exe: &Path, var: impl Fn(&str) -> Option<OsString>) -> Option<Bridge> {
                 command: format!("/snap/bin/{}.jsonquery-mcp", name.to_string_lossy()).into(),
                 args: Vec::new(),
             });
+        }
+    }
+    // The Microsoft Store's package is in a folder of WindowsApps named for its version,
+    // which the next update replaces, and a program in it is started from outside by
+    // the command the package gives it: an alias in the user's own WindowsApps, which
+    // stays where it is.
+    if exe
+        .components()
+        .any(|part| part.as_os_str().eq_ignore_ascii_case("WindowsApps"))
+    {
+        if let Some(local) = set("LOCALAPPDATA") {
+            let alias = Path::new(&local)
+                .join("Microsoft")
+                .join("WindowsApps")
+                .join(FILE_NAME);
+            // An alias is a reparse point that only starting a program follows: it is
+            // looked at, not through.
+            if std::fs::symlink_metadata(&alias).is_ok() {
+                return Some(Bridge {
+                    command: alias,
+                    args: Vec::new(),
+                });
+            }
         }
     }
     let command = set("PATH")
@@ -179,6 +203,31 @@ mod tests {
         assert_eq!(
             find(&exe, env(&vars)),
             plain("/snap/bin/jsonquery-gui_beta.jsonquery-mcp".into())
+        );
+    }
+
+    #[test]
+    fn the_store_package_is_started_by_its_alias() {
+        let dir = ScratchDir::new("mcp-bridge", "store");
+        let exe = install(
+            &dir,
+            "Program Files/WindowsApps/Nujufas.jsonquerygui_1.0.0.0_x64__j01s9e7gq6y9p",
+            true,
+        );
+        let local = dir.join("Local");
+        let aliases = local.join("Microsoft").join("WindowsApps");
+        let vars = [("LOCALAPPDATA", local.clone().into_os_string())];
+        // Before the package has given the user its alias, the program beside the app.
+        assert_eq!(find(&exe, env(&vars)), plain(exe.with_file_name(FILE_NAME)));
+        std::fs::create_dir_all(&aliases).unwrap();
+        std::fs::write(aliases.join(FILE_NAME), "").unwrap();
+        assert_eq!(find(&exe, env(&vars)), plain(aliases.join(FILE_NAME)));
+        // The app from a zip, on a computer that has the Store's package too, gives its
+        // own program: the alias starts the package's.
+        let unpacked = install(&dir, "Tools/jsonquery_gui-1.0.0-windows-x86_64", true);
+        assert_eq!(
+            find(&unpacked, env(&vars)),
+            plain(unpacked.with_file_name(FILE_NAME))
         );
     }
 

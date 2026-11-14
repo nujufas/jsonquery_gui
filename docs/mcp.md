@@ -53,10 +53,11 @@ What their buttons copy starts it the way JsonQuery was installed:
 | Homebrew | `…/bin/jsonquery-mcp`, Homebrew's link to it, which an upgrade does not move |
 | An AppImage | the AppImage itself, with `mcp` first: it then starts the program inside |
 | The Snap Store | `/snap/bin/jsonquery-gui.jsonquery-mcp`, the snap's command for it |
+| The Microsoft Store | `%LOCALAPPDATA%\Microsoft\WindowsApps\jsonquery-mcp.exe`, the package's command for it, which an update does not move |
 
 Copy it again after you move the app or the AppImage, or after an upgrade puts the app in a folder of
-its new version. The buttons are greyed out when `jsonquery-mcp` is not beside the app: in the
-Microsoft Store's package, and in a build of the app alone.
+its new version. The buttons are greyed out when `jsonquery-mcp` is not beside the app, as in a build
+of the app alone (`cargo build -p jsonquery_gui`).
 
 ### Claude Code
 
