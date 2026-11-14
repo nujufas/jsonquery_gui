@@ -427,6 +427,40 @@ impl Tools {
         self.show_tool(ctx, tool);
     }
 
+    /// Fill `tool`'s page with `files`, in the order of its boxes (Diff: the left and
+    /// the right; Patch: the document and the patch; Validate: the document and the
+    /// schema; Merge: its list), show the page, and run it once every box it needs is
+    /// full: what the command line's `--diff` and the others ask for.
+    pub fn open_files(
+        &mut self,
+        ctx: &egui::Context,
+        tool: Tool,
+        files: &[PathBuf],
+    ) -> Option<Request> {
+        let request = match (tool, files) {
+            (_, []) => None,
+            (Tool::Merge, files) => self.merge.use_files(files),
+            (Tool::Diff, [left]) => self.diff.use_files(left, None),
+            (Tool::Diff, [left, right, ..]) => self.diff.use_files(left, Some(right)),
+            (Tool::Patch, [document]) => {
+                self.patch.open_document(document);
+                None
+            }
+            (Tool::Patch, [document, patch, ..]) => self.patch.use_files(patch, Some(document)),
+            (Tool::Validate, [document]) => {
+                self.validate.open_document(document);
+                None
+            }
+            (Tool::Validate, [document, schema, ..]) => {
+                self.validate.use_files(schema, Some(document))
+            }
+            (Tool::Format, [file, ..]) => self.format.use_file(file),
+            (Tool::Create, [file, ..]) => self.create.use_file(file),
+        };
+        self.show_tool(ctx, tool);
+        request
+    }
+
     /// Put the samples of a Tools lesson of the tutorial in the page of its tool,
     /// set the page as the lesson has it, and show the page — and, with `run`, run
     /// it: what is asked of the app is given. (Merge's samples are files: they are

@@ -165,6 +165,7 @@ fn facts_of(doc: &Document, out: &mut Map<String, Value>) {
             "web address"
         }
         DocumentSource::Pasted => "pasted",
+        DocumentSource::Stdin => "standard input",
         DocumentSource::Merged(files) => {
             out.insert("files".to_owned(), json!(files.len()));
             "merged"

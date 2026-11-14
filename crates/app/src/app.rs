@@ -655,9 +655,10 @@ impl App {
         // Pasted JSON and a merge have no address to name, so the field goes
         // back to empty, ready for the next source.
         self.source_input = match &doc.source {
-            DocumentSource::Pasted | DocumentSource::Merged(_) | DocumentSource::Derived { .. } => {
-                String::new()
-            }
+            DocumentSource::Pasted
+            | DocumentSource::Stdin
+            | DocumentSource::Merged(_)
+            | DocumentSource::Derived { .. } => String::new(),
             source => source.label(),
         };
         // A document that is read from its file as it is looked at can have
@@ -897,6 +898,52 @@ impl App {
     fn open_url(&mut self, url: String) {
         self.source_input.clone_from(&url);
         let _ = self.cmd_tx.send(Command::OpenUrl(url));
+    }
+
+    /// Open what is piped into the app (`-` on the command line): it has no address
+    /// to put in the source field, which is left empty, as for pasted JSON.
+    fn open_stdin(&mut self) {
+        self.source_input.clear();
+        let _ = self.cmd_tx.send(Command::OpenStdin);
+    }
+
+    /// Start as the command line asks (`cli.rs`): put its query in the box, open its
+    /// document (and run the query on it once it has loaded), put several documents in
+    /// Merge's list as when they are dropped, and fill a tool's page with files — run
+    /// once its boxes are full.
+    pub(crate) fn launch(&mut self, ctx: &egui::Context, launch: crate::cli::Launch) {
+        let crate::cli::Launch {
+            open,
+            query,
+            merge,
+            tool,
+        } = launch;
+        let query_given = query.is_some();
+        if let Some(query) = query {
+            self.tools.show_query();
+            self.query_engine = query.language;
+            self.query_text.clone_from(&query.text);
+            self.query_follow_cursor = true;
+            if let Some(file) = &query.file {
+                self.workspace_pane.note_dropped(file, query.text);
+            }
+        }
+        if let Some(source) = open {
+            self.run_after_load = query_given;
+            match source {
+                crate::cli::Source::File(path) => self.open_file(path),
+                crate::cli::Source::Url(url) => self.open_url(url),
+                crate::cli::Source::Stdin => self.open_stdin(),
+            }
+        }
+        if !merge.is_empty() {
+            self.tools.add_files(ctx, merge);
+        }
+        if let Some((tool, files)) = tool {
+            if let Some(request) = self.tools.open_files(ctx, tool, &files) {
+                self.apply_tools_request(ctx, request);
+            }
+        }
     }
 
     /// Load whatever the toolbar's source field holds — a URL or a local
@@ -1733,6 +1780,7 @@ impl App {
                 matches!(
                     d.source,
                     DocumentSource::Pasted
+                        | DocumentSource::Stdin
                         | DocumentSource::Merged(_)
                         | DocumentSource::Derived { .. }
                 )
@@ -1868,7 +1916,10 @@ impl App {
         if let Some(doc) = &self.doc {
             if matches!(
                 doc.source,
-                DocumentSource::Pasted | DocumentSource::Merged(_) | DocumentSource::Derived { .. }
+                DocumentSource::Pasted
+                    | DocumentSource::Stdin
+                    | DocumentSource::Merged(_)
+                    | DocumentSource::Derived { .. }
             ) {
                 ui.label(doc.source.label());
             }
@@ -3375,8 +3426,16 @@ fn info_button(ui: &mut egui::Ui, info: &mut InfoWindow) {
 pub struct Shared(Arc<Mutex<App>>);
 
 impl Shared {
-    pub fn new(cc: &eframe::CreationContext<'_>, store: Store, settings: Settings) -> Self {
-        let app = Arc::new(Mutex::new(App::new(cc, store, settings)));
+    /// The app, started as the command line asks (`launch`).
+    pub fn new(
+        cc: &eframe::CreationContext<'_>,
+        store: Store,
+        settings: Settings,
+        launch: crate::cli::Launch,
+    ) -> Self {
+        let mut app = App::new(cc, store, settings);
+        app.launch(&cc.egui_ctx, launch);
+        let app = Arc::new(Mutex::new(app));
         #[cfg(feature = "mcp")]
         mcp::Link::attach(&app, &cc.egui_ctx);
         Self(app)
@@ -4081,17 +4140,17 @@ fn dock_all_button(ui: &mut egui::Ui, dock: &mut Dock) {
     }
 }
 
-/// What the toolbar's source field asks to load.
+/// What the toolbar's source field (or the command line) asks to load.
 #[derive(Debug, PartialEq)]
-enum SourceInput {
+pub(crate) enum SourceInput {
     Url(String),
     Path(PathBuf),
 }
 
 /// Read the toolbar's source field: an `http://` or `https://` address is a
-/// download, anything else a local path. Surrounding whitespace and one pair
-/// of quotes (which a file manager's "Copy as path" adds) are dropped, and a
-/// leading `~` means the home directory. `None` for a blank field.
+/// download, anything else a local path (see [`source_of_text`]). Surrounding
+/// whitespace and one pair of quotes (which a file manager's "Copy as path"
+/// adds) are dropped. `None` for a blank field.
 fn parse_source_input(text: &str) -> Option<SourceInput> {
     let text = text.trim();
     let text = ['"', '\'']
@@ -4102,18 +4161,86 @@ fn parse_source_input(text: &str) -> Option<SourceInput> {
     if text.is_empty() {
         return None;
     }
-    let is_url = ["http://", "https://"].iter().any(|scheme| {
-        text.get(..scheme.len())
-            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(scheme))
-    });
-    if is_url {
-        return Some(SourceInput::Url(text.to_owned()));
+    Some(source_of_text(text))
+}
+
+/// What `text` names: an `http://` or `https://` address is a download, anything
+/// else a local path — a `file://` address is one (what a desktop's launcher may
+/// hand over for a file), and a leading `~` means the home directory.
+pub(crate) fn source_of_text(text: &str) -> SourceInput {
+    if starts_with_ignoring_case(text, "http://") || starts_with_ignoring_case(text, "https://") {
+        return SourceInput::Url(text.to_owned());
+    }
+    if let Some(path) = path_of_file_address(text) {
+        return SourceInput::Path(path);
     }
     let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"));
-    Some(SourceInput::Path(expand_home(
-        text,
-        home.map(PathBuf::from),
-    )))
+    SourceInput::Path(expand_home(text, home.map(PathBuf::from)))
+}
+
+/// `text` without `prefix`, if it starts with it, in any case.
+fn strip_prefix_ignoring_case<'a>(text: &'a str, prefix: &str) -> Option<&'a str> {
+    text.get(..prefix.len())
+        .filter(|start| start.eq_ignore_ascii_case(prefix))
+        .map(|_| &text[prefix.len()..])
+}
+
+fn starts_with_ignoring_case(text: &str, prefix: &str) -> bool {
+    strip_prefix_ignoring_case(text, prefix).is_some()
+}
+
+/// The path of the file a `file://` address names (`file:///home/me/a%20b.json`,
+/// or with `localhost` for its computer), or none if `text` is not one or names a
+/// file on another computer. On Windows the drive follows the third slash
+/// (`file:///C:/data/a.json`).
+fn path_of_file_address(text: &str) -> Option<PathBuf> {
+    let rest = strip_prefix_ignoring_case(text, "file://")?;
+    let rest = strip_prefix_ignoring_case(rest, "localhost").unwrap_or(rest);
+    if !rest.starts_with('/') {
+        return None;
+    }
+    // A query or a fragment is not part of the file's name (a `?` or `#` in the
+    // name is `%3F` or `%23`).
+    let rest = rest.split(['?', '#']).next().unwrap_or(rest);
+    let bytes = percent_decoded(rest);
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStringExt;
+        Some(PathBuf::from(std::ffi::OsString::from_vec(bytes)))
+    }
+    #[cfg(not(unix))]
+    {
+        let text = String::from_utf8(bytes).ok()?;
+        let drive = text.as_bytes();
+        let text = if drive.len() > 2 && drive[1].is_ascii_alphabetic() && drive[2] == b':' {
+            &text[1..]
+        } else {
+            &text[..]
+        };
+        Some(PathBuf::from(text))
+    }
+}
+
+/// `text` with each `%` and the two hexadecimal digits after it put back as the
+/// byte they stand for; a `%` that is not followed by two is left as it is.
+fn percent_decoded(text: &str) -> Vec<u8> {
+    let bytes = text.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let hex = |at: usize| bytes.get(at).and_then(|b| (*b as char).to_digit(16));
+        match (bytes[i], hex(i + 1), hex(i + 2)) {
+            (b'%', Some(high), Some(low)) => {
+                decoded.push((high * 16 + low) as u8);
+                i += 3;
+            }
+            (byte, ..) => {
+                decoded.push(byte);
+                i += 1;
+            }
+        }
+    }
+    decoded
 }
 
 /// `~` or `~/rest` → `home` or `home/rest`; anything else (including `~user`,
@@ -4134,7 +4261,7 @@ fn default_filename_for_source(source: &DocumentSource) -> String {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| "data.json".to_string()),
-        DocumentSource::Pasted => "data.json".to_string(),
+        DocumentSource::Pasted | DocumentSource::Stdin => "data.json".to_string(),
         DocumentSource::Merged(_) => "merged.json".to_string(),
         DocumentSource::Derived { file_name, .. } => (*file_name).to_string(),
         DocumentSource::Url(url) => url
@@ -4258,6 +4385,35 @@ mod tests {
             parse_source_input("ftp://host/a.json"),
             Some(SourceInput::Path(PathBuf::from("ftp://host/a.json")))
         );
+    }
+
+    #[test]
+    fn source_input_a_file_address_is_the_path_of_its_file() {
+        let path = |p: &str| Some(SourceInput::Path(PathBuf::from(p)));
+        let (address, file) = if cfg!(windows) {
+            ("file:///C:/My%20Data/a%23b.json", "C:/My Data/a#b.json")
+        } else {
+            (
+                "file:///home/me/My%20Data/a%23b.json",
+                "/home/me/My Data/a#b.json",
+            )
+        };
+        assert_eq!(parse_source_input(address), path(file));
+        let local = address.replacen("file://", "FILE://localhost", 1);
+        assert_eq!(parse_source_input(&local), path(file), "{local}");
+        assert_eq!(
+            parse_source_input(&format!("{address}#part")),
+            path(file),
+            "a fragment is not part of the name"
+        );
+        // A file on another computer is not one this one can open as a path.
+        assert_eq!(
+            parse_source_input("file://server/share/a.json"),
+            path("file://server/share/a.json")
+        );
+        // A % that is not followed by two digits is left as it is.
+        assert_eq!(percent_decoded("a%2"), b"a%2");
+        assert_eq!(percent_decoded("100%25%zz"), b"100%%zz");
     }
 
     #[test]

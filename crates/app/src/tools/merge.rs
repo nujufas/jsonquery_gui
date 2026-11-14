@@ -121,6 +121,13 @@ impl Merge {
         run.then(|| self.start())
     }
 
+    /// `files` added to the list, and the merge started (the command line's
+    /// `--merge`); nothing is started if no file is in the list.
+    pub(super) fn use_files(&mut self, files: &[PathBuf]) -> Option<Request> {
+        self.add(files.iter().cloned());
+        (!self.files.is_empty()).then(|| self.start())
+    }
+
     /// What was merged no longer matches the files or the filter.
     fn inputs_changed(&mut self) {
         self.run.clear();

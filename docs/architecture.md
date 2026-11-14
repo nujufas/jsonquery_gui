@@ -60,8 +60,10 @@ Pasted text and a URL download of under 256 MiB skip straight to parsing; a
 larger download is streamed into a temporary file (readable by its owner only,
 and with no name from the moment it is made: unlinked on Unix, made to be
 deleted when it is closed on Windows), which goes through the same loader, so
-that a download is indexed as a file is. The result of a merge is kept the same
-way when it is that big (below).
+that a download is indexed as a file is. What is piped into the app (`-` on its
+[command line](command-line.md)) is read the same way as a download, up to the
+same ceiling, on every system (`worker::read_piped`): Windows has no `/dev/stdin`
+to open. The result of a merge is kept the same way when it is that big (below).
 
 NDJSON (one JSON value per line) is handled as a shape of JSON input from
 the start, not a separate format — the file is treated as one-or-more

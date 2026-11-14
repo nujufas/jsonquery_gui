@@ -60,6 +60,9 @@ pub enum DocumentSource {
     File(PathBuf),
     /// JSON typed or pasted directly into the app, rather than opened from disk.
     Pasted,
+    /// What was piped into the app (`-` on its command line): held in memory when
+    /// it is small, in a temporary file nobody can see when it is not.
+    Stdin,
     /// Downloaded from a URL: held in memory when it is small, in a temporary
     /// file nobody can see when it is not.
     Url(String),
@@ -81,6 +84,7 @@ impl DocumentSource {
         match self {
             DocumentSource::File(p) => p.display().to_string(),
             DocumentSource::Pasted => "(pasted JSON)".to_string(),
+            DocumentSource::Stdin => "(standard input)".to_string(),
             DocumentSource::Url(url) => url.clone(),
             DocumentSource::Merged(files) => match files.len() {
                 1 => "(merged from 1 file)".to_string(),

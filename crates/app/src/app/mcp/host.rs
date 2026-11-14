@@ -1232,6 +1232,7 @@ fn document_of(doc: &Document, page: usize) -> Value {
         DocumentSource::File(path) => ("file", json!(path.display().to_string())),
         DocumentSource::Url(url) => ("web address", json!(url)),
         DocumentSource::Pasted => ("pasted", Value::Null),
+        DocumentSource::Stdin => ("standard input", Value::Null),
         DocumentSource::Merged(files) => (
             "merged",
             json!(files

@@ -472,6 +472,16 @@ cargo run --release -p jsonquery_gui
 4. To merge, format, diff, patch or validate documents instead, open the 🛠
    [Tools](#tools) window.
 
+From a terminal, the app opens what it is given, runs a query on it, or fills a tool
+and runs it ([Command line](docs/command-line.md); `jsonquery_gui --help`):
+
+```sh
+jsonquery_gui data.json --query ".items[] | .name"
+curl -s https://api.github.com/repos/jqlang/jq | jsonquery_gui -
+jsonquery_gui --diff old.json new.json
+jsonquery_gui --validate order.json order.schema.json
+```
+
 ## Building
 
 Native release build for the current platform, with `jsonquery-mcp` beside the app (the

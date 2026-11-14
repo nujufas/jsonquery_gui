@@ -167,6 +167,18 @@ impl Diff {
         }
     }
 
+    /// The documents in the files `left` and `right` (the command line's `--diff`);
+    /// and, with both there, compared.
+    pub(super) fn use_files(&mut self, left: &Path, right: Option<&Path>) -> Option<Request> {
+        self.left.load_file(left);
+        if let Some(right) = right {
+            self.right.load_file(right);
+        }
+        self.invalidate();
+        right?;
+        self.start()
+    }
+
     /// What was compared no longer matches what is on the page.
     fn invalidate(&mut self) {
         self.run.clear();

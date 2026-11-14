@@ -83,6 +83,13 @@ impl Format {
         self.run.clear();
     }
 
+    /// The document in the file `path` in the Input box, formatted (the command
+    /// line's `--format`).
+    pub(super) fn use_file(&mut self, path: &std::path::Path) -> Option<Request> {
+        self.open_document(path);
+        self.start()
+    }
+
     pub(super) fn ui(&mut self, ui: &mut egui::Ui, env: &mut Env) -> Option<Request> {
         if env.own_input && deliver(&mut [&mut self.input], dropped_files(ui.ctx())) {
             self.run.clear();

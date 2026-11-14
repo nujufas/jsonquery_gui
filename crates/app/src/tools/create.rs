@@ -249,6 +249,13 @@ impl Create {
         self.changed();
     }
 
+    /// The document in the file `path` in the Document box, and its schema made
+    /// (the command line's `--create-schema`).
+    pub(super) fn use_file(&mut self, path: &std::path::Path) -> Option<Request> {
+        self.open_document(path);
+        self.start()
+    }
+
     /// What was made no longer matches what is on the page.
     fn changed(&mut self) {
         self.unselect();

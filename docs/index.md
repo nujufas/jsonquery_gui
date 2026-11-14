@@ -8,8 +8,9 @@ open, fast to scroll, fast to query. This page covers the problem and goals;
 [Tutorial](tutorial.md) documents the built-in lessons window,
 [Workspace](workspace.md) covers your own saved queries, schemas, patches, web
 addresses and samples, [Settings](settings.md) covers the limits on file sizes, and
-what the app remembers of how you left it, and [MCP server](mcp.md) covers the server
-that lets an AI assistant work with the app.
+what the app remembers of how you left it, [Command line](command-line.md) covers what
+the app opens as it starts, and [MCP server](mcp.md) covers the server that lets an AI
+assistant work with the app.
 
 ## The problem
 

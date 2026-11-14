@@ -94,6 +94,8 @@ pub enum Command {
     OpenFile(PathBuf),
     OpenText(String),
     OpenUrl(String),
+    /// Open what is piped into the app (`-` on its command line).
+    OpenStdin,
     SaveFile {
         doc: Arc<Document>,
         /// The value to save: the whole document (`None`), or one node
@@ -304,6 +306,12 @@ pub fn spawn(
                 Command::OpenUrl(url) => {
                     send(&evt_tx, Event::Loading, &wake);
                     let result = download(&url, &std::env::temp_dir(), &limits).map(Arc::new);
+                    send_load_result(&evt_tx, result, &wake);
+                }
+                Command::OpenStdin => {
+                    send(&evt_tx, Event::Loading, &wake);
+                    let stdin = std::io::stdin().lock();
+                    let result = read_piped(stdin, &std::env::temp_dir(), &limits).map(Arc::new);
                     send_load_result(&evt_tx, result, &wake);
                 }
                 Command::SaveFile {
@@ -694,9 +702,6 @@ pub(crate) fn describe<V: ValueView>(root: V) -> String {
 /// can be left behind whatever happens, and a lazy document that is mapped from
 /// it has it for as long as it lives.
 fn download(url: &str, spill_dir: &Path, limits: &FileLimits) -> anyhow::Result<Document> {
-    use std::io::{Read, Write};
-
-    let spill_at = limits.keep_on_disk();
     let mut response = ureq::get(url)
         .call()
         .with_context(|| format!("requesting {url}"))?;
@@ -704,30 +709,133 @@ fn download(url: &str, spill_dir: &Path, limits: &FileLimits) -> anyhow::Result<
     // (The reader fails a read that comes after as many bytes as it is to let by,
     // which is the one that would have found the end of a body that is just that
     // long: one more is what makes "at most" so.)
-    let mut body = response
+    let body = response
         .body_mut()
         .with_config()
         .limit(limits.download().saturating_add(1))
         .reader();
+    load_stream(
+        body,
+        Stream {
+            source: DocumentSource::Url(url.to_string()),
+            name: url,
+            spill_dir,
+            spill_at: limits.keep_on_disk(),
+        },
+        |e| download_error(e, url, limits.download()),
+    )
+}
 
+/// What [`load_stream`] reads: what the document will say it came from, what an
+/// error calls it, and where and from what size it is kept in a temporary file.
+struct Stream<'a> {
+    source: DocumentSource,
+    name: &'a str,
+    spill_dir: &'a Path,
+    spill_at: u64,
+}
+
+/// Load what `reader` hands over, to its end: held in memory and parsed, as pasted
+/// text is, when it is less than `stream.spill_at` bytes (what the user keeps a
+/// file on disk from), and never touching the disk; else streamed into a temporary
+/// file in `stream.spill_dir` instead of being held in memory whole, and then loaded
+/// like a file opened from disk: mapped and indexed, not parsed. `read_error` says
+/// what a read that failed means.
+fn load_stream(
+    mut reader: impl std::io::Read,
+    stream: Stream<'_>,
+    read_error: impl Fn(std::io::Error) -> anyhow::Error,
+) -> anyhow::Result<Document> {
+    use std::io::{Read, Write};
+
+    let Stream {
+        source,
+        name,
+        spill_dir,
+        spill_at,
+    } = stream;
     let mut head = Vec::new();
-    (&mut body)
+    (&mut reader)
         .take(spill_at)
         .read_to_end(&mut head)
-        .map_err(|e| download_error(e, url, limits.download()))?;
+        .map_err(&read_error)?;
     if (head.len() as u64) < spill_at {
-        return jsonquery_core::load_bytes(&head, DocumentSource::Url(url.to_string()))
-            .with_context(|| format!("parsing data from {url}"));
+        return jsonquery_core::load_bytes(&head, source)
+            .with_context(|| format!("parsing data from {name}"));
     }
 
-    let mut file = create_spill_file(spill_dir, url)?;
+    let mut file = create_spill_file(spill_dir, name)?;
     let written = file.write_all(&head);
     drop(head);
     written.context("writing the temporary file")?;
-    std::io::copy(&mut body, &mut file).map_err(|e| download_error(e, url, limits.download()))?;
+    std::io::copy(&mut reader, &mut file).map_err(&read_error)?;
 
-    jsonquery_core::load_open_file(&file, DocumentSource::Url(url.to_string()), spill_at)
-        .with_context(|| format!("parsing data from {url}"))
+    jsonquery_core::load_open_file(&file, source, spill_at)
+        .with_context(|| format!("parsing data from {name}"))
+}
+
+/// Load what is piped into the app, as a download is loaded ([`load_stream`]), and
+/// up to as much as one may hand over (Settings: Largest download or pipe).
+fn read_piped(
+    piped: impl std::io::Read,
+    spill_dir: &Path,
+    limits: &FileLimits,
+) -> anyhow::Result<Document> {
+    let most = limits.download();
+    load_stream(
+        AtMost {
+            inner: piped,
+            left: most,
+        },
+        Stream {
+            source: DocumentSource::Stdin,
+            name: "standard input",
+            spill_dir,
+            spill_at: limits.keep_on_disk(),
+        },
+        |e| {
+            if e.get_ref().is_some_and(|inner| inner.is::<TooMuch>()) {
+                anyhow::anyhow!(
+                    "standard input hands over more than {}, the most that a download or a \
+                     pipe may hand over (Settings: Largest download or pipe)",
+                    human_bytes(most)
+                )
+            } else {
+                anyhow::Error::new(e).context("reading standard input")
+            }
+        },
+    )
+}
+
+/// A reader that fails a read that brings it past `left` bytes in all.
+struct AtMost<R> {
+    inner: R,
+    left: u64,
+}
+
+/// What [`AtMost`] fails with.
+#[derive(Debug)]
+struct TooMuch;
+
+impl std::fmt::Display for TooMuch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("more than may be read")
+    }
+}
+
+impl std::error::Error for TooMuch {}
+
+impl<R: std::io::Read> std::io::Read for AtMost<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let read = self.inner.read(buf)?;
+        match self.left.checked_sub(read as u64) {
+            Some(left) => {
+                self.left = left;
+                Ok(read)
+            }
+            None => Err(std::io::Error::other(TooMuch)),
+        }
+    }
 }
 
 /// What went wrong reading a download's body. One that is over the limit on
@@ -1483,6 +1591,78 @@ mod tests {
         assert_eq!(value_of(&doc), serde_json::json!([1, 2, 3]));
         drop(doc);
         assert_eq!(files_in(&dir), 0, "nothing is left once it is closed");
+    }
+
+    // ---- what is piped in (`-` on the command line) ------------------------
+
+    #[test]
+    fn what_is_piped_in_is_parsed_from_memory_when_it_is_small() {
+        let nowhere = temp_dir("piped-small").join("not-there");
+        let piped = &br#"{"n": [1, 2, 3]}"#[..];
+        let doc = read_piped(piped, &nowhere, &keeping_on_disk_from(1024)).unwrap();
+        assert_eq!(doc.tree(), Some(&serde_json::json!({"n": [1, 2, 3]})));
+        assert_eq!(doc.byte_len, 16);
+        assert_eq!(doc.source.label(), "(standard input)");
+        assert!(!doc.is_lazy());
+    }
+
+    #[test]
+    fn what_is_piped_in_is_kept_in_a_file_nobody_sees_when_it_is_large() {
+        let dir = temp_dir("piped-large");
+        let piped = padded(5000);
+        let doc = read_piped(&piped[..], &dir, &keeping_on_disk_from(1024)).unwrap();
+        assert!(doc.is_lazy() && doc.lazy().unwrap().is_mapped());
+        assert_eq!(value_of(&doc), serde_json::json!([1, 2, 3]));
+        assert_eq!(
+            (doc.byte_len, doc.source.label()),
+            (5000, "(standard input)".to_owned())
+        );
+        #[cfg(unix)]
+        assert_eq!(files_in(&dir), 0, "no file, though the document is open");
+        drop(doc);
+        assert_eq!(files_in(&dir), 0, "nothing is left once it is closed");
+    }
+
+    #[test]
+    fn what_is_piped_in_may_be_as_much_as_a_download_and_no_more() {
+        let limits = limits_with(&[(Limit::KeepOnDisk, 1024), (Limit::Download, 2048)]);
+        let dir = temp_dir("piped-most");
+        let doc = read_piped(&padded(2048)[..], &dir, &limits).unwrap();
+        assert_eq!(value_of(&doc), serde_json::json!([1, 2, 3]), "just as much");
+        drop(doc);
+        let err = read_piped(&padded(2049)[..], &dir, &limits)
+            .err()
+            .expect("one byte more");
+        assert_eq!(
+            format!("{err:#}"),
+            "standard input hands over more than 2.0 KB, the most that a download or a pipe \
+             may hand over (Settings: Largest download or pipe)"
+        );
+        // In memory too: the limit is not only for what is kept on disk.
+        let small = limits_with(&[(Limit::KeepOnDisk, 1 << 20), (Limit::Download, 2048)]);
+        assert!(read_piped(&padded(4096)[..], &dir, &small).is_err());
+        assert_eq!(files_in(&dir), 0);
+    }
+
+    #[test]
+    fn a_pipe_that_fails_says_so() {
+        struct Broken;
+        impl std::io::Read for Broken {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("the other end went away"))
+            }
+        }
+        let err = read_piped(
+            Broken,
+            &temp_dir("piped-broken"),
+            &keeping_on_disk_from(1024),
+        )
+        .err()
+        .expect("an error");
+        assert_eq!(
+            format!("{err:#}"),
+            "reading standard input: the other end went away"
+        );
     }
 
     #[test]

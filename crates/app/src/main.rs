@@ -4,6 +4,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod cli;
 mod dock;
 mod pane_header;
 mod query_highlight;
@@ -59,6 +60,8 @@ fn main_window(interface: &settings::Interface) -> egui::ViewportBuilder {
 }
 
 fn main() -> eframe::Result {
+    let launch = read_the_command_line();
+
     // What the user set and how they left the window (`settings.rs`) is read
     // before the window opens, which is opened as it was left.
     let mut store = settings::Store::standard();
@@ -71,8 +74,62 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "jsonquery_gui",
         native_options,
-        Box::new(move |cc| Ok(Box::new(app::Shared::new(cc, store, settings)))),
+        Box::new(move |cc| Ok(Box::new(app::Shared::new(cc, store, settings, launch)))),
     )
+}
+
+/// What the command line asks the app to start with (`cli.rs`). `--help` and
+/// `--version` are printed here, and end the program before any window opens; so
+/// does a command line that cannot be done, which is said, and ends it with 2.
+fn read_the_command_line() -> cli::Launch {
+    use std::io::IsTerminal;
+
+    let program = cli::program_name(
+        std::env::args_os().next().as_deref(),
+        std::env::var_os("SNAP_NAME").as_deref(),
+        std::env::var_os("APPIMAGE").as_deref(),
+    );
+    let cwd = std::env::current_dir()
+        .ok()
+        .map(|physical| cli::working_folder(std::env::var_os("PWD").as_deref(), physical));
+    let read_query =
+        |path: &std::path::Path| workspace::read_text(path, workspace_pane::QUERY_LIMIT);
+    match cli::parse(std::env::args_os().skip(1), cwd.as_deref(), read_query) {
+        Ok(cli::Ask::Help) => print_and_end(&cli::help(&program)),
+        Ok(cli::Ask::Version) => print_and_end(&cli::version(&program)),
+        Err(error) => end_with_error(&program, &error),
+        Ok(cli::Ask::Run(launch)) => {
+            // A terminal is not a pipe: reading it would wait for whoever is at it.
+            if launch.open == Some(cli::Source::Stdin) && std::io::stdin().is_terminal() {
+                end_with_error(
+                    &program,
+                    "- opens what is piped in, and nothing is (the input is a terminal)",
+                );
+            }
+            launch
+        }
+    }
+}
+
+/// Print `text`, and end the program.
+fn print_and_end(text: &str) -> ! {
+    use std::io::Write;
+    cli::use_the_terminal();
+    let mut out = std::io::stdout();
+    let _ = writeln!(out, "{}", text.trim_end());
+    let _ = out.flush();
+    std::process::exit(0)
+}
+
+/// Say what of the command line cannot be done, and end the program with 2.
+fn end_with_error(program: &str, error: &str) -> ! {
+    use std::io::Write;
+    cli::use_the_terminal();
+    let _ = writeln!(
+        std::io::stderr(),
+        "{program}: {error}\nSee {program} --help."
+    );
+    std::process::exit(2)
 }
 
 #[cfg(test)]
