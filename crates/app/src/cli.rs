@@ -847,9 +847,9 @@ mod tests {
             program_name(
                 os("/tmp/.mount/usr/bin/jsonquery_gui"),
                 None,
-                os("/home/me/jsonquery_gui-0.5.4-x86_64.AppImage")
+                os("/home/me/jsonquery_gui-0.6.0-x86_64.AppImage")
             ),
-            "jsonquery_gui-0.5.4-x86_64.AppImage"
+            "jsonquery_gui-0.6.0-x86_64.AppImage"
         );
         assert_eq!(program_name(None, os(""), None), "jsonquery_gui");
     }

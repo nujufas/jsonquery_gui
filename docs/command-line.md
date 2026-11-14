@@ -2,7 +2,7 @@
 
 What `jsonquery_gui` opens as it starts. In the snap the command is `jsonquery-gui`;
 an AppImage takes the same arguments after its file name
-(`./jsonquery_gui-0.5.4-x86_64.AppImage data.json`). `jsonquery_gui --help` prints
+(`./jsonquery_gui-0.6.0-x86_64.AppImage data.json`). `jsonquery_gui --help` prints
 all of this in short.
 
 ## A document, and a query to run on it
