@@ -154,9 +154,11 @@ patches and validates documents too. Built in Rust with
   use the six Tools; if you allow it (Edit), it also shows you its queries in
   the window and saves in the workspace, asking you first before anything is
   deleted or replaced, unless you always allow it. Answers come a page at a
-  time, of a size you set: small for a model that runs on your own computer.
-  The server listens on this computer only, runs only once you start it, and
-  by default may only look. See [MCP server](docs/mcp.md).
+  time, of a size you set: small for a model that runs on your own computer
+  (with QuickAI, use Qwen3.5-9B-Q4_K_M or better, with a context of 32K tokens
+  or more). The server listens on this computer only, runs only once you start
+  it, and by default may only look. See [MCP server](docs/mcp.md), and the 📖
+  tutorial's **AI assistants** tab.
 - **Keyboard shortcuts** — `Ctrl+Enter` run/apply, `Ctrl+F` search,
   `Ctrl+S` save (both scoped to whichever panel you last clicked), `F1`
   tutorial.

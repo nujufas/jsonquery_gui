@@ -7,9 +7,11 @@ opens in its own window so it can sit beside the main one.
 
 ## What you see
 
-- **Five tabs** across the top — **jq** (the default), **JSON Pointer**,
-  **JSONPath**, **JMESPath** and **Tools** (see [The Tools tab](#the-tools-tab)).
-  Each tab remembers the lesson you were on.
+- **Seven tabs** across the top — **jq** (the default), **JSON Pointer**,
+  **JSONPath**, **JMESPath**, **Tools** (see [The Tools tab](#the-tools-tab)),
+  **AI assistants** and **General** (see [The help tabs](#the-help-tabs)). Each
+  tab remembers the lesson you were on. In a window too narrow for all of them,
+  the tabs take two rows.
 - **A topic tree** on the left: topics (expand/collapse) containing lessons.
   The filter box narrows it by lesson title, summary or example query.
 - **The lesson** on the right: a one- or two-sentence summary, one to three
@@ -48,6 +50,26 @@ because a plain JMESPath path such as `office.city` is otherwise
 auto-detected as jq. Loading brings the main window to the front and shows a
 confirmation in the tutorial's status bar. The last lesson of each dialect is
 a **cheat sheet** whose rows each have their own ▶.
+
+## The help tabs
+
+Two tabs help with what only the desktop app has, in lessons of words, commands
+to copy (each with a **Copy** button) and pictures:
+
+- **AI assistants** — what MCP is and JsonQuery's 27 tools, starting the server,
+  Read and Edit, adding it to Claude Code, Claude Desktop, VS Code, QuickAI (which
+  needs Qwen3.5-9B-Q4_K_M or better, with 32K tokens of context or more; with a link
+  to get it) and other assistants, with pictures of Claude Code, VS Code and QuickAI
+  set up and at work, what to ask, and large documents. Only in the builds that have
+  the server: not in the `_nomcp` ones.
+- **General** — the [command line](command-line.md) (opening a document, running a
+  query as it opens, opening a tool, help and mistakes), the keys, big files, the
+  Workspace, and where to read more.
+
+Their lessons are in the app (`crates/app/src/tutorial/help.rs`), not with the
+query and Tools lessons of `crates/query`: they are about the desktop app alone.
+Every command line a lesson shows is one that the app's parser takes (a test says
+so), and the Claude Code lesson shows the command that the panel's button copies.
 
 ## The Tools tab
 
@@ -90,6 +112,7 @@ files go in the Merge list. The lessons:
 | `crates/query/src/tutorial/tools.rs` | The Tools tab: its `TOPICS` (`ToolTopic` → `ToolLesson` → `ToolExample`, each with a `Setting` and its `Sample`s) and `run`, which runs an example's tool on its samples. No egui. |
 | `crates/app/src/tutorial.rs` | The window: tabs, tree, lesson view, and the hand-off to the main window. |
 | `crates/app/src/tutorial/tools_tab.rs` | The Tools tab's lesson view. `Tools::try_example` (in `tools.rs`) puts an example's samples in its page; `App::apply_tutorial_request` hands it over. |
+| `crates/app/src/tutorial/help.rs`, `help_tab.rs` | The help tabs (AI assistants, General): their lessons (`HelpTopic` → `HelpLesson`, with `Snippet`s to copy and `Picture`s from `assets/help/`) and their view. |
 | `crates/app/src/query_highlight.rs` | The chip palette (`part_color`), shared with the main window's query box, which tints the query you type the same way — its steps come from `jsonquery_query::highlight` instead of a lesson's hand-written fragments. |
 | `App::apply_tutorial_request` in `app.rs` | Applies a load request. *▶ Try it* sets `run_after_load`, because loading a document is asynchronous and finishing a load cancels any query already running — so the query is started from the `Loaded` event. |
 

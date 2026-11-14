@@ -59,6 +59,42 @@ Copy it again after you move the app or the AppImage, or after an upgrade puts t
 its new version. The buttons are greyed out when `jsonquery-mcp` is not beside the app: in the
 Microsoft Store's package, and in a build of the app alone.
 
+### Claude Code
+
+Run the command that the **Claude Code** button copies in a terminal: `claude mcp list` then says
+`jsonquery: http://127.0.0.1:7457/mcp (HTTP) - ✓ Connected`, and Claude Code has the tools.
+
+![JsonQuery with a query in its box, and Claude Code in a terminal beside it: it answers from the open document, then puts its query in JsonQuery's query box and runs it](images/mcp-claude-code-chat.png)
+
+### VS Code
+
+Put the entry that the **VS Code** button copies in VS Code's `mcp.json` (your own, or a folder's
+`.vscode/mcp.json`) and press **Start** above it: VS Code says that it runs, and how many tools it
+has.
+
+![VS Code's mcp.json with JsonQuery's entry, its token hidden here, started: Running, 27 tools](images/mcp-vscode-config.png)
+
+That entry is for GitHub Copilot's chat. The Claude Code extension in VS Code takes a folder's
+`.mcp.json` instead: the **JSON** button's entry, or the **Claude Code** button's command run in the
+folder.
+
+![JsonQuery with a query in its box, and Claude Code in VS Code beside it: with the folder's .mcp.json it answers from the open document, then puts its query in JsonQuery's query box and runs it](images/mcp-vscode-chat.png)
+
+### QuickAI
+
+QuickAI runs the model on your own computer, so your documents stay on it. The **QuickAI** button
+copies the entry; in QuickAI's **MCP servers**, open *Paste the JSON of a server's instructions*,
+paste it, and press **Add these**.
+
+![QuickAI's MCP servers page, with the entry JsonQuery's QuickAI button copied pasted in](images/mcp-quickai-config.png)
+
+JsonQuery's tools need a capable model: **Qwen3.5-9B-Q4_K_M or better** (a bigger model, or one
+less quantized), with a good context length: **32K tokens or more**. The tools take about 7K tokens
+before the first question, and an answer up to 6K more with **Answers** at 24 KB; with a smaller
+context, choose Answers of 8 KB in the panel.
+
+![JsonQuery with a query in its box, and QuickAI's chat beside it: Qwen3.5-9B answers from the open document, then, with Edit allowed, puts its query in JsonQuery's query box and runs it](images/mcp-quickai-chat.png)
+
 ## What the assistant may do
 
 The panel's **Allow** says how far the assistant may go:

@@ -3398,7 +3398,8 @@ fn info_window_contents(ui: &mut egui::Ui) {
 }
 
 /// A link that opens in the browser, and that a right click copies the address of.
-fn link(ui: &mut egui::Ui, text: &str, url: String) {
+/// A link to a web page, opened in the browser, with *Copy link* on a right click.
+pub(crate) fn link(ui: &mut egui::Ui, text: &str, url: String) {
     let response = ui.hyperlink_to(text, &url);
     response.context_menu(|ui| {
         if ui.button("Copy link").clicked() {

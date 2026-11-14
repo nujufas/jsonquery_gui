@@ -9,6 +9,7 @@ use crate::scratch_dir::{ScratchDir, ScratchFile};
 use egui::containers::panel::PanelState;
 use std::collections::HashMap;
 
+mod help_tests;
 mod launch_tests;
 mod query_drop_tests;
 mod workspace_drag_tests;

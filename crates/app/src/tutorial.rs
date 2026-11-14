@@ -1,6 +1,7 @@
 //! The tutorial window: a second native window (an egui *viewport*) with one
-//! tab per query dialect and one for the Tools, a topic tree on the left and the
-//! selected lesson on the right. The lessons themselves are data in
+//! tab per query dialect, one for the Tools, and the tabs of help on what only the
+//! desktop app has (General, and MCP where the build has the server: `help.rs`),
+//! a topic tree on the left and the selected lesson on the right. The lessons themselves are data in
 //! `jsonquery_query::tutorial` (and unit-tested there against the real engines
 //! and tools); this file is only presentation plus the hand-off that lets a
 //! reader push an example's data and/or query into the main window — or a Tools
@@ -25,6 +26,8 @@ use jsonquery_query::Kind;
 
 use crate::query_highlight::part_color;
 
+mod help;
+mod help_tab;
 mod tools_tab;
 
 /// How long the "Loaded in the main window" confirmation stays in the
@@ -54,22 +57,51 @@ pub struct LoadRequest {
     pub run: bool,
 }
 
-/// A tab of the window: a query dialect's lessons, or the Tools'.
+/// A tab of the window: a query dialect's lessons, the Tools', or help on what only
+/// the desktop app has.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Tab {
     Query(Kind),
     Tools,
+    /// The command line, the keys, big files, the Workspace, where to read more.
+    General,
+    /// The MCP server for AI assistants.
+    #[cfg(feature = "mcp")]
+    Mcp,
 }
 
 impl Tab {
-    /// Left to right: the dialects, then the Tools.
-    const ALL: [Tab; 5] = [
+    /// Left to right: the dialects, the Tools, the MCP server, then General.
+    #[cfg(feature = "mcp")]
+    const ALL: [Tab; 7] = [
         Tab::Query(Kind::ALL[0]),
         Tab::Query(Kind::ALL[1]),
         Tab::Query(Kind::ALL[2]),
         Tab::Query(Kind::ALL[3]),
         Tab::Tools,
+        Tab::Mcp,
+        Tab::General,
     ];
+    /// Left to right: the dialects, the Tools, then General.
+    #[cfg(not(feature = "mcp"))]
+    const ALL: [Tab; 6] = [
+        Tab::Query(Kind::ALL[0]),
+        Tab::Query(Kind::ALL[1]),
+        Tab::Query(Kind::ALL[2]),
+        Tab::Query(Kind::ALL[3]),
+        Tab::Tools,
+        Tab::General,
+    ];
+
+    /// The topics of a tab of help.
+    fn help(self) -> Option<&'static [help::HelpTopic]> {
+        match self {
+            Tab::General => Some(help::GENERAL_TOPICS),
+            #[cfg(feature = "mcp")]
+            Tab::Mcp => Some(help::MCP_TOPICS),
+            Tab::Query(_) | Tab::Tools => None,
+        }
+    }
 
     /// Its place in [`Tab::ALL`].
     fn slot(self) -> usize {
@@ -80,6 +112,9 @@ impl Tab {
         match self {
             Tab::Query(kind) => content::title(kind),
             Tab::Tools => "Tools",
+            Tab::General => "General",
+            #[cfg(feature = "mcp")]
+            Tab::Mcp => "AI assistants",
         }
     }
 
@@ -87,6 +122,9 @@ impl Tab {
         match self {
             Tab::Query(kind) => content::tagline(kind),
             Tab::Tools => tool_lessons::tagline(),
+            Tab::General => help::GENERAL_TAGLINE,
+            #[cfg(feature = "mcp")]
+            Tab::Mcp => help::MCP_TAGLINE,
         }
     }
 
@@ -98,6 +136,12 @@ impl Tab {
                 .map(|t| (t.title, t.lessons.iter().map(|l| l.title).collect()))
                 .collect(),
             Tab::Tools => tool_lessons::TOPICS
+                .iter()
+                .map(|t| (t.title, t.lessons.iter().map(|l| l.title).collect()))
+                .collect(),
+            _ => self
+                .help()
+                .unwrap_or_default()
                 .iter()
                 .map(|t| (t.title, t.lessons.iter().map(|l| l.title).collect()))
                 .collect(),
@@ -115,8 +159,23 @@ impl Tab {
                 .get(t)
                 .and_then(|topic| topic.lessons.get(l))
                 .is_some_and(|lesson| tool_lessons::lesson_matches(lesson, needle)),
+            _ => self
+                .help()
+                .and_then(|topics| topics.get(t))
+                .and_then(|topic| topic.lessons.get(l))
+                .is_some_and(|lesson| lesson.matches(needle)),
         }
     }
+}
+
+/// The MCP tab's lesson on Claude Code, which shows the command its button copies.
+#[cfg(all(test, feature = "mcp"))]
+pub(crate) fn claude_code_lesson() -> &'static str {
+    help::MCP_TOPICS
+        .iter()
+        .flat_map(|topic| topic.lessons)
+        .find(|lesson| lesson.title == "Claude Code")
+        .map_or("", |lesson| lesson.summary)
 }
 
 pub struct Tutorial {
@@ -124,7 +183,7 @@ pub struct Tutorial {
     tab: Tab,
     /// Selected (topic, lesson) for each tab, indexed like `Tab::ALL`, so
     /// switching tabs returns to where the reader left off.
-    selected: [(usize, usize); 5],
+    selected: [(usize, usize); Tab::ALL.len()],
     filter: String,
     /// Live results, computed once per (dialect, data, query) — the sample
     /// documents are tiny, but there's no reason to recompile every frame.
@@ -145,6 +204,9 @@ pub struct Tutorial {
     /// late, which is imperceptible.
     hovered: Option<(usize, usize)>,
     icon: Option<Arc<egui::IconData>>,
+    /// The pictures of the help's lessons, made into textures once each (none for one
+    /// that would not decode).
+    pictures: HashMap<&'static str, Option<egui::TextureHandle>>,
 }
 
 impl Default for Tutorial {
@@ -152,7 +214,7 @@ impl Default for Tutorial {
         Self {
             open: false,
             tab: Tab::Query(Kind::Jq),
-            selected: [(0, 0); 5],
+            selected: [(0, 0); Tab::ALL.len()],
             filter: String::new(),
             outcomes: HashMap::new(),
             tool_outcomes: HashMap::new(),
@@ -161,6 +223,7 @@ impl Default for Tutorial {
             reveal: None,
             hovered: None,
             icon: None,
+            pictures: HashMap::new(),
         }
     }
 }
@@ -181,6 +244,13 @@ impl Tutorial {
 
     pub fn is_open(&self) -> bool {
         self.open
+    }
+
+    /// How many pictures of the help's lessons have been made into textures (the
+    /// pictures are the AI assistants tab's).
+    #[cfg(all(test, feature = "mcp"))]
+    pub fn pictures_made(&self) -> usize {
+        self.pictures.values().flatten().count()
     }
 
     /// The window was closed (by the user): stop showing it.
@@ -278,7 +348,8 @@ impl Tutorial {
 
     fn tab_bar(&mut self, ui: &mut egui::Ui) {
         ui.add_space(6.0);
-        ui.horizontal(|ui| {
+        // One row, but in a window too narrow for all of them, a second.
+        ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().button_padding = egui::vec2(14.0, 6.0);
             for tab in Tab::ALL {
                 let text = RichText::new(tab.title()).size(15.0);
@@ -308,6 +379,16 @@ impl Tutorial {
                     "▶ Try it puts the samples in the tool's page and runs it — then change \
                      them and run it again.",
                 );
+            }
+            #[cfg(feature = "mcp")]
+            None if self.tab == Tab::Mcp => {
+                ui.weak(
+                    "The plug with AI, left of the ⚙ in the main window's status bar, opens the \
+                     server's panel.",
+                );
+            }
+            None if self.tab.help().is_some() => {
+                ui.weak("Copy puts a command on the clipboard, to paste where it goes.");
             }
             None => {
                 ui.weak(
@@ -373,6 +454,12 @@ impl Tutorial {
         match self.tab {
             Tab::Query(kind) => self.query_lesson_view(ui, kind).map(Request::Query),
             Tab::Tools => self.tools_lesson_view(ui),
+            tab => {
+                if let Some(topics) = tab.help() {
+                    self.help_lesson_view(ui, tab, topics);
+                }
+                None
+            }
         }
     }
 
@@ -894,4 +981,28 @@ pub(crate) fn prose(ui: &mut egui::Ui, text: &str) -> egui::Response {
         }
     }
     ui.add(egui::Label::new(job).wrap_mode(TextWrapMode::Wrap))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mcp_follows_the_tools_where_the_server_is_and_general_is_last() {
+        let titles: Vec<&str> = Tab::ALL.iter().map(|tab| tab.title()).collect();
+        let first = &titles[..5];
+        assert_eq!(
+            first,
+            ["jq", "JSON Pointer", "JSONPath", "JMESPath", "Tools"]
+        );
+        if cfg!(feature = "mcp") {
+            assert_eq!(&titles[5..], ["AI assistants", "General"]);
+        } else {
+            assert_eq!(&titles[5..], ["General"]);
+        }
+        for tab in Tab::ALL {
+            assert_eq!(tab.help().is_some(), tab.slot() >= 5, "{tab:?}");
+            assert!(!tab.outline().is_empty(), "{tab:?}");
+        }
+    }
 }

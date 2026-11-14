@@ -567,6 +567,13 @@ fn the_configurations_carry_the_address_and_the_token() {
             "claude mcp add --transport http jsonquery {url} --header \"Authorization: Bearer {token}\""
         )
     );
+    // The tutorial's MCP tab shows that command, with "…" for the token.
+    let shown = app
+        .mcp
+        .configuration("Claude Code", None)
+        .replace(&token, "…");
+    let lesson = crate::tutorial::claude_code_lesson();
+    assert!(lesson.contains(&shown), "{shown:?} is not in {lesson:?}");
     let vscode: Value = serde_json::from_str(&app.mcp.configuration("VS Code", None)).unwrap();
     assert_eq!(vscode["servers"]["jsonquery"]["type"], "http");
     assert_eq!(vscode["servers"]["jsonquery"]["url"], url);
