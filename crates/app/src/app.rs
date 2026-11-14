@@ -2614,9 +2614,9 @@ impl App {
         // The right side is laid out right to left: the (i) first, so that it
         // stays in the corner, then the 🌐 that opens the website, and the ⚙ that
         // opens the Settings, where they are whether the Tools are docked or not.
-        // Then, docked, the 🗗 that undocks them (the one way out: the row of tabs
-        // has none), then, on native Wayland, the alert (⚠), and last, in the build
-        // with the MCP server, its 🔌.
+        // Then the 🔌 of the MCP server, beside the ⚙ (but in the builds made
+        // without it), then, docked, the 🗗 that undocks them (the one way out: the
+        // row of tabs has none), and on native Wayland the alert (⚠).
         //
         // With the page of a tool in front (the Tools docked), the status text is
         // the tool's: what the page says of its result, and the last thing it did.
@@ -2643,14 +2643,12 @@ impl App {
                 info_button(ui, &mut info_window);
                 website_button(ui);
                 settings_button(ui, &mut settings_window);
+                #[cfg(feature = "mcp")]
+                mcp.button(ui, limits);
                 if docked && tools::undock_button(ui) {
                     undock = true;
                 }
                 x11_alert.ui(ui);
-                // Last, so that it moves none of the others: the build with the MCP
-                // server has them where the build without it has them.
-                #[cfg(feature = "mcp")]
-                mcp.button(ui, limits);
             },
         );
         self.info_window = info_window;

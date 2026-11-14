@@ -70,8 +70,8 @@ pub struct Target {
 
 /// The server the app keeps in `mcp.json` of `folder`.
 pub fn target_in(folder: Option<&Path>) -> Result<Target, String> {
-    let never = "JsonQuery's MCP server has not been set up on this computer: in JsonQuery \
-                 (the build with MCP), click the 🔌 at the right of the status bar and Start";
+    let never = "JsonQuery's MCP server has not been set up on this computer: in JsonQuery, \
+                 click the 🔌 at the right of the status bar and Start";
     let folder = folder.ok_or(never)?;
     let text = match std::fs::read_to_string(folder.join("mcp.json")) {
         Ok(text) => text,
@@ -215,8 +215,7 @@ fn unavailable(message: &Value, why: &str) -> Value {
 /// POST `message` to the app's server; its JSON answer, or none for "202 Accepted".
 fn post(target: &Target, message: &Value) -> Result<Option<Value>, String> {
     let not_running = "JsonQuery is not running, or its MCP server is stopped: start JsonQuery \
-                       (the build with MCP) and its server, from the 🔌 at the right of its \
-                       status bar";
+                       and its server, from the 🔌 at the right of its status bar";
     let address = SocketAddr::from(([127, 0, 0, 1], target.port));
     let mut stream =
         TcpStream::connect_timeout(&address, CONNECT_TIME).map_err(|_| not_running.to_owned())?;

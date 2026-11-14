@@ -102,7 +102,7 @@ impl Asks {
         egui::Modal::new(egui::Id::new("mcp_question")).show(ctx, |ui| {
             ui.set_width(QUESTION_WIDTH);
             ui.horizontal(|ui| {
-                ui.label(super::ICON);
+                super::icon(ui);
                 ui.strong("An assistant asks");
             });
             ui.add_space(4.0);

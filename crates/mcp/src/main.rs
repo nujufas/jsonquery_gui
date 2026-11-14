@@ -8,8 +8,8 @@ const VERSION: &str = concat!("jsonquery-mcp ", env!("CARGO_PKG_VERSION"));
 const HELP: &str = "\
 The MCP server of the JsonQuery app, for an AI assistant that starts its servers itself
 (Claude Desktop, QuickAI's llama-server, ...): it speaks MCP on stdin and stdout, one
-message to a line, and takes each tool call to the JsonQuery app that is running (the
-build with MCP), whose server you start with the plug at the right of its status bar.
+message to a line, and takes each tool call to the JsonQuery app that is running, whose
+server you start with the plug at the right of its status bar.
 
 It finds the app's address and token in mcp.json, in .jsonquery of your home, or in the
 folder JSONQUERY_HOME names. See docs/mcp.md of the app.

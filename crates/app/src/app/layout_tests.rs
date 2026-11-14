@@ -5615,16 +5615,16 @@ fn text_rect(h: &Harness, wanted: &str) -> Option<egui::Rect> {
         .map(|(_, rect)| rect)
 }
 
-// The build with the MCP server has its 🔌 last in the status bar, so that every
-// other button is where the build without it has it.
+// The 🔌 of the MCP server is beside the ⚙, at its left, whatever else the status bar
+// holds: the 🗗 of the docked Tools and the ⚠ of a Wayland desktop are further left.
 #[cfg(feature = "mcp")]
 #[test]
-fn the_plug_comes_last_in_the_status_bar_and_opens_the_mcp_panel() {
+fn the_plug_sits_beside_the_settings_button_and_opens_the_mcp_panel() {
     let mut h = Harness::new();
     let bar = h.panel("status_bar").expect("the status bar");
     let info = text_rect(&h, "ℹ").expect("the (i) button");
     let settings = text_rect(&h, "⚙").expect("the ⚙ button");
-    let plug = text_rect(&h, mcp::ICON).expect("the 🔌");
+    let plug = h.app.mcp.button_rect().expect("the MCP button");
     assert!(bar.contains(plug.center()), "in the status bar: {plug:?}");
     assert!(
         (plug.center().y - info.center().y).abs() < 2.0,
@@ -5634,18 +5634,33 @@ fn the_plug_comes_last_in_the_status_bar_and_opens_the_mcp_panel() {
         plug.max.x < settings.min.x && settings.min.x - plug.max.x < 24.0,
         "next to the ⚙, at its left: {plug:?} vs {settings:?}"
     );
-    // With the ⚠ of a Wayland desktop, it is at the ⚠'s left.
+    // With the ⚠ of a Wayland desktop and the Tools docked, it is where it was, and
+    // the ⚠ and the 🗗 are at its left.
     h.app.x11_alert = X11Alert::new(true);
-    h.settle();
+    dock_tools_on_jsonquery(&mut h);
     let alert = text_rect(&h, "⚠").expect("the alert");
-    let plug = text_rect(&h, mcp::ICON).expect("the 🔌");
-    assert!(plug.max.x < alert.min.x, "{plug:?} vs {alert:?}");
-    h.app.x11_alert = X11Alert::new(false);
-    h.settle();
+    let undock = h.pop_buttons(tools::UNDOCK_ICON);
+    assert_eq!(undock.len(), 1, "the 🗗: {undock:?}");
+    let now = h.app.mcp.button_rect().expect("the MCP button");
+    assert!(
+        (now.min - plug.min).length() < 0.5,
+        "the 🔌 has not moved: {plug:?} -> {now:?}"
+    );
+    assert!(
+        alert.max.x < plug.min.x,
+        "the ⚠ at its left: {alert:?} vs {plug:?}"
+    );
+    assert!(
+        undock[0].x < plug.min.x,
+        "the 🗗 at its left: {:?} vs {plug:?}",
+        undock[0]
+    );
+
+    let mut h = Harness::new();
 
     // A click opens the panel, whose Start starts the server and Stop stops it.
     h.app.mcp.use_port(0);
-    let plug = text_rect(&h, mcp::ICON).expect("the 🔌");
+    let plug = h.app.mcp.button_rect().expect("the MCP button");
     assert!(h.text_pos("MCP server").is_none());
     h.click(plug.center().x, plug.center().y);
     assert!(h.text_pos("MCP server").is_some(), "the panel");
@@ -5687,11 +5702,17 @@ fn the_plug_comes_last_in_the_status_bar_and_opens_the_mcp_panel() {
 }
 
 #[test]
-fn on_wayland_the_alert_sits_beside_the_settings_button_and_moves_nothing() {
+fn on_wayland_the_alert_sits_left_of_the_buttons_at_the_right_and_moves_nothing() {
     let mut h = Harness::new();
     let bar = h.panel("status_bar").expect("the status bar");
     let info = text_rect(&h, "ℹ").expect("the (i) button");
     let settings = text_rect(&h, "⚙").expect("the ⚙ button");
+    // The button it is beside: the 🔌 of the MCP server, itself beside the ⚙, or the ⚙
+    // in a build without the server.
+    #[cfg(feature = "mcp")]
+    let beside = h.app.mcp.button_rect().expect("the MCP button");
+    #[cfg(not(feature = "mcp"))]
+    let beside = settings;
     assert!(
         text_rect(&h, "⚠").is_none(),
         "no alert unless the desktop is Wayland"
@@ -5705,12 +5726,12 @@ fn on_wayland_the_alert_sits_beside_the_settings_button_and_moves_nothing() {
         "on the (i)'s row: {alert:?} vs {info:?}"
     );
     assert!(
-        alert.max.x < settings.min.x,
-        "to the left of the ⚙: {alert:?}"
+        alert.max.x < beside.min.x,
+        "to the left of {beside:?}: {alert:?}"
     );
     assert!(
-        settings.min.x - alert.max.x < 24.0,
-        "next to it, not across the bar: {alert:?} vs {settings:?}"
+        beside.min.x - alert.max.x < 24.0,
+        "next to it, not across the bar: {alert:?} vs {beside:?}"
     );
     assert_eq!(
         text_rect(&h, "ℹ"),
@@ -8562,7 +8583,7 @@ fn the_tools_keep_what_they_hold_when_they_move_between_the_window_and_the_main_
 }
 
 #[test]
-fn the_undock_button_is_in_the_status_bar_beside_the_settings_whichever_tab_is_in_front() {
+fn the_undock_button_is_in_the_status_bar_left_of_the_settings_whichever_tab_is_in_front() {
     let mut h = Harness::new();
     assert!(
         h.pop_buttons(tools::UNDOCK_ICON).is_empty(),
@@ -8611,16 +8632,21 @@ fn the_undock_button_is_in_the_status_bar_beside_the_settings_whichever_tab_is_i
             "{tab}: in the status bar, level with the ℹ: {undock:?} {info:?} {status:?}"
         );
         // The 🌐 and the ⚙ are next to the ℹ, which stays in the corner, where they
-        // were; the button is the next one to the left.
+        // were; the button is the next one to the left, after the 🔌 of the MCP
+        // server, which is beside the ⚙ (but in a build without it).
         assert!(
             (info - info_before).length() < 0.5
                 && (globe - globe_before).length() < 0.5
                 && (settings - settings_before).length() < 0.5,
             "{tab}: the ℹ, the 🌐 and the ⚙ stay: {info:?} {globe:?} {settings:?}"
         );
+        #[cfg(feature = "mcp")]
+        let beside = h.app.mcp.button_rect().expect("the MCP button").center();
+        #[cfg(not(feature = "mcp"))]
+        let beside = settings;
         assert!(
-            undock.x < settings.x && settings.x - undock.x < 40.0,
-            "{tab}: {undock:?} {settings:?} {info:?}"
+            undock.x < beside.x && beside.x - undock.x < 40.0,
+            "{tab}: {undock:?} {beside:?} {settings:?} {info:?}"
         );
         // A small button, as the ℹ and the ⚙ beside it are.
         assert!(

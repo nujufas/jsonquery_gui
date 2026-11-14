@@ -1,30 +1,30 @@
 # MCP server
 
-The build of jsonquery gui with **mcp** in its name has a
-[Model Context Protocol](https://modelcontextprotocol.io) server: an AI assistant (Claude Code,
-Claude Desktop, VS Code, Cursor, QuickAI and others) can look at what the app has open and work with
-it — read and query the document, put a query in the query box and run it, open your saved
-queries — while you watch it happen in the window.
+jsonquery gui has a [Model Context Protocol](https://modelcontextprotocol.io) server: an AI
+assistant (Claude Code, Claude Desktop, VS Code, Cursor, QuickAI and others) can look at what the
+app has open and work with it — read and query the document, put a query in the query box and run
+it, open your saved queries — while you watch it happen in the window.
 
 It can also work out of sight — query, read and search any JSON file, use the six Tools (Merge,
 Format, Diff, Patch, Validate, Create Schema) — without anything changing in the window, and, if you
 allow it, save in the workspace and to files, asking you first, in the app, before anything is
 deleted, replaced, written outside the workspace or fetched from the web.
 
-It is a separate download, attached to each
-[GitHub Release](https://github.com/nujufas/jsonquery_gui/releases):
-`jsonquery_gui-mcp-<version>-linux-x86_64.tar.gz`, `…-linux-aarch64.tar.gz` and
-`…-windows-x86_64.zip`. The packages of the stores and package managers (Snap, Homebrew, Scoop,
-winget, Chocolatey, the Microsoft Store, the AUR) and the AppImages do not have it. Nothing of it
-runs until you start it.
+It is in every build: the downloads of each
+[GitHub Release](https://github.com/nujufas/jsonquery_gui/releases), the AppImages, and the packages
+of the stores and package managers. Nothing of it runs until you start it. Each release also has
+builds without it, for a computer where no assistant should be able to reach the app:
+`jsonquery_gui_nomcp-<version>-linux-x86_64.tar.gz`, `…-linux-aarch64.tar.gz` and
+`…-windows-x86_64.zip`.
 
 ## Starting it
 
 Click the 🔌 at the right of the status bar, then **Start**. The server listens on
 `http://127.0.0.1:7457/mcp`, on this computer only, for as long as the app runs; **Stop** stops it
 and disconnects every assistant. **Start it with JsonQuery** starts it whenever the app starts.
-The 🔌 is green while it runs, and a spinner turns beside it while an assistant's call is being
-answered. The port can be changed in the panel while the server is stopped.
+The button turns green while an assistant works with the app (and for a minute after its last
+call), and a spinner turns beside it while a call is being answered; otherwise it is grey, the
+server on or not (its tooltip says which). The port can be changed in the panel while the server is stopped.
 
 ## Adding it to an assistant
 
@@ -35,17 +35,29 @@ The panel's **Add to** buttons copy what adds the server to one:
 | Claude Code | `claude mcp add --transport http jsonquery http://127.0.0.1:7457/mcp --header "Authorization: Bearer …"` | Run it in a terminal |
 | Claude Desktop | An `mcpServers` entry that starts `jsonquery-mcp` | `claude_desktop_config.json` |
 | VS Code | A `servers` entry of type `http` | VS Code's `mcp.json` (of the user or of a folder) |
-| QuickAI | `--mcp-servers-json '{"mcpServers":{"jsonquery":{"command":"…/jsonquery-mcp"}}}'` | QuickAI's **Extra command-line arguments** (llama.cpp): llama-server then offers the tools to the model |
+| QuickAI | The same `mcpServers` entry | QuickAI's **MCP servers**: *Paste the JSON of a server's instructions* ([quickai.everybodyai.dev](https://quickai.everybodyai.dev)) |
 | JSON | An `mcpServers` entry of type `http` | A project's `.mcp.json` (Claude Code), Cursor's `mcp.json`, and other assistants |
 
 What an assistant connects with over HTTP carries the token: keep it to yourself.
 
-Claude Desktop and QuickAI (through llama.cpp's `llama-server`) start their servers themselves and
-talk to them over stdin and stdout. For them the download has **jsonquery-mcp** beside the app: it
+Claude Desktop and QuickAI start their servers themselves and
+talk to them over stdin and stdout. For them JsonQuery has **jsonquery-mcp** beside the app: it
 answers the handshake and the list of tools itself, and takes each call to the app that is running,
 with the address and token it reads from `mcp.json` (so what they are given holds no token). The
-tools are listed even while the app is closed; a call made then says what to do. Their buttons are
-greyed out when `jsonquery-mcp` is not beside the app.
+tools are listed even while the app is closed; a call made then says what to do.
+
+What their buttons copy starts it the way JsonQuery was installed:
+
+| Installed from | What starts `jsonquery-mcp` |
+|---|---|
+| A tar.gz or a zip, the AUR, Scoop, winget, Chocolatey | its path, beside the app |
+| Homebrew | `…/bin/jsonquery-mcp`, Homebrew's link to it, which an upgrade does not move |
+| An AppImage | the AppImage itself, with `mcp` first: it then starts the program inside |
+| The Snap Store | `/snap/bin/jsonquery-gui.jsonquery-mcp`, the snap's command for it |
+
+Copy it again after you move the app or the AppImage, or after an upgrade puts the app in a folder of
+its new version. The buttons are greyed out when `jsonquery-mcp` is not beside the app: in the
+Microsoft Store's package, and in a build of the app alone.
 
 ## What the assistant may do
 
@@ -110,11 +122,31 @@ take any document as their `input`:
 - `{"file": "/full/path.json"}` — read for the assistant alone (it needs Edit): the window keeps its
   own document;
 - `{"workspace": "orders/late.json"}` — a JSON item of the workspace;
-- `{"json": …}` or `{"text": "…"}` — JSON given in the call;
+- the JSON itself, or its text (`{"json": …}` and `{"text": "…"}` say the same);
 - `"last"` — what the assistant's last `run_query` (all of its results, up to 16 MB of them),
   `apply_patch`, `merge_documents`, `create_schema` or `diff_documents` (with `as_patch`) made, kept
   by the app while the server runs: so that a big result is read a page at a time, queried, checked
   or saved (`save_file`, `workspace_save`) without passing through the conversation.
+
+## What a model gives
+
+A model reads a few words of each tool and gives what it means the way it finds easiest. The server
+takes it as it is meant:
+
+- The JSON itself, the JSON as text, or a JSON file's full path (`/home/me/data.json`, read as
+  `{"file": …}` is), wherever a tool takes a document.
+- An argument by another name: `filter`, `expression` or `text` for `query`, `lang` for `language`, `data`,
+  `json` or `document` for `input`, `old` and `new` for `left` and `right`, `overwrite` for `replace`,
+  `type` for `kind`; and the arguments of a call sent as JSON text.
+- `workspace_save` without a `kind`: the ending of the name says it (`late.jq`, `orders.schema.json`,
+  `feed.url`), or else what is saved does (a web address, a query's text, a schema with `$schema`, a
+  list of patch operations, or a document); an item given by `folder` and `name` instead of `path`.
+- `open_document` given the JSON itself (or a JSON file's full path) as its `text`; `show_in_tool`
+  given a tool by the name of the tool that does the same out of sight (`validate_json`) or by another
+  name (`compare`, `make schema`).
+
+What it still cannot do is said, and the message ends with a call of that tool that works, for the
+model to make its next call right.
 
 The six Tools work to the same size limits as the Tools window (⚙ Settings); `show_in_tool` is the
 one that shows you a page of them (a box of a page takes up to 1 MB).
@@ -170,6 +202,13 @@ back to the handshake. `jsonquery-mcp` speaks the same over stdin and stdout.
 ## Building it yourself
 
 ```sh
-cargo build --release -p jsonquery_gui -p jsonquery-mcp --features jsonquery_gui/mcp
+cargo build --release -p jsonquery_gui -p jsonquery-mcp
 # target/release/jsonquery_gui, with the server, and target/release/jsonquery-mcp beside it
+```
+
+The server is the app's cargo feature `mcp`, a default one. Without it, as the `_nomcp` downloads
+are:
+
+```sh
+cargo build --release -p jsonquery_gui --no-default-features
 ```

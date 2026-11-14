@@ -38,10 +38,11 @@ before reading it, then read it with read_value, or query it with run_query.
 context): where there is more, next_offset says where the next page starts. Narrow the query \
 rather than read everything.
 - The tools that only read work out of sight: the user sees nothing change. They take any \
-document as `input`: \"document\" (open in the app), \"results\" (the user's), {\"file\": …}, \
-{\"workspace\": …}, {\"json\": …}, {\"text\": …}, or \"last\": what your last run_query or \
-tool of the Tools gave, kept by the app, so that a big result is read, queried or saved without \
-passing through the conversation.
+document as `input`: the JSON itself (or its text), \"document\" (open in the app), \"results\" \
+(the user's), a JSON file's full path, {\"workspace\": …}, or \"last\": what your last \
+run_query or tool of the Tools gave, kept by the app, so that a big result is read, queried or \
+saved without passing through the conversation.
+- A call that cannot be done says why, and ends with a call of that tool that works.
 - The others (open_document, set_query, reveal, workspace_open, show_in_tool, saving, moving and \
 deleting in the workspace, save_file, open_url), and reading a file, need the user to allow \
 \"Edit\" in the app's MCP panel; the app may ask the user before anything is deleted, replaced, \

@@ -2,8 +2,8 @@
 //! Code, VS Code, Cursor, …) look at what the app has open and work with it, through
 //! the Model Context Protocol.
 //!
-//! The app is built with it only with the cargo feature `mcp` (`jsonquery_gui
-//! --features mcp`), and it runs only while the user has switched it on.
+//! The app has it through its cargo feature `mcp`, a default one (the builds named
+//! `_nomcp` are made without it), and it runs only while the user has switched it on.
 //!
 //! What is here knows nothing of the window: it speaks the protocol (`protocol.rs`)
 //! over HTTP on the loopback address (`http.rs`), says which tools there are and

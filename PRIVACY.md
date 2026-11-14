@@ -55,11 +55,12 @@ through do their own data collection, independent of anything the app does — s
   workspace, only in that folder (or where you choose, for Export), and never sends them anywhere.
   They stay until you delete them: they are ordinary files in an ordinary folder.
 
-## The build with the MCP server
+## The MCP server
 
-The build with **mcp** in its name (a download of the GitHub release only) can also act as a
-[Model Context Protocol](https://modelcontextprotocol.io) server for an AI assistant you choose,
-such as Claude Code, Claude Desktop, VS Code or QuickAI. See [docs/mcp.md](docs/mcp.md).
+The app can also act as a [Model Context Protocol](https://modelcontextprotocol.io) server for an
+AI assistant you choose, such as Claude Code, Claude Desktop, VS Code or QuickAI. See
+[docs/mcp.md](docs/mcp.md). The builds with **_nomcp** in their name (downloads of the GitHub
+release) do not have it.
 
 - **Off until you start it.** The server runs only after you start it with the 🔌 in the status bar
   (or tick **Start it with JsonQuery**), and only while the app runs. It listens on `127.0.0.1`, so

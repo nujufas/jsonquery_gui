@@ -579,62 +579,49 @@ fn the_configurations_carry_the_address_and_the_token() {
 fn what_starts_the_bridge_names_it_and_holds_no_token() {
     let rig = Rig::new();
     let app = rig.app();
-    let bridge = PathBuf::from(if cfg!(windows) {
+    let program = PathBuf::from(if cfg!(windows) {
         r"C:\Program Files\JsonQuery MCP\jsonquery-mcp.exe"
     } else {
         "/opt/json query/jsonquery-mcp"
     });
-    let desktop: Value =
-        serde_json::from_str(&app.mcp.configuration("Claude Desktop", Some(&bridge))).unwrap();
-    assert_eq!(
-        desktop["mcpServers"]["jsonquery"]["command"],
-        bridge.display().to_string()
-    );
-    let quickai = app.mcp.configuration("QuickAI", Some(&bridge));
-    assert!(!quickai.contains(&app.mcp.settings.token));
-    // What QuickAI makes of its field (`split_args` of quickai-core, as it is): two
-    // arguments for llama-server, the second the JSON, spaces and backslashes kept.
-    let args = quickai_split_args(&quickai);
-    assert_eq!(args.len(), 2, "{args:?}");
-    assert_eq!(args[0], "--mcp-servers-json");
-    let servers: Value = serde_json::from_str(&args[1]).unwrap();
-    assert_eq!(
-        servers["mcpServers"]["jsonquery"]["command"],
-        bridge.display().to_string()
-    );
+    let bridge = bridge::Bridge {
+        command: program.clone(),
+        args: Vec::new(),
+    };
+    // Claude Desktop's entry, which QuickAI takes as it is (Paste the JSON of a server's
+    // instructions): the program, no token.
+    for name in ["Claude Desktop", "QuickAI"] {
+        let text = app.mcp.configuration(name, Some(&bridge));
+        assert!(!text.contains(&app.mcp.settings.token), "{name}: {text}");
+        let entry: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(
+            entry,
+            json!({"mcpServers": {"jsonquery": {"command": program.display().to_string(), "args": []}}}),
+            "{name}"
+        );
+    }
 }
 
-/// QuickAI's `split_args` (quickai-core, plan/args.rs): words at whitespace, and what
-/// is between matching double or single quotes kept as it is, the quotes taken away.
-fn quickai_split_args(input: &str) -> Vec<String> {
-    let mut args = Vec::new();
-    let mut current = String::new();
-    let mut quote: Option<char> = None;
-    let mut in_token = false;
-    for c in input.chars() {
-        match quote {
-            Some(q) if c == q => quote = None,
-            Some(_) => current.push(c),
-            None if c == '"' || c == '\'' => {
-                quote = Some(c);
-                in_token = true;
-            }
-            None if c.is_whitespace() => {
-                if in_token {
-                    args.push(std::mem::take(&mut current));
-                    in_token = false;
-                }
-            }
-            None => {
-                current.push(c);
-                in_token = true;
-            }
-        }
+/// An AppImage starts the program inside it when given `mcp` first: the entries that
+/// start the program give it.
+#[test]
+fn what_starts_the_bridge_of_an_appimage_gives_it_mcp() {
+    let rig = Rig::new();
+    let app = rig.app();
+    let image = "/home/u/Apps/jsonquery_gui-1.0.0-x86_64.AppImage";
+    let bridge = bridge::Bridge {
+        command: image.into(),
+        args: vec!["mcp".to_owned()],
+    };
+    for name in ["Claude Desktop", "QuickAI"] {
+        let entry: Value =
+            serde_json::from_str(&app.mcp.configuration(name, Some(&bridge))).unwrap();
+        assert_eq!(
+            entry["mcpServers"]["jsonquery"],
+            json!({"command": image, "args": ["mcp"]}),
+            "{name}"
+        );
     }
-    if in_token {
-        args.push(current);
-    }
-    args
 }
 
 // ---- phase 2: the tools of the Tools, and what changes what is kept --------------
@@ -1354,4 +1341,42 @@ fn always_allow_does_what_edit_allows_without_a_question() {
     assert_eq!(deleted["items"], 1);
     assert_eq!(rig.app().mcp.asks.waiting(), 0);
     assert!(!dir.join("a.jq").exists());
+}
+
+#[test]
+fn the_icon_is_green_while_an_assistant_works_with_the_app_and_a_minute_after() {
+    use std::time::{Duration, SystemTime};
+    let now = SystemTime::now();
+    let call = |ago: u64| jsonquery_mcp::Activity {
+        at: now - Duration::from_secs(ago),
+        tool: "get_state".to_owned(),
+        ok: true,
+        took: Duration::from_millis(5),
+        error: None,
+    };
+    let mut status = jsonquery_mcp::Status::default();
+    assert_eq!(
+        working_left(&status, now),
+        None,
+        "on, and no call yet: grey"
+    );
+    status.running = 1;
+    assert_eq!(
+        working_left(&status, now),
+        Some(WORKING_FOR),
+        "a call is being answered"
+    );
+    status.running = 0;
+    status.recent = vec![call(10), call(500)];
+    assert_eq!(
+        working_left(&status, now),
+        Some(WORKING_FOR - Duration::from_secs(10)),
+        "the last call ended 10 s ago"
+    );
+    status.recent = vec![call(61)];
+    assert_eq!(
+        working_left(&status, now),
+        None,
+        "a minute without a call: grey"
+    );
 }

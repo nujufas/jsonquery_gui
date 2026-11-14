@@ -9,8 +9,10 @@ name = "jsonquery_gui"
 path = "src/main.rs"
 
 [features]
+default = ["mcp"]
 # The MCP server: a button in the status bar that lets an AI assistant work with what
-# the app has open. Off unless asked for: only the build with "mcp" in its name has it.
+# the app has open. In every build but those with "_nomcp" in their name, which are
+# built with --no-default-features.
 mcp = ["dep:jsonquery-mcp"]
 
 [dependencies]

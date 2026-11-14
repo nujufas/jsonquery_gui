@@ -1,12 +1,15 @@
-//! The MCP server in the app — built only with the cargo feature `mcp`: the 🔌 at the
-//! right of the status bar, the panel it opens (start and stop the server, what the
-//! assistant may do, the configuration to add it to an assistant with), what is kept
-//! of it between runs (`settings.rs`), and what its tools do in the app (`host.rs`).
+//! The MCP server in the app — built with the cargo feature `mcp`, a default one (the
+//! builds named `_nomcp` are made without it): the 🔌 at the right of the status bar,
+//! the panel it opens (start and stop the server, what the assistant may do, the
+//! configuration to add it to an assistant with, `bridge.rs` for those that start
+//! `jsonquery-mcp`), what is kept of it between runs (`settings.rs`), and what its
+//! tools do in the app (`host.rs`).
 //!
 //! Nothing of it runs until the user starts the server (or has asked for it to start
 //! with the app): until then it is the button and nothing more.
 
 mod ask;
+mod bridge;
 mod host;
 mod settings;
 #[cfg(test)]
@@ -23,11 +26,76 @@ use self::settings::McpSettings;
 use super::{lock, App};
 use crate::settings::{FileLimits, Store};
 
-/// The plug: the status bar's button for the server.
-pub(super) const ICON: &str = "🔌";
+/// The status bar's icon for the server: a plug, as big as the bar's other glyphs, with a
+/// small "AI" at its top right like an exponent. Laid out for the size of the
+/// text of the button it is in, and painted in the colour the button gives its text.
+pub(super) struct Icon {
+    plug: std::sync::Arc<egui::Galley>,
+    ai: std::sync::Arc<egui::Galley>,
+    /// How high the bar's other glyphs are: the icon is as high.
+    height: f32,
+}
 
-/// What the plug is drawn in while the server runs.
+impl Icon {
+    pub(super) fn new(ui: &egui::Ui, style: &egui::TextStyle) -> Self {
+        let size = style.resolve(ui.style()).size;
+        let layout = |text: &str, scale: f32| {
+            ui.painter().layout_no_wrap(
+                text.to_owned(),
+                egui::FontId::proportional(size * scale),
+                egui::Color32::PLACEHOLDER,
+            )
+        };
+        Self {
+            plug: layout("🔌", 1.0),
+            ai: layout("AI", 0.58),
+            height: ui.text_style_height(style),
+        }
+    }
+
+    /// The room it takes: the plug, and "AI" beside its top.
+    pub(super) fn size(&self) -> egui::Vec2 {
+        egui::vec2(self.plug.size().x + self.ai.size().x, self.height)
+    }
+
+    pub(super) fn paint(&self, painter: &egui::Painter, rect: egui::Rect, color: egui::Color32) {
+        let plug = egui::pos2(rect.left(), rect.bottom() - self.plug.size().y);
+        painter.galley(plug, self.plug.clone(), color);
+        let ai = egui::pos2(rect.right() - self.ai.size().x, rect.top());
+        painter.galley(ai, self.ai.clone(), color);
+    }
+}
+
+/// The icon as a label, as high as a line of text (the question's title has it).
+pub(super) fn icon(ui: &mut egui::Ui) {
+    let icon = Icon::new(ui, &egui::TextStyle::Body);
+    let (rect, _) = ui.allocate_exact_size(icon.size(), egui::Sense::hover());
+    icon.paint(ui.painter(), rect, ui.visuals().text_color());
+}
+
+/// What the icon is drawn in while an assistant works with the app.
 const ON_COLOR: egui::Color32 = egui::Color32::from_rgb(0x2e, 0xa0, 0x43);
+
+/// How long the icon stays green after an assistant's last call: while it works with
+/// the app, its calls come seconds, or a minute, apart.
+const WORKING_FOR: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Whether an assistant is working with the app — a call is being answered, or the
+/// last one ended less than [`WORKING_FOR`] ago — and how much longer that holds
+/// without another call.
+fn working_left(
+    status: &jsonquery_mcp::Status,
+    now: std::time::SystemTime,
+) -> Option<std::time::Duration> {
+    if status.running > 0 {
+        return Some(WORKING_FOR);
+    }
+    let last = status.recent.first()?;
+    let since = now.duration_since(last.at).unwrap_or_default();
+    WORKING_FOR
+        .checked_sub(since)
+        .filter(|left| !left.is_zero())
+}
 
 /// How long "Copied" is said after a configuration was copied, in seconds.
 const COPIED_SECS: f64 = 4.0;
@@ -70,7 +138,7 @@ const CLIENTS: [&[Client]; 2] = [
     &[
         Client {
             name: "QuickAI",
-            tip: "Copy what goes in QuickAI's Extra command-line arguments (llama.cpp)",
+            tip: "Copy the entry to paste in QuickAI's MCP servers\nQuickAI: quickai.everybodyai.dev",
             starts_bridge: true,
         },
         Client {
@@ -80,14 +148,6 @@ const CLIENTS: [&[Client]; 2] = [
         },
     ],
 ];
-
-/// The program that takes the calls of an assistant that starts its servers itself to
-/// the app (`jsonquery-mcp`, beside the app's own executable), if it is there.
-fn bridge_path() -> Option<PathBuf> {
-    let exe = std::env::current_exe().ok()?;
-    let bridge = exe.with_file_name(format!("jsonquery-mcp{}", std::env::consts::EXE_SUFFIX));
-    bridge.is_file().then_some(bridge)
-}
 
 /// The server, as the app holds it.
 #[derive(Default)]
@@ -106,6 +166,8 @@ pub(super) struct Link {
     copied: Option<(&'static str, f64)>,
     /// What the assistant asks the user before it is done.
     asks: ask::Asks,
+    /// Where the status bar's button is (for the layout tests: it has no text to find).
+    button_rect: Option<egui::Rect>,
 }
 
 impl Link {
@@ -216,24 +278,46 @@ impl Link {
     /// while the assistant's call runs comes after the plug, at its left, and so moves
     /// nothing.
     pub(super) fn button(&mut self, ui: &mut egui::Ui, limits: FileLimits) {
-        let busy = self
-            .server
+        let status = self.server.as_ref().map(Server::status);
+        let busy = status.as_ref().is_some_and(|status| status.running > 0);
+        let working = status
             .as_ref()
-            .is_some_and(|server| server.status().running > 0);
-        let mut icon = egui::RichText::new(ICON);
-        if self.server.is_some() {
-            icon = icon.color(ON_COLOR);
-        }
-        let tip = match &self.server {
-            Some(server) => format!(
+            .and_then(|status| working_left(status, std::time::SystemTime::now()));
+        let tip = match (&self.server, working) {
+            (Some(server), Some(_)) => format!(
+                "MCP server — an assistant is working with the app\nAt {}: click for its settings",
+                server.url()
+            ),
+            (Some(server), None) => format!(
                 "MCP server — on, at {}\nClick for its settings",
                 server.url()
             ),
-            None => {
+            (None, _) => {
                 "MCP server — lets an AI assistant work with the app\nClick to set it up".to_owned()
             }
         };
-        let response = ui.small_button(icon).on_hover_text(tip);
+        // A small button the size of the others' glyphs, the icon painted in it in the
+        // colour the button gives its text: green while an assistant works with the app,
+        // grey otherwise, whether the server is on or not.
+        let id = egui::Id::new("mcp_icon");
+        let icon = Icon::new(ui, &egui::TextStyle::Button);
+        let atoms = egui::Button::new(egui::Atom::custom(id, icon.size()))
+            .small()
+            .atom_ui(ui);
+        if let Some(rect) = atoms.rect(id) {
+            let color = if working.is_some() {
+                ON_COLOR
+            } else {
+                ui.style().interact(&atoms.response).text_color()
+            };
+            icon.paint(ui.painter(), rect, color);
+        }
+        // Grey again once the assistant has stopped, with nothing else to draw the bar.
+        if let Some(left) = working {
+            ui.ctx().request_repaint_after(left);
+        }
+        self.button_rect = Some(atoms.response.rect);
+        let response = atoms.response.on_hover_text(tip);
         egui::Popup::from_toggle_button_response(&response)
             .align(egui::RectAlign::TOP_END)
             .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
@@ -362,7 +446,7 @@ impl Link {
                 });
                 ui.end_row();
 
-                let bridge = bridge_path();
+                let bridge = bridge::bridge();
                 for (row, clients) in CLIENTS.iter().enumerate() {
                     ui.label(if row == 0 { "Add to" } else { "" });
                     ui.horizontal(|ui| {
@@ -373,11 +457,11 @@ impl Link {
                                 button.on_hover_text(client.tip)
                             } else {
                                 button.on_disabled_hover_text(
-                                    "jsonquery-mcp is not beside JsonQuery: it comes in the download of the MCP build",
+                                    "jsonquery-mcp is not beside JsonQuery\nThe tar.gz and the zip of each release have it",
                                 )
                             };
                             if button.clicked() {
-                                ui.ctx().copy_text(self.configuration(client.name, bridge.as_deref()));
+                                ui.ctx().copy_text(self.configuration(client.name, bridge));
                                 self.copied = Some((client.name, now));
                             }
                         }
@@ -484,25 +568,27 @@ impl Link {
         self.server.is_some()
     }
 
+    /// Where the status bar's button was drawn last.
+    #[cfg(test)]
+    pub(super) fn button_rect(&self) -> Option<egui::Rect> {
+        self.button_rect
+    }
+
     /// What adds the server to the assistant `name` (one of the panel's buttons);
-    /// `bridge` is `jsonquery-mcp`, for those that start it themselves.
-    fn configuration(&self, name: &str, bridge: Option<&std::path::Path>) -> String {
+    /// `bridge` starts `jsonquery-mcp`, for those that start it themselves.
+    fn configuration(&self, name: &str, bridge: Option<&bridge::Bridge>) -> String {
         let url = self.url();
         let bearer = format!("Bearer {}", self.settings.token);
-        let command = bridge.map_or_else(
-            || format!("jsonquery-mcp{}", std::env::consts::EXE_SUFFIX),
-            |b| b.display().to_string(),
+        let (command, args) = bridge.map_or_else(
+            || (bridge::FILE_NAME.to_owned(), Vec::new()),
+            |b| (b.command.display().to_string(), b.args.clone()),
         );
         match name {
-            "Claude Desktop" => pretty(&serde_json::json!({
-                "mcpServers": {SERVER_NAME: {"command": command, "args": []}}
+            // QuickAI takes the entry as a server's read-me gives it for Claude Desktop
+            // ("Paste the JSON of a server's instructions").
+            "Claude Desktop" | "QuickAI" => pretty(&serde_json::json!({
+                "mcpServers": {SERVER_NAME: {"command": command, "args": args}}
             })),
-            // QuickAI splits the field at spaces and takes quotes away, but keeps what is
-            // in single quotes as it is: the JSON, spaces and all.
-            "QuickAI" => format!(
-                "--mcp-servers-json '{}'",
-                serde_json::json!({"mcpServers": {SERVER_NAME: {"command": command}}})
-            ),
             "Claude Code" => format!(
                 "claude mcp add --transport http {SERVER_NAME} {url} --header \"Authorization: {bearer}\""
             ),

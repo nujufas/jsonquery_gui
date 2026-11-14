@@ -147,6 +147,16 @@ patches and validates documents too. Built in Rust with
   JSON Pointer queries, the five tools, and short lessons for each language.
   The ⓘ window links to the site too. The app never contacts the site by
   itself: the 🌐 only hands the address to your browser when you click it.
+- **For AI assistants (MCP)** — the 🔌 at the right of the status bar starts a
+  [Model Context Protocol](https://modelcontextprotocol.io) server, so that an
+  AI assistant (Claude Code, Claude Desktop, VS Code, Cursor, QuickAI…) can
+  read and query what the app has open — or any JSON file, out of sight — and
+  use the six Tools; if you allow it (Edit), it also shows you its queries in
+  the window and saves in the workspace, asking you first before anything is
+  deleted or replaced, unless you always allow it. Answers come a page at a
+  time, of a size you set: small for a model that runs on your own computer.
+  The server listens on this computer only, runs only once you start it, and
+  by default may only look. See [MCP server](docs/mcp.md).
 - **Keyboard shortcuts** — `Ctrl+Enter` run/apply, `Ctrl+F` search,
   `Ctrl+S` save (both scoped to whichever panel you last clicked), `F1`
   tutorial.
@@ -374,16 +384,11 @@ fetch newer releases. On a Wayland desktop it also adds a **jsonquery (X11)**
 entry, for dropping files on the window (see
 [Dropping files on a Wayland desktop](#dropping-files-on-a-wayland-desktop)).
 
-### With an MCP server, for AI assistants
+### Without the MCP server
 
-Each release also has a build with **mcp** in its name (Linux tar.gz and Windows zip only): the
-app with a [Model Context Protocol](https://modelcontextprotocol.io) server, which an AI assistant
-(Claude Code, Claude Desktop, VS Code, Cursor, QuickAI…) can use to read and query what the app has
-open — or any JSON file, out of sight —, use the six Tools, and, if you allow it (Edit), show you its
-queries in the window and save in the workspace (asking you first before anything is deleted or
-replaced, unless you always allow it). Answers come a page at a time, of a size you set: small for a
-model that runs on your own computer. Start it with the 🔌 at the right of the status bar; it listens
-on this computer only, and by default may only look. See [MCP server](docs/mcp.md).
+Every build has the [MCP server](docs/mcp.md) for AI assistants, which runs only once you start it.
+Each release also has builds without it, with **_nomcp** in their name (Linux tar.gz and Windows zip
+only), for a computer where no assistant should be able to reach the app.
 
 ### Dropping files on a Wayland desktop
 
@@ -469,33 +474,38 @@ cargo run --release -p jsonquery_gui
 
 ## Building
 
-Native release build for the current platform:
+Native release build for the current platform, with `jsonquery-mcp` beside the app (the
+[MCP server](docs/mcp.md)'s program, for an assistant that starts its servers itself):
 
 ```sh
-cargo build --release -p jsonquery_gui
-# binary at target/release/jsonquery_gui
+cargo build --release -p jsonquery_gui -p jsonquery-mcp
+# binaries at target/release/jsonquery_gui and target/release/jsonquery-mcp
 ```
 
-The build with the MCP server (see [MCP server](docs/mcp.md)):
+Without the MCP server, as the downloads with **_nomcp** in their name are:
 
 ```sh
-cargo build --release -p jsonquery_gui -p jsonquery-mcp --features jsonquery_gui/mcp
+cargo build --release -p jsonquery_gui --no-default-features
 ```
 
 ## Development
 
 ```sh
 cargo test --workspace     # unit tests: parsing and tree logic, the query engines and tools, headless window tests
+cargo test -p jsonquery_gui --no-default-features    # the app's tests again, without the MCP server
 cargo clippy --workspace --all-targets
 ```
 
-The workspace is split into three crates so the non-GUI logic can be tested
+The workspace is split into four crates so the non-GUI logic can be tested
 without pulling in a GUI toolkit:
 
 - **`crates/core`** — file ingest (parse, or mmap + index for a file of 256 MiB or more) and the virtualized-tree data layer.
 - **`crates/query`** — the four query engines, dispatched through a shared
   `QueryEngine` trait, plus the merge, format, diff, patch and schema logic
   behind the Tools window.
+- **`crates/mcp`** — the MCP server: the protocol, its HTTP server on the
+  loopback address, the tools and their answers, and `jsonquery-mcp`; the app
+  plugs into it through its cargo feature `mcp`, a default one.
 - **`crates/app`** — the eframe/egui application itself.
 - **`third_party/jaq-json`** — jaq-json 2.0.3 with a few changes, so that an assignment
   makes the place it writes to (`null | .a.b = 1`), as jq's does. It is not part of the

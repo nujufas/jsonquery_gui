@@ -2,7 +2,7 @@
 //! assistant is given), what the user must allow for it, and how what it is asked
 //! is read into a [`Call`].
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use jsonquery_query::infer::{self, Draft};
@@ -784,14 +784,14 @@ fn definition(name: &str) -> Value {
                  sample if given. An item of that name is replaced only with `replace`, and the \
                  app may ask the user first. Needs Edit.",
                 json!({
-                    "path": {"type": "string", "description": "Folder and name: \"orders/late\" (no extension)."},
-                    "kind": {"type": "string", "enum": ["query", "schema", "patch", "document", "address"]},
-                    "content": {"description": "A query or web address: a string. Otherwise the JSON, as an input: \"document\", \"results\", {\"json\": …}, {\"text\": …}, {\"file\": …}, {\"workspace\": …}."},
+                    "path": {"type": "string", "description": "Folder and name: \"orders/late\"."},
+                    "kind": {"type": "string", "enum": ["query", "schema", "patch", "document", "address"], "description": "Default: what the name's ending or the content says."},
+                    "content": {"description": "A query or web address: its text. Otherwise the JSON itself, or \"document\", \"results\", \"last\"."},
                     "language": language_schema(),
                     "sample": input_schema("A sample document for a query, schema or patch."),
                     "replace": {"type": "boolean", "description": "Replace an item of that name (default false)."}
                 }),
-                &["path", "kind", "content"],
+                &["path", "content"],
                 false,
             ),
             "workspace_new_folder" => (
@@ -882,15 +882,11 @@ pub const MAX_MERGED: usize = 100;
 /// What the tools that look at a document say of their `input`.
 const DOCUMENT: &str = "Default \"document\".";
 
-/// A JSON value a tool works on ([`Input`]): which of its forms it is, is said, not
-/// held to by the schema, which a small model then reads in a few words.
+/// A JSON value a tool works on ([`Input`]): any value is taken (see [`input_of`]), and
+/// the schema says so in a few words, which is what a small model reads of it.
 fn input_schema(what: &str) -> Value {
     json!({
-        "description": format!("{what} \"document\" (open), \"results\" (the user's), \"last\" (your last result), {{\"json\": v}}, {{\"text\": s}}, {{\"file\": path}} or {{\"workspace\": path}}."),
-        "anyOf": [
-            {"type": "string", "enum": ["document", "results", "last"]},
-            {"type": "object"}
-        ]
+        "description": format!("{what} The JSON itself (or its text), \"document\" (open), \"results\" (the user's), \"last\" (your last result), a JSON file's full path, or {{\"workspace\": path}}.")
     })
 }
 
@@ -987,7 +983,149 @@ pub fn parse(name: &str, arguments: Option<&Value>) -> Option<Result<Call, Strin
         "open_url" => &["url", "timeout_ms"],
         _ => return None,
     };
-    Some(Args::new(arguments, allowed).and_then(|args| read_call(name, &args)))
+    let arguments = usual_names(name, allowed, arguments);
+    Some(
+        Args::new(arguments.as_ref(), allowed)
+            .and_then(|args| read_call(name, &args))
+            .map_err(|e| match example(name) {
+                Some(example) => format!("{e}. For example: {example}"),
+                None => e,
+            }),
+    )
+}
+
+/// Names a model often gives an argument, and the name the tool knows it by. A name is
+/// taken for the other by a tool that has the other and not the name itself, when the
+/// call does not give the other too.
+const ALIASES: &[(&str, &str)] = &[
+    ("overwrite", "replace"),
+    ("force", "replace"),
+    ("type", "kind"),
+    ("lang", "language"),
+    ("engine", "language"),
+    ("dialect", "language"),
+    ("expression", "query"),
+    ("filter", "query"),
+    ("jq", "query"),
+    // Where a tool takes a query, its text is the query (before `input` below).
+    ("text", "query"),
+    ("data", "input"),
+    ("json", "input"),
+    ("document", "input"),
+    ("doc", "input"),
+    ("value", "input"),
+    ("source", "input"),
+    ("content", "input"),
+    ("text", "input"),
+    ("data", "content"),
+    ("json", "content"),
+    ("value", "content"),
+    ("text", "content"),
+    ("input", "content"),
+    ("body", "content"),
+    ("file", "path"),
+    ("filename", "path"),
+    ("file_path", "path"),
+    ("filepath", "path"),
+    ("documents", "inputs"),
+    ("files", "inputs"),
+    ("values", "inputs"),
+    ("first", "left"),
+    ("old", "left"),
+    ("before", "left"),
+    ("second", "right"),
+    ("new", "right"),
+    ("after", "right"),
+];
+
+/// The call's arguments as the tool names them: arguments sent as JSON text read, the
+/// names of [`ALIASES`] changed, a file given to a tool that reads an input taken as its
+/// input, and a workspace item's folder and name taken as its path.
+fn usual_names(name: &str, allowed: &[&str], arguments: Option<&Value>) -> Option<Value> {
+    let mut map = match arguments {
+        None | Some(Value::Null) => return None,
+        Some(Value::Object(map)) => map.clone(),
+        Some(Value::String(text)) => match serde_json::from_str::<Value>(text) {
+            Ok(Value::Object(map)) => map,
+            _ => return arguments.cloned(),
+        },
+        Some(other) => return Some(other.clone()),
+    };
+    let takes = |key: &str| allowed.contains(&key);
+    for &(alias, usual) in ALIASES {
+        if takes(usual) && !takes(alias) && !map.contains_key(usual) {
+            if let Some(value) = map.remove(alias) {
+                map.insert(usual.to_owned(), value);
+            }
+        }
+    }
+    if takes("input") && !takes("path") && !map.contains_key("input") {
+        for key in ["path", "file", "filename", "file_path"] {
+            if let Some(Value::String(path)) = map.get(key).cloned() {
+                map.remove(key);
+                map.insert("input".to_owned(), json!({ "file": path }));
+                break;
+            }
+        }
+    }
+    if name == "open_document" && !map.contains_key("text") && !map.contains_key("path") {
+        for key in ["json", "data", "content", "document", "input", "value"] {
+            if let Some(value) = map.remove(key) {
+                map.insert("text".to_owned(), value);
+                break;
+            }
+        }
+    }
+    if name == "workspace_save" && !map.contains_key("path") {
+        if let Some(Value::String(item)) = map.remove("name") {
+            let path = match map.remove("folder") {
+                Some(Value::String(folder)) if !folder.trim().is_empty() => {
+                    format!("{}/{item}", folder.trim_end_matches('/'))
+                }
+                _ => item,
+            };
+            map.insert("path".to_owned(), Value::String(path));
+        }
+    }
+    Some(Value::Object(map))
+}
+
+/// A call of tool `name` that works, for an error to end with: a model that sees one
+/// makes the next call right.
+fn example(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "document_info" => r#"{} for the open document, or {"input": {"a": [1, 2]}}"#,
+        "describe" => r#"{"pointer": "/items", "depth": 2}"#,
+        "read_value" => r#"{"pointer": "/items/0"}"#,
+        "search" => r#"{"text": "error"}"#,
+        "run_query" => r#"{"query": ".items[] | select(.price > 10)", "language": "jq"}"#,
+        "set_query" => r#"{"query": ".items | length"}"#,
+        "query_help" => r#"{"language": "jq", "topic": "select"}"#,
+        "workspace_read" => r#"{"path": "queries/late"}"#,
+        "workspace_open" => r#"{"path": "queries/late"}"#,
+        "open_document" => r#"{"text": "{\"a\": 1}"} or {"path": "/home/me/data.json"}"#,
+        "reveal" => r#"{"target": "results", "pointer": "/0"}"#,
+        "format_json" => r#"{"input": {"b": 1, "a": [1, 2]}, "sort_keys": true}"#,
+        "diff_documents" => r#"{"left": {"a": 1}, "right": {"a": 2}}"#,
+        "apply_patch" => {
+            r#"{"input": {"a": 1}, "patch": [{"op": "replace", "path": "/a", "value": 2}]}"#
+        }
+        "merge_documents" => r#"{"inputs": [{"a": 1}, {"b": 2}]}"#,
+        "validate_json" => {
+            r#"{"input": {"id": 1}, "schema": {"type": "object", "required": ["id"]}}"#
+        }
+        "create_schema" => r#"{"input": [{"id": 1, "name": "x"}]}"#,
+        "show_in_tool" => r#"{"tool": "diff", "inputs": [{"a": 1}, {"a": 2}]}"#,
+        "workspace_save" => {
+            r#"{"path": "examples/orders", "content": {"orders": []}}, or {"path": "queries/late", "kind": "query", "content": ".orders[] | select(.late)"}"#
+        }
+        "workspace_new_folder" => r#"{"path": "reports/2026"}"#,
+        "workspace_move" => r#"{"path": "queries/late", "to": "archive"}"#,
+        "workspace_delete" => r#"{"path": "queries/late"}"#,
+        "save_file" => r#"{"input": "last", "path": "/home/me/out.json"}"#,
+        "open_url" => r#"{"url": "https://example.com/data.json"}"#,
+        _ => return None,
+    })
 }
 
 fn read_call(name: &str, args: &Args<'_>) -> Result<Call, String> {
@@ -1052,8 +1190,19 @@ fn read_call(name: &str, args: &Args<'_>) -> Result<Call, String> {
             max_bytes,
         },
         "open_document" => {
-            let path = args.text("path")?.filter(|p| !p.trim().is_empty());
-            let text = args.text("text")?;
+            let mut path = args.text("path")?.filter(|p| !p.trim().is_empty());
+            // The JSON itself is its text; a JSON file's full path given as the text is the file.
+            let mut text = match args.get("text") {
+                None => None,
+                Some(Value::String(text)) => Some(text.clone()),
+                Some(json) => Some(json.to_string()),
+            };
+            if path.is_none() {
+                if let Some(Input::File(file)) = text.as_deref().map(text_input) {
+                    path = Some(file.display().to_string());
+                    text = None;
+                }
+            }
             if path.is_some() == text.is_some() {
                 return Err("give one of `path` and `text`".to_owned());
             }
@@ -1162,19 +1311,23 @@ fn read_call(name: &str, args: &Args<'_>) -> Result<Call, String> {
             }
         }
         "workspace_save" => {
-            let kind = match args.required_text("kind")?.to_ascii_lowercase().as_str() {
-                "query" => SaveKind::Query(args.language()?.unwrap_or(Kind::Jq)),
-                "schema" => SaveKind::Schema,
-                "patch" => SaveKind::Patch,
-                "document" => SaveKind::Document,
-                "address" | "url" => SaveKind::Address,
-                _ => return Err(
-                    "`kind` is one of \"query\", \"schema\", \"patch\", \"document\", \"address\""
-                        .to_owned(),
-                ),
+            let (folder, name) = split_path(&args.required_text("path")?)?;
+            // A name that ends as an item's file does says what it is; the item is named
+            // without the ending.
+            let (name, ending) = item_ending(&name);
+            let language = args.language()?;
+            let kind = match args.text("kind")? {
+                Some(kind) => save_kind(&kind, language).ok_or(
+                    "`kind` is one of \"query\", \"schema\", \"patch\", \"document\", \"address\"",
+                )?,
+                None => match ending {
+                    Some(SaveKind::Query(ending)) => SaveKind::Query(language.unwrap_or(ending)),
+                    Some(kind) => kind,
+                    None => kind_of_content(args.get("content"), language),
+                },
             };
             let content = if kind.is_text() {
-                Input::Text(args.required_text("content")?)
+                Input::Text(text_content(args.get("content"))?)
             } else {
                 args.input("content")?
             };
@@ -1182,7 +1335,6 @@ fn read_call(name: &str, args: &Args<'_>) -> Result<Call, String> {
             if sample.is_some() && matches!(kind, SaveKind::Document | SaveKind::Address) {
                 return Err("a document or a web address has no sample".to_owned());
             }
-            let (folder, name) = split_path(&args.required_text("path")?)?;
             Call::WorkspaceSave {
                 folder,
                 name,
@@ -1238,6 +1390,16 @@ fn page_of(tool: &str, options: Option<&Map<String, Value>>) -> Result<ToolPage,
         .filter(|c| c.is_ascii_alphanumeric())
         .map(|c| c.to_ascii_lowercase())
         .collect();
+    // The names of the tools that do the same out of sight, and others a model gives them.
+    let key = match key.as_str() {
+        "formatjson" | "reformat" | "prettify" | "pretty" => "format".to_owned(),
+        "diffjson" | "diffdocuments" | "compare" => "diff".to_owned(),
+        "patchjson" | "applypatch" => "patch".to_owned(),
+        "validatejson" | "validateschema" | "validation" => "validate".to_owned(),
+        "schema" | "makeschema" | "inferschema" | "generateschema" => "createschema".to_owned(),
+        "mergejson" | "mergedocuments" | "combine" => "merge".to_owned(),
+        _ => key,
+    };
     let allowed: &[&str] = match key.as_str() {
         "format" => &["indent", "sort_keys", "ascii_only"],
         "diff" => &[],
@@ -1308,34 +1470,161 @@ fn split_path(path: &str) -> Result<(String, String), String> {
     })
 }
 
-/// What `value` names as the input of a tool (`key` is the argument's name).
+/// What `value` names as the input of a tool (`key` is the argument's name). A model
+/// reads a few words of a schema and gives what it means the way it finds easiest -- the
+/// JSON itself, or its text -- as often as the forms the schema says. So:
+/// - "document", "results" and "last" (and a few other names of them) are what they say;
+/// - an object of one member `json`, `text`, `file` or `workspace` is that;
+/// - the full path of a .json, .jsonl, .ndjson or .geojson file is that file;
+/// - another string is the JSON it holds, or else text (which the tool that reads it then
+///   says is not JSON, and where);
+/// - any other value is the JSON itself.
 fn input_of(value: &Value, key: &str) -> Result<Input, String> {
-    let wrong = || {
-        format!(
-            "`{key}` is \"document\", \"results\", \"last\", or an object with one of `json`, \
-             `text`, `file`, `workspace`"
-        )
-    };
     match value {
-        Value::String(name) => match name.trim().to_ascii_lowercase().as_str() {
-            "document" | "source" => Ok(Input::Document),
-            "results" | "result" => Ok(Input::Results),
-            "last" | "kept" => Ok(Input::Last),
-            _ => Err(wrong()),
-        },
+        Value::String(text) => Ok(named_input(text).unwrap_or_else(|| text_input(text))),
         Value::Object(map) if map.len() == 1 => {
             let (what, given) = map.iter().next().expect("one member");
             match (what.as_str(), given) {
                 ("json", value) => Ok(Input::Json(value.clone())),
                 ("text", Value::String(text)) => Ok(Input::Text(text.clone())),
                 ("file", Value::String(path)) if !path.trim().is_empty() => {
-                    Ok(Input::File(PathBuf::from(path)))
+                    Ok(Input::File(PathBuf::from(path.trim())))
                 }
                 ("workspace", Value::String(path)) => Ok(Input::Workspace(workspace_path(path)?)),
-                _ => Err(wrong()),
+                ("text" | "file" | "workspace", _) => Err(format!(
+                    "`{key}`: {{\"{what}\": …}} takes a string{}",
+                    if what == "file" { ", a full path" } else { "" }
+                )),
+                _ => Ok(Input::Json(value.clone())),
             }
         }
-        _ => Err(wrong()),
+        _ => Ok(Input::Json(value.clone())),
+    }
+}
+
+/// "document", "results", "last", by the names a model gives them.
+fn named_input(text: &str) -> Option<Input> {
+    let name = text.trim().to_ascii_lowercase();
+    let name = name.strip_prefix("the ").unwrap_or(&name).trim();
+    Some(match name {
+        "document" | "doc" | "source" | "open document" | "current document" => Input::Document,
+        "results" | "result" | "query results" => Input::Results,
+        "last" | "kept" | "last result" | "previous" => Input::Last,
+        _ => return None,
+    })
+}
+
+/// A string that names none of those: a JSON file by its full path, the JSON it holds,
+/// or text.
+fn text_input(text: &str) -> Input {
+    let trimmed = text.trim();
+    let path = Path::new(trimmed);
+    let json_file = path.is_absolute()
+        && !trimmed.contains('\n')
+        && path.extension().and_then(|e| e.to_str()).is_some_and(|e| {
+            ["json", "jsonl", "ndjson", "geojson"].contains(&e.to_ascii_lowercase().as_str())
+        });
+    if json_file {
+        return Input::File(path.to_path_buf());
+    }
+    match serde_json::from_str::<Value>(trimmed) {
+        Ok(json) => Input::Json(json),
+        Err(_) => Input::Text(text.to_owned()),
+    }
+}
+
+/// What a `kind` of `workspace_save` names, by the words a model gives it.
+fn save_kind(kind: &str, language: Option<Language>) -> Option<SaveKind> {
+    let key: String = kind
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .map(|c| c.to_ascii_lowercase())
+        .collect();
+    Some(match key.as_str() {
+        "query" | "filter" | "expression" => SaveKind::Query(language.unwrap_or(Kind::Jq)),
+        "schema" | "jsonschema" => SaveKind::Schema,
+        "patch" | "jsonpatch" | "mergepatch" => SaveKind::Patch,
+        "document" | "doc" | "json" | "data" | "file" => SaveKind::Document,
+        "address" | "url" | "link" | "webaddress" => SaveKind::Address,
+        _ => SaveKind::Query(language_of(&key)?),
+    })
+}
+
+/// The name of an item without the ending of its file, and what the ending says it is:
+/// "late.jq", a jq query; "orders.schema.json", a schema.
+fn item_ending(name: &str) -> (String, Option<SaveKind>) {
+    let lower = name.to_ascii_lowercase();
+    let endings: [(&str, SaveKind); 11] = [
+        (".schema.json", SaveKind::Schema),
+        (".patch.json", SaveKind::Patch),
+        (".jq", SaveKind::Query(Kind::Jq)),
+        (".jsonpath", SaveKind::Query(Kind::JsonPath)),
+        (".jmespath", SaveKind::Query(Kind::JmesPath)),
+        (".jsonptr", SaveKind::Query(Kind::JsonPointer)),
+        (".url", SaveKind::Address),
+        (".json", SaveKind::Document),
+        (".jsonl", SaveKind::Document),
+        (".ndjson", SaveKind::Document),
+        (".geojson", SaveKind::Document),
+    ];
+    for (ending, kind) in endings {
+        if lower.ends_with(ending) && lower.len() > ending.len() {
+            return (name[..name.len() - ending.len()].to_owned(), Some(kind));
+        }
+    }
+    (name.to_owned(), None)
+}
+
+/// What an item is, when the call says neither its kind nor an ending: a web address,
+/// a query (text that is not JSON), a schema (an object with `$schema`), a patch (an
+/// array of operations), or a document.
+fn kind_of_content(content: Option<&Value>, language: Option<Language>) -> SaveKind {
+    let query = SaveKind::Query(language.unwrap_or(Kind::Jq));
+    let json = match content {
+        Some(Value::String(text)) => {
+            let trimmed = text.trim();
+            if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+                return SaveKind::Address;
+            }
+            if language.is_some() {
+                return query;
+            }
+            match named_input(text) {
+                Some(_) => return SaveKind::Document,
+                None => match serde_json::from_str::<Value>(trimmed) {
+                    Ok(json) => json,
+                    Err(_) => return query,
+                },
+            }
+        }
+        Some(value) => value.clone(),
+        None => return SaveKind::Document,
+    };
+    match &json {
+        Value::Object(map) if map.contains_key("$schema") => SaveKind::Schema,
+        Value::Array(ops)
+            if !ops.is_empty()
+                && ops
+                    .iter()
+                    .all(|op| op.get("op").is_some_and(Value::is_string)) =>
+        {
+            SaveKind::Patch
+        }
+        _ => SaveKind::Document,
+    }
+}
+
+/// The text of a query or a web address, as a model gives it: a string, or an object
+/// of one string.
+fn text_content(content: Option<&Value>) -> Result<String, String> {
+    match content {
+        Some(Value::String(text)) if !text.trim().is_empty() => Ok(text.clone()),
+        Some(Value::Object(map)) if map.len() == 1 => match map.values().next() {
+            Some(Value::String(text)) if !text.trim().is_empty() => Ok(text.clone()),
+            _ => Err("`content` of a query or a web address is its text".to_owned()),
+        },
+        None => Err("`content` is needed".to_owned()),
+        Some(_) => Err("`content` of a query or a web address is its text".to_owned()),
     }
 }
 
@@ -1894,23 +2183,25 @@ mod tests {
     }
 
     #[test]
-    fn an_input_is_the_document_the_results_or_one_thing_given() {
+    fn an_input_is_what_a_model_means_by_it() {
         let format = |input: Value| call("format_json", json!({ "input": input }));
         let input_of = |input: Value| match format(input) {
             Ok(Call::Format { input, .. }) => Ok(input),
             Ok(other) => panic!("{other:?}"),
             Err(e) => Err(e),
         };
+        // The forms the schema says.
         assert_eq!(input_of(json!("document")), Ok(Input::Document));
         assert_eq!(input_of(json!("Results")), Ok(Input::Results));
         assert_eq!(input_of(json!("last")), Ok(Input::Last));
+        assert_eq!(input_of(json!("the document")), Ok(Input::Document));
         assert_eq!(
             input_of(json!({"json": {"a": [1]}})),
             Ok(Input::Json(json!({"a": [1]})))
         );
         assert_eq!(
-            input_of(json!({"text": "[1]"})),
-            Ok(Input::Text("[1]".into()))
+            input_of(json!({"text": "[1"})),
+            Ok(Input::Text("[1".into()))
         );
         assert_eq!(
             input_of(json!({"file": "/data/a.json"})),
@@ -1920,19 +2211,198 @@ mod tests {
             input_of(json!({"workspace": "/q//orders.json"})),
             Ok(Input::Workspace("q/orders.json".into()))
         );
+        // What a model gives as often: the JSON itself, its text, a file's full path.
+        assert_eq!(
+            input_of(json!({"users": [{"name": "Ana"}]})),
+            Ok(Input::Json(json!({"users": [{"name": "Ana"}]})))
+        );
+        assert_eq!(input_of(json!([1, 2])), Ok(Input::Json(json!([1, 2]))));
+        assert_eq!(input_of(json!(7)), Ok(Input::Json(json!(7))));
+        assert_eq!(
+            input_of(json!({"json": 1, "text": "1"})),
+            Ok(Input::Json(json!({"json": 1, "text": "1"})))
+        );
+        assert_eq!(
+            input_of(json!("{\"a\": [1, 2]}")),
+            Ok(Input::Json(json!({"a": [1, 2]})))
+        );
+        assert_eq!(
+            input_of(json!("/data/orders.JSON")),
+            Ok(Input::File("/data/orders.JSON".into()))
+        );
+        // Text that is not JSON is given to the tool, which says what is wrong with it.
+        assert_eq!(
+            input_of(json!("not json, really")),
+            Ok(Input::Text("not json, really".into()))
+        );
         for wrong in [
-            json!("the document"),
-            json!({"json": 1, "text": "1"}),
             json!({"file": ""}),
+            json!({"file": 3}),
             json!({"workspace": "../etc"}),
-            json!([1]),
-            json!(7),
         ] {
             assert!(input_of(wrong.clone()).is_err(), "{wrong}");
         }
-        assert!(call("format_json", json!({}))
-            .unwrap_err()
-            .contains("`input` is needed"));
+        let needed = call("format_json", json!({})).unwrap_err();
+        assert!(needed.contains("`input` is needed"), "{needed}");
+        assert!(needed.contains("For example: {\"input\""), "{needed}");
+    }
+
+    #[test]
+    fn the_names_a_model_gives_arguments_are_the_tools() {
+        let input_of = |args: Value| match call("format_json", args) {
+            Ok(Call::Format { input, .. }) => input,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(
+            input_of(json!({"json": {"a": 1}})),
+            Input::Json(json!({"a": 1}))
+        );
+        assert_eq!(input_of(json!({"data": "[1]"})), Input::Json(json!([1])));
+        assert_eq!(
+            input_of(json!({"path": "/tmp/a.json"})),
+            Input::File("/tmp/a.json".into())
+        );
+        // Arguments sent as JSON text are read.
+        assert_eq!(
+            input_of(json!("{\"input\": {\"b\": 2}}")),
+            Input::Json(json!({"b": 2}))
+        );
+        // A name the tool has is its own: search's `text` is what is searched for.
+        assert!(matches!(
+            call("search", json!({"text": "Ana"})),
+            Ok(Call::Search { .. })
+        ));
+        let Ok(Call::RunQuery { query, .. }) =
+            call("run_query", json!({"filter": ".a", "lang": "jq"}))
+        else {
+            panic!()
+        };
+        assert_eq!(query, ".a");
+        let Ok(Call::RunQuery { query, input, .. }) = call("run_query", json!({"text": ".b"}))
+        else {
+            panic!()
+        };
+        assert_eq!((query.as_str(), input), (".b", Input::Document));
+        // What is not known is still said, with a call that works.
+        let unknown = call("format_json", json!({"input": 1, "colour": "red"})).unwrap_err();
+        assert!(unknown.contains("unknown argument `colour`"), "{unknown}");
+        assert!(unknown.contains("For example:"), "{unknown}");
+    }
+
+    #[test]
+    fn open_document_and_show_in_tool_take_what_a_model_gives_them() {
+        let open = |args: Value| match call("open_document", args) {
+            Ok(Call::OpenDocument { path, text, .. }) => (path, text),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(
+            open(json!({"json": {"a": 1}})),
+            (None, Some("{\"a\":1}".to_owned()))
+        );
+        assert_eq!(
+            open(json!({"text": [1, 2]})),
+            (None, Some("[1,2]".to_owned()))
+        );
+        assert_eq!(
+            open(json!({"text": "/home/me/data.json"})),
+            (Some("/home/me/data.json".into()), None)
+        );
+        assert_eq!(
+            open(json!({"file": "/a/b.json"})),
+            (Some("/a/b.json".into()), None)
+        );
+        let page = |tool: &str, inputs: Value| match call(
+            "show_in_tool",
+            json!({"tool": tool, "inputs": inputs}),
+        ) {
+            Ok(Call::ShowInTool { page, .. }) => page,
+            other => panic!("{tool}: {other:?}"),
+        };
+        assert!(matches!(
+            page("validate_json", json!([{"a": 1}, {"type": "object"}])),
+            ToolPage::Validate { .. }
+        ));
+        assert!(matches!(
+            page("Format JSON", json!([1])),
+            ToolPage::Format(_)
+        ));
+        assert!(matches!(
+            page("make schema", json!([1])),
+            ToolPage::CreateSchema(_)
+        ));
+    }
+
+    #[test]
+    fn workspace_save_takes_what_the_name_and_the_content_say() {
+        let save = |args: Value| match call("workspace_save", args) {
+            Ok(Call::WorkspaceSave {
+                folder,
+                name,
+                kind,
+                content,
+                ..
+            }) => (folder, name, kind, content),
+            other => panic!("{other:?}"),
+        };
+        // The screenshot's call: no kind, the JSON itself.
+        let (folder, name, kind, content) =
+            save(json!({"path": "examples/complex", "content": {"users": [1]}}));
+        assert_eq!((folder.as_str(), name.as_str()), ("examples", "complex"));
+        assert_eq!(kind, SaveKind::Document);
+        assert_eq!(content, Input::Json(json!({"users": [1]})));
+        // A name with its file's ending, given as `name` and `folder`.
+        let (folder, name, kind, _) =
+            save(json!({"folder": "q", "name": "late.jq", "content": ".orders[]"}));
+        assert_eq!((folder.as_str(), name.as_str()), ("q", "late"));
+        assert_eq!(kind, SaveKind::Query(Kind::Jq));
+        let (_, name, kind, _) =
+            save(json!({"path": "s/orders.schema.json", "content": {"type": "object"}}));
+        assert_eq!((name.as_str(), kind), ("orders", SaveKind::Schema));
+        // What the content is says it, without a kind or an ending.
+        assert_eq!(
+            save(json!({"path": "q/a", "content": ".a | b"})).2,
+            SaveKind::Query(Kind::Jq)
+        );
+        assert_eq!(
+            save(json!({"path": "q/a", "content": "$.a", "language": "jsonpath"})).2,
+            SaveKind::Query(Kind::JsonPath)
+        );
+        assert_eq!(
+            save(json!({"path": "w/feed", "content": "https://example.com/a.json"})).2,
+            SaveKind::Address
+        );
+        assert_eq!(
+            save(json!({"path": "s/x", "content": {"$schema": "https://json-schema.org/draft/2020-12/schema"}})).2,
+            SaveKind::Schema
+        );
+        assert_eq!(
+            save(json!({"path": "p/x", "content": [{"op": "add", "path": "/a", "value": 1}]})).2,
+            SaveKind::Patch
+        );
+        assert_eq!(
+            save(json!({"path": "d/x", "content": "{\"a\": 1}"})).2,
+            SaveKind::Document
+        );
+        // A kind by another name; a query's text in an object.
+        assert_eq!(
+            save(json!({"path": "d/x", "kind": "json", "content": {}})).2,
+            SaveKind::Document
+        );
+        assert_eq!(
+            save(json!({"path": "q/x", "type": "jmespath", "content": "a.b"})).2,
+            SaveKind::Query(Kind::JmesPath)
+        );
+        assert_eq!(
+            save(json!({"path": "q/x", "kind": "query", "content": {"text": ".a"}})).3,
+            Input::Text(".a".into())
+        );
+        let wrong = call(
+            "workspace_save",
+            json!({"path": "x", "kind": "banana", "content": 1}),
+        )
+        .unwrap_err();
+        assert!(wrong.contains("`kind` is one of"), "{wrong}");
+        assert!(wrong.contains("For example: {\"path\""), "{wrong}");
     }
 
     #[test]
