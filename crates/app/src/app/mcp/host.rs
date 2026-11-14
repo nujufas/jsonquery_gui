@@ -24,6 +24,7 @@ use std::time::{Duration, Instant, SystemTime};
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender};
 use jsonquery_core::{resolve, Document, DocumentSource, NodePath, PathSegment, ValueView};
 use jsonquery_mcp::shape::{self, pointer_of, resolve_pointer};
+use jsonquery_mcp::snippet::{self, Of};
 use jsonquery_mcp::{Call, Host, Input, Language, Target};
 use jsonquery_query::{Kind, OutputFormat};
 use serde_json::{json, Map, Value};
@@ -32,10 +33,13 @@ use super::super::{expand_home, lock, wake_windows, App, PanelKind};
 use crate::settings::FileLimits;
 use crate::tools::Place;
 use crate::worker::{self, Command, Event, SearchRoot};
-use crate::workspace::{address_in, Folder, Item, ItemKind, Workspace};
+use crate::workspace::{address_in, Folder, Item, ItemKind};
 use crate::workspace_pane::QUERY_LIMIT;
 
-use self::look::{json_size, on_view, Kept, Viewed, KEEP_BYTES, LOAD_TIME};
+use self::look::{
+    json_size, json_size_upto, on_view, page_member, short_name, JsonBytes, Kept, Viewed,
+    KEEP_BYTES, LOAD_TIME,
+};
 
 /// How often a call that waits for the app looks again.
 const POLL: Duration = Duration::from_millis(20);
@@ -45,6 +49,12 @@ const SEARCH_TIME: Duration = Duration::from_secs(30);
 const PREVIEW_CHARS: usize = 120;
 /// The most matches of a search the worker finds (`jsonquery_core::search`).
 const MAX_SEARCH_MATCHES: usize = 5_000;
+/// How far run_query counts the bytes of its results, for what it says of them: past
+/// that, only that they take more.
+const COUNTED_BYTES: usize = 256 << 20;
+/// How far the bytes of the results the user sees are counted, which are held under
+/// the app's lock (the window waits for it): past that, only that they take more.
+const RESULTS_COUNTED: usize = 16 << 20;
 
 const NO_DOCUMENT: &str = "no document is open in the app: give the tool a file as its input, \
                            open one with open_document (both need Edit), or ask the user to";
@@ -267,6 +277,8 @@ impl AppHost {
         })
     }
 
+    /// read_value: a page of the value at `pointer`; of one too big for a page, with the
+    /// notice that says it is a snippet of it, and how to read on.
     fn read_value(
         &self,
         input: &Input,
@@ -276,10 +288,31 @@ impl AppHost {
         max_bytes: usize,
         cancel: &AtomicBool,
     ) -> Result<Value, String> {
-        let (viewed, _) = self.viewed(input, cancel, Instant::now() + LOAD_TIME)?;
+        let (viewed, name) = self.viewed(input, cancel, Instant::now() + LOAD_TIME)?;
+        let whole_doc = match &viewed {
+            Viewed::Doc(doc) if pointer.is_empty() => Some(doc.byte_len),
+            _ => None,
+        };
         on_view!(&viewed, root => {
             let (value, path) = resolve_pointer(root, pointer)?;
-            Ok(shape::read(value, &path, offset, limit, max_bytes))
+            let bytes = whole_doc.unwrap_or_else(|| value.json_bytes() as u64);
+            let large = bytes > max_bytes as u64;
+            let room = if large { snippet::snippet_bytes(max_bytes) } else { max_bytes };
+            let (mut page, cuts) = shape::read(value, &path, offset, limit, room);
+            if !cuts.is_empty() && (large || cuts.for_bytes()) {
+                let at = pointer_of(&path);
+                let of = Of {
+                    member: page_member(&value),
+                    name: &short_name(&name),
+                    pointer: &at,
+                    is: shape::summary(&value),
+                    bytes: Some(bytes),
+                    at_least: false,
+                };
+                let next = input.argument().and_then(|arg| cuts.read_on(&arg));
+                page["snippet"] = self.notice(&of, &cuts, next, None);
+            }
+            Ok(page)
         })
     }
 
@@ -334,7 +367,7 @@ impl AppHost {
             .take(limit)
             .map(|path| found_at(resolve(root, path), path))
             .collect());
-        let (page, _) = shape::page(&shown, offset, offset, limit, max_bytes);
+        let (page, _, _) = shape::page(&shown, offset, offset, limit, max_bytes);
         let end = offset + page.len();
         let mut out = Map::new();
         out.insert("of".to_owned(), json!(name));
@@ -382,6 +415,7 @@ impl AppHost {
         let mut kept = Vec::new();
         // All of them, to keep as "last", while they are not too many.
         let mut all = Some(Vec::new());
+        // The bytes of all of them, counted as far as COUNTED_BYTES.
         let mut all_bytes = 0usize;
         let mut count = 0usize;
         let mut item_errors = 0usize;
@@ -402,8 +436,10 @@ impl AppHost {
             deadline,
             |gen, event| match event {
                 Event::QueryItem { gen: g, value } if g == gen => {
-                    if let Some(list) = &mut all {
+                    if all_bytes <= COUNTED_BYTES {
                         all_bytes += json_size(&value) + 1;
+                    }
+                    if let Some(list) = &mut all {
                         if all_bytes > KEEP_BYTES {
                             all = None;
                         } else {
@@ -446,9 +482,21 @@ impl AppHost {
             return Err("cancelled".to_owned());
         }
         let complete = matches!(finished, Some((false, _)));
-        let (items, next) = shape::page(&kept, offset, offset, limit, max_bytes);
-        let end = offset + items.len();
+        // All of them, as one array.
+        let results_bytes = all_bytes + 1;
+        let large = results_bytes > max_bytes;
+        let room = if large {
+            snippet::snippet_bytes(max_bytes)
+        } else {
+            max_bytes
+        };
+        let (items, next, mut cuts) = shape::page(&kept, offset, offset, limit, room);
+        let given = items.len();
+        let end = offset + given;
         let next = next.or_else(|| (end < count).then_some(end));
+        if let Some(next) = next {
+            cuts.paged("", true, count, given, next);
+        }
         let mut out = Map::new();
         out.insert("of".to_owned(), json!(name));
         out.insert("language".to_owned(), json!(language_key(engine)));
@@ -481,13 +529,14 @@ impl AppHost {
                 json!("each item is a row of text (the query ends in @csv or @tsv)"),
             );
         }
-        match all.filter(|_| complete) {
+        let kept_as_last = match all.filter(|_| complete) {
             Some(all) => {
                 self.keep(
                     Value::Array(all),
                     format!("the results of run_query {query:?} on {name}"),
                 );
                 out.insert("last".to_owned(), json!("kept: give \"last\" as an input"));
+                true
             }
             None => {
                 out.insert(
@@ -498,7 +547,35 @@ impl AppHost {
                         "not kept: the query did not finish".to_owned()
                     }),
                 );
+                false
             }
+        };
+        if !cuts.is_empty() && (large || cuts.for_bytes()) {
+            // Read on in what is kept; or, if it is not, run the query again from there.
+            let next = if kept_as_last {
+                cuts.read_on(&json!("last"))
+            } else {
+                next.zip(input.argument()).map(|(next, input)| {
+                    let mut arguments = json!({"query": query, "input": input, "offset": next});
+                    if let Some(language) = language {
+                        arguments["language"] = json!(language_key(language));
+                    }
+                    json!({"tool": "run_query", "arguments": arguments})
+                })
+            };
+            let of = Of {
+                member: "items",
+                name: "the results of the query",
+                pointer: "",
+                is: format!("{count} results"),
+                bytes: Some(results_bytes as u64),
+                at_least: !complete || all_bytes > COUNTED_BYTES,
+            };
+            let hint = (!kept_as_last).then_some(
+                "They are not kept as \"last\": to read a part of one by its pointer, narrow \
+                 the query to it.",
+            );
+            out.insert("snippet".to_owned(), self.notice(&of, &cuts, next, hint));
         }
         Ok(Value::Object(out))
     }
@@ -546,7 +623,9 @@ impl AppHost {
                 return None;
             }
             match &app.doc {
-                Some(doc) if Some(Arc::as_ptr(doc)) != before => Some(Ok(document_of(doc))),
+                Some(doc) if Some(Arc::as_ptr(doc)) != before => {
+                    Some(Ok(document_of(doc, app.mcp.page())))
+                }
                 _ => None,
             }
         })?;
@@ -675,7 +754,7 @@ impl AppHost {
             // The folders on the first page, in a quarter of it at most.
             if offset == 0 {
                 let folders: Vec<Value> = folders.into_iter().map(Value::String).collect();
-                let (shown, _) = shape::page(&folders, 0, 0, usize::MAX, max_bytes / 4);
+                let (shown, _, _) = shape::page(&folders, 0, 0, usize::MAX, max_bytes / 4);
                 if shown.len() < folders.len() {
                     out.insert(
                         "more_folders".to_owned(),
@@ -685,7 +764,7 @@ impl AppHost {
                 out.insert("folders".to_owned(), Value::Array(shown));
             }
             let used = Value::Object(out.clone()).to_string().len();
-            let (page, next) = shape::page(
+            let (page, next, _) = shape::page(
                 &items,
                 0,
                 offset,
@@ -702,8 +781,18 @@ impl AppHost {
         })?
     }
 
-    fn workspace_read(&self, path: &str, sample: bool, max_bytes: usize) -> Result<Value, String> {
-        self.with_app(|app| {
+    /// workspace_read: what an item holds, and its sample. A JSON file too big for the
+    /// page is given as a snippet of it, with the notice that says so: `snippet` for
+    /// the item's, `sample_snippet` for its sample's.
+    fn workspace_read(
+        &self,
+        path: &str,
+        sample: bool,
+        max_bytes: usize,
+        cancel: &AtomicBool,
+    ) -> Result<Value, String> {
+        // What the item is, under the app's lock; its files are read after.
+        let (item, file, sample_file) = self.with_app(|app| {
             let ws = app
                 .workspace_pane
                 .workspace()
@@ -711,28 +800,111 @@ impl AppHost {
             let item = ws.item(path).cloned().ok_or_else(|| {
                 format!("the workspace has no item \"{path}\": workspace_list gives their paths")
             })?;
-            let mut out = item_of(&item);
-            let limit = max_bytes as u64;
-            match item.kind {
-                ItemKind::Query(_) => {
-                    out["text"] = json!(ws.read_text(&item.path, QUERY_LIMIT)?);
-                }
-                ItemKind::Url => {
-                    let text = ws.read_text(&item.path, QUERY_LIMIT)?;
-                    out["url"] = json!(address_in(&text));
-                }
-                ItemKind::Schema | ItemKind::Patch | ItemKind::Document => {
-                    out["content"] = file_content(ws, &item.path, item.bytes, limit)?;
+            let file = ws.abs(&item.path);
+            let sample_file = item.sample.as_ref().map(|s| ws.abs(&s.path));
+            Ok::<_, String>((item, file, sample_file))
+        })??;
+        let mut out = item_of(&item);
+        // Room for the item's content and its sample, if both are asked for.
+        let content_bytes = if sample && item.sample.is_some() {
+            max_bytes / 2
+        } else {
+            max_bytes
+        };
+        let mut used = 0;
+        match item.kind {
+            ItemKind::Query(_) => {
+                out["text"] = json!(crate::workspace::read_text(&file, QUERY_LIMIT)?);
+            }
+            ItemKind::Url => {
+                let text = crate::workspace::read_text(&file, QUERY_LIMIT)?;
+                out["url"] = json!(address_in(&text));
+            }
+            ItemKind::Schema | ItemKind::Patch | ItemKind::Document => {
+                let (content, notice) = self.file_content(
+                    &file,
+                    item.bytes,
+                    &item.path,
+                    "content",
+                    content_bytes,
+                    cancel,
+                )?;
+                used = content.to_string().len();
+                out["content"] = content;
+                if let Some(notice) = notice {
+                    out["snippet"] = notice;
                 }
             }
-            if sample {
-                out["sample"] = match &item.sample {
-                    Some(s) => file_content(ws, &s.path, s.bytes, limit)?,
-                    None => Value::Null,
-                };
+        }
+        if sample {
+            out["sample"] = match (&item.sample, &sample_file) {
+                (Some(s), Some(file)) => {
+                    out["sample_path"] = json!(s.path);
+                    let room = max_bytes.saturating_sub(used).max(max_bytes / 2);
+                    let (content, notice) =
+                        self.file_content(file, s.bytes, &s.path, "sample", room, cancel)?;
+                    if let Some(notice) = notice {
+                        out["sample_snippet"] = notice;
+                    }
+                    content
+                }
+                _ => Value::Null,
+            };
+        }
+        Ok(out)
+    }
+
+    /// What a JSON file of the workspace holds (`rel`, its path there), for the
+    /// answer's `member`: as JSON if it is, as text if not; or, if it is more than
+    /// `max_bytes`, a snippet of it, and the notice that says so (read on by
+    /// `{"workspace": rel}`).
+    #[allow(clippy::too_many_arguments)]
+    fn file_content(
+        &self,
+        file: &Path,
+        bytes: u64,
+        rel: &str,
+        member: &str,
+        max_bytes: usize,
+        cancel: &AtomicBool,
+    ) -> Result<(Value, Option<Value>), String> {
+        if bytes <= max_bytes as u64 {
+            let text = crate::workspace::read_text(file, max_bytes as u64)?;
+            return Ok((
+                serde_json::from_str(&text).unwrap_or(Value::String(text)),
+                None,
+            ));
+        }
+        let limits = self.with_app(|app| app.settings.limits)?;
+        let doc = match self.load_file(file, limits, cancel, Instant::now() + LOAD_TIME) {
+            Ok(doc) => doc,
+            Err(e) if e == "cancelled" => return Err(e),
+            // Not JSON (or not read): what it is, and where, as before.
+            Err(e) => {
+                return Ok((
+                    json!({
+                        "$omitted": format!("{bytes} bytes, not read as JSON: {e}"),
+                        "file": file.display().to_string(),
+                    }),
+                    None,
+                ))
             }
-            Ok(out)
-        })?
+        };
+        let root = doc.root();
+        let (part, cuts) = snippet::snippet(&root, max_bytes);
+        let notice = cuts.map(|cuts| {
+            let of = Of {
+                member,
+                name: rel,
+                pointer: "",
+                is: shape::summary(&root),
+                bytes: Some(doc.byte_len),
+                at_least: false,
+            };
+            let next = cuts.read_on(&json!({ "workspace": rel }));
+            self.notice(&of, &cuts, next, None)
+        });
+        Ok((part, notice))
     }
 
     fn workspace_open(
@@ -855,7 +1027,7 @@ impl Host for AppHost {
                 path,
                 sample,
                 max_bytes,
-            } => self.workspace_read(&path, sample, max_bytes),
+            } => self.workspace_read(&path, sample, max_bytes, cancel),
             Call::WorkspaceOpen {
                 path,
                 sample,
@@ -1024,7 +1196,7 @@ fn state_of(app: &mut App) -> Value {
         .workspace()
         .map(|ws| ws.tree().item_count());
     let document = match &app.doc {
-        Some(doc) => document_of(doc),
+        Some(doc) => document_of(doc, app.mcp.page()),
         None => Value::Null,
     };
     json!({
@@ -1053,8 +1225,9 @@ fn state_of(app: &mut App) -> Value {
     })
 }
 
-/// What a document is, without its data.
-fn document_of(doc: &Document) -> Value {
+/// What a document is, without its data; one too big for a page (`page`, the bytes the
+/// user set) is said to be large.
+fn document_of(doc: &Document, page: usize) -> Value {
     let (source, place) = match &doc.source {
         DocumentSource::File(path) => ("file", json!(path.display().to_string())),
         DocumentSource::Url(url) => ("web address", json!(url)),
@@ -1078,6 +1251,9 @@ fn document_of(doc: &Document) -> Value {
     }
     out.insert("bytes".to_owned(), json!(doc.byte_len));
     out.insert("top".to_owned(), json!(shape::summary(&doc.root())));
+    if let Some(large) = snippet::large_hint(&short_name(&doc.source.label()), doc.byte_len, page) {
+        out.insert("large".to_owned(), json!(large));
+    }
     if doc.top_level_values > 1 {
         out.insert(
             "note".to_owned(),
@@ -1099,13 +1275,21 @@ fn document_of(doc: &Document) -> Value {
     Value::Object(out)
 }
 
-/// A page of the results the user sees, with what they are the results of.
+/// A page of the results the user sees, with what they are the results of; of results
+/// too big for a page, with the notice that says the page is a snippet of them.
 fn results_of(app: &App, offset: usize, limit: usize, max_bytes: usize) -> Value {
     let engine = app
         .query_engine
         .unwrap_or_else(|| Kind::detect(&app.query_text));
     let kept: &[Value] = app.results.as_array().map_or(&[], Vec::as_slice);
-    let (items, next) = shape::page(kept, 0, offset, limit, max_bytes);
+    let bytes = json_size_upto(&app.results, RESULTS_COUNTED);
+    let large = bytes.is_none_or(|bytes| bytes > max_bytes);
+    let room = if large {
+        snippet::snippet_bytes(max_bytes)
+    } else {
+        max_bytes
+    };
+    let (items, next, mut cuts) = shape::page(kept, 0, offset, limit, room);
     let mut out = Map::new();
     out.insert("query".to_owned(), json!(app.query_text));
     out.insert("language".to_owned(), json!(language_key(engine)));
@@ -1115,10 +1299,31 @@ fn results_of(app: &App, offset: usize, limit: usize, max_bytes: usize) -> Value
     }
     out.insert("count".to_owned(), json!(app.results_count_so_far));
     out.insert("offset".to_owned(), json!(offset));
-    let end = offset + items.len();
+    let given = items.len();
+    let end = offset + given;
     out.insert("items".to_owned(), Value::Array(items));
-    if let Some(next) = next.or_else(|| (end < kept.len()).then_some(end)) {
+    let next = next.or_else(|| (end < kept.len()).then_some(end));
+    if let Some(next) = next {
         out.insert("next_offset".to_owned(), json!(next));
+        cuts.paged("", true, kept.len(), given, next);
+    }
+    if !cuts.is_empty() && (large || cuts.for_bytes()) {
+        let of = Of {
+            member: "items",
+            name: "the results the user sees",
+            pointer: "",
+            is: format!("{} results", app.results_count_so_far),
+            bytes: Some(bytes.unwrap_or(RESULTS_COUNTED) as u64),
+            at_least: bytes.is_none() || app.results_truncated || app.query_running,
+        };
+        let notice = snippet::notice(
+            &of,
+            &cuts,
+            cuts.read_on(&json!("results")),
+            app.mcp.page(),
+            None,
+        );
+        out.insert("snippet".to_owned(), notice);
     }
     if app.results_truncated {
         out.insert(
@@ -1174,17 +1379,4 @@ fn list_folder(folder: &Folder, items: &mut Vec<Value>, folders: &mut Vec<String
     for sub in &folder.folders {
         list_folder(sub, items, folders);
     }
-}
-
-/// What a file of the workspace holds: as JSON if it is, as text if not; or, if it is
-/// more than `limit` bytes, where it is.
-fn file_content(ws: &Workspace, rel: &str, bytes: u64, limit: u64) -> Result<Value, String> {
-    if bytes > limit {
-        return Ok(json!({
-            "$omitted": format!("{bytes} bytes, more than max_bytes"),
-            "file": ws.abs(rel).display().to_string(),
-        }));
-    }
-    let text = ws.read_text(rel, limit)?;
-    Ok(serde_json::from_str(&text).unwrap_or(Value::String(text)))
 }

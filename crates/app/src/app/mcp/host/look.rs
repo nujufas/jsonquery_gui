@@ -12,6 +12,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use jsonquery_core::{Document, DocumentSource, Root, ValueView};
 use jsonquery_mcp::shape::{self, pointer_of, resolve_pointer};
+use jsonquery_mcp::snippet::{self, Cuts, Of};
 use jsonquery_mcp::Input;
 use serde_json::{json, Map, Value};
 
@@ -88,30 +89,52 @@ impl JsonBytes for &Value {
 
 /// How long `value` is, written compactly, without writing it anywhere.
 pub(super) fn json_size(value: &Value) -> usize {
-    struct Count(usize);
+    json_size_upto(value, usize::MAX).unwrap_or(usize::MAX)
+}
+
+/// How long `value` is, written compactly, counted no further than `cap` bytes: none if
+/// it is longer. For a value held under the app's lock, which the window waits for.
+pub(super) fn json_size_upto(value: &Value, cap: usize) -> Option<usize> {
+    struct Count(usize, usize);
     impl io::Write for Count {
         fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
             self.0 += bytes.len();
+            if self.0 > self.1 {
+                return Err(io::Error::other("longer"));
+            }
             Ok(bytes.len())
         }
         fn flush(&mut self) -> io::Result<()> {
             Ok(())
         }
     }
-    let mut count = Count(0);
-    let _ = serde_json::to_writer(&mut count, value);
-    count.0
+    let mut count = Count(0, cap);
+    serde_json::to_writer(&mut count, value).ok()?;
+    Some(count.0)
 }
 
-/// `bytes` as a person reads it: "1.2 GB", "340 KB", "12 bytes".
+/// `bytes` as a person reads it: "1.2 GB", "340.0 KB", "12 bytes".
 fn size_of(bytes: u64) -> String {
-    const UNITS: [(u64, &str); 3] = [(1_000_000_000, "GB"), (1_000_000, "MB"), (1_000, "KB")];
-    for (unit, name) in UNITS {
-        if bytes >= unit {
-            return format!("{:.1} {name}", bytes as f64 / unit as f64);
-        }
+    snippet::size_text(bytes)
+}
+
+/// What a document (or anything else a tool names) is called in what an answer says:
+/// a file by its name, without its folder; anything else as it is.
+pub(super) fn short_name(name: &str) -> String {
+    let path = std::path::Path::new(name);
+    match path.file_name() {
+        Some(file) if path.is_absolute() => file.to_string_lossy().into_owned(),
+        _ => name.to_owned(),
     }
-    format!("{bytes} bytes")
+}
+
+/// The member of a page of a value (`shape::read`) that holds what it gives.
+pub(super) fn page_member<V: ValueView>(value: &V) -> &'static str {
+    match value.kind() {
+        jsonquery_core::ValueKind::Array => "items",
+        jsonquery_core::ValueKind::Object => "members",
+        _ => "value",
+    }
 }
 
 /// `time` as RFC 3339, in UTC: "2026-11-11T09:30:00Z".
@@ -184,6 +207,49 @@ fn facts_of(doc: &Document, out: &mut Map<String, Value>) {
 }
 
 impl AppHost {
+    /// The page the user set for the answers, in bytes.
+    pub(super) fn page(&self) -> usize {
+        self.with_app(|app| app.mcp.page())
+            .unwrap_or(jsonquery_mcp::DEFAULT_PAGE)
+    }
+
+    /// The `snippet` of an answer that gives a snippet of `of` (see
+    /// `jsonquery_mcp::snippet`), with the call that reads on (`next`).
+    pub(super) fn notice(
+        &self,
+        of: &Of<'_>,
+        cuts: &Cuts,
+        next: Option<Value>,
+        hint: Option<&str>,
+    ) -> Value {
+        snippet::notice(of, cuts, next, self.page(), hint)
+    }
+
+    /// `value`, made by a tool and kept as "last" (`name` says what it is), whole if it
+    /// fits in `max_bytes`; if not, a snippet of it, and the notice of the answer's
+    /// `member` that holds it, which says to read on in "last".
+    pub(super) fn fitted(
+        &self,
+        value: &Value,
+        max_bytes: usize,
+        member: &str,
+        name: &str,
+    ) -> (Value, Option<Value>) {
+        let (part, cuts) = snippet::snippet(&value, max_bytes);
+        let notice = cuts.map(|cuts| {
+            let of = Of {
+                member,
+                name,
+                pointer: "",
+                is: shape::summary(&value),
+                bytes: Some(json_size(value) as u64),
+                at_least: false,
+            };
+            self.notice(&of, &cuts, cuts.read_on(&json!("last")), None)
+        });
+        (part, notice)
+    }
+
     /// Keep `value` as "last": what the assistant's `what` gave.
     pub(super) fn keep(&self, value: Value, what: String) {
         *locked(&self.last) = Some(Kept {
@@ -355,6 +421,14 @@ impl AppHost {
                     "page_bytes": page,
                 }),
             );
+            let what = if path.is_empty() {
+                short_name(&name)
+            } else {
+                format!("{:?} in {}", pointer_of(&path), short_name(&name))
+            };
+            if let Some(large) = snippet::large_hint(&what, bytes, page) {
+                out.insert("large".to_owned(), json!(large));
+            }
             Ok::<(), String>(())
         })?;
         // The lists go, the longest first, while it is more than a page.

@@ -11,15 +11,16 @@ use std::collections::HashMap;
 use jsonquery_core::{NodePath, PathSegment, ValueKind, ValueView};
 use serde_json::{json, Map, Value};
 
+use crate::snippet::{snip, Cuts};
+
 /// How many values [`describe`] looks at in all, however big the value is.
 const DESCRIBE_BUDGET: usize = 50_000;
 /// How many keys of one object it names; the rest are counted.
 const MAX_KEYS: usize = 60;
 /// How many example strings it gives of a place.
 const MAX_EXAMPLES: usize = 3;
-/// How long an example string or a preview may be, in characters.
+/// How long an example string may be, in characters.
 const EXAMPLE_CHARS: usize = 60;
-const PREVIEW_CHARS: usize = 200;
 
 /// The value at `pointer` (RFC 6901) below `root`, and its path.
 pub fn resolve_pointer<V: ValueView + Copy>(
@@ -140,7 +141,7 @@ fn count_of(n: usize, what: &str) -> String {
 
 /// `value` as JSON, if it takes no more than `budget` bytes written compactly; the
 /// budget is what is left of it. Walks no more of the value than that.
-fn whole<V: ValueView>(value: &V, budget: &mut usize) -> Option<Value> {
+pub(crate) fn whole<V: ValueView>(value: &V, budget: &mut usize) -> Option<Value> {
     fn take(budget: &mut usize, n: usize) -> Option<()> {
         *budget = budget.checked_sub(n)?;
         Some(())
@@ -181,91 +182,27 @@ fn whole<V: ValueView>(value: &V, budget: &mut usize) -> Option<Value> {
     }
 }
 
-fn json_len(text: &str) -> usize {
+pub(crate) fn json_len(text: &str) -> usize {
     Value::String(text.to_owned()).to_string().len()
-}
-
-/// What stands for a part that is too big to show: what it is, and where.
-fn omitted<V: ValueView>(value: &V, pointer: &str) -> Value {
-    let mut out = Map::new();
-    let what = match value.kind() {
-        ValueKind::String => {
-            let preview = value.scalar_preview().unwrap_or_default();
-            let start: String = preview.chars().take(PREVIEW_CHARS).collect();
-            out.insert("starts".to_owned(), Value::String(start));
-            "long string".to_owned()
-        }
-        _ => summary(value),
-    };
-    out.insert("$omitted".to_owned(), Value::String(what));
-    out.insert("pointer".to_owned(), Value::String(pointer.to_owned()));
-    Value::Object(out)
-}
-
-/// `value` cut down to about `budget` bytes: what fits whole is shown whole, each part
-/// that does not is [`omitted`], and what is left over once the budget runs out is
-/// counted.
-fn brief<V: ValueView>(value: &V, pointer: &str, budget: usize) -> Value {
-    let mut left = budget;
-    if let Some(all) = whole(value, &mut left) {
-        return all;
-    }
-    if !value.kind().is_container() {
-        return omitted(value, pointer);
-    }
-    let mut left = budget;
-    let mut items = Vec::new();
-    let mut members = Map::new();
-    let mut shown = 0;
-    for (segment, child) in value.iter_children() {
-        let Some(segment) = segment else { continue };
-        let child_pointer = format!("{pointer}{}", pointer_of(std::slice::from_ref(&segment)));
-        let mut room = left;
-        let shown_child =
-            whole(&child, &mut room).unwrap_or_else(|| omitted(&child, &child_pointer));
-        let cost = shown_child.to_string().len() + 1;
-        if cost > left && shown > 0 {
-            break;
-        }
-        left = left.saturating_sub(cost);
-        match segment {
-            PathSegment::Key(key) => {
-                members.insert(key, shown_child);
-            }
-            PathSegment::Index(_) => items.push(shown_child),
-        }
-        shown += 1;
-    }
-    let more = value.child_count().saturating_sub(shown);
-    if value.kind() == ValueKind::Array {
-        if more > 0 {
-            items.push(json!({"$more": format!("{more} more items"), "pointer": pointer}));
-        }
-        Value::Array(items)
-    } else {
-        if more > 0 {
-            members.insert(
-                "$more".to_owned(),
-                json!(format!(
-                    "{more} more members: read {pointer:?} with an offset"
-                )),
-            );
-        }
-        Value::Object(members)
-    }
 }
 
 /// The value at `path` (whose pointer is that of `path`), a page at a time: an array's
 /// items or an object's members from `offset`, at most `limit` of them and about
-/// `max_bytes` of JSON; a scalar whole, or the start of a string too long for that.
+/// `max_bytes` of JSON; a scalar whole, or the start of a string too long for that. An
+/// item too big for the page whole is given as a snippet of it ([`snippet`]) if it is
+/// the first, and the page ends after it. What the page leaves out is noted in what it
+/// gives with it: the value itself first, if there is more of it.
+///
+/// [`snippet`]: crate::snippet
 pub fn read<V: ValueView + Copy>(
     value: V,
     path: &NodePath,
     offset: usize,
     limit: usize,
     max_bytes: usize,
-) -> Value {
+) -> (Value, Cuts) {
     let pointer = pointer_of(path);
+    let mut cuts = Cuts::default();
     let mut out = Map::new();
     out.insert("pointer".to_owned(), Value::String(pointer.clone()));
     out.insert(
@@ -273,8 +210,11 @@ pub fn read<V: ValueView + Copy>(
         Value::String(kind_name(value.kind()).to_owned()),
     );
     if !value.kind().is_container() {
-        out.insert("value".to_owned(), brief(&value, &pointer, max_bytes));
-        return Value::Object(out);
+        out.insert(
+            "value".to_owned(),
+            snip(&value, &pointer, max_bytes, &mut cuts),
+        );
+        return (Value::Object(out), cuts);
     }
     let size = value.child_count();
     out.insert("size".to_owned(), json!(size));
@@ -286,27 +226,35 @@ pub fn read<V: ValueView + Copy>(
     for (n, (segment, child)) in value.iter_children_from(offset).take(limit).enumerate() {
         let Some(segment) = segment else { continue };
         let child_pointer = format!("{pointer}{}", pointer_of(std::slice::from_ref(&segment)));
-        let mut room = left;
+        let key_cost = match &segment {
+            PathSegment::Key(key) => json_len(key) + 1,
+            PathSegment::Index(_) => 0,
+        };
+        let mut room = left.saturating_sub(key_cost);
         let shown = match whole(&child, &mut room) {
             Some(all) => {
                 left = room.saturating_sub(1);
                 all
             }
-            // The first is shown as much as fits; after it, the page ends here.
+            // The first is given as a snippet of it; after it, the page ends here.
             None if n == 0 => {
                 left = 0;
                 next = Some(offset + 1);
-                brief(&child, &child_pointer, max_bytes)
+                snip(
+                    &child,
+                    &child_pointer,
+                    max_bytes.saturating_sub(key_cost),
+                    &mut cuts,
+                )
             }
             None => {
                 next = Some(offset + n);
+                cuts.ran_out();
                 break;
             }
         };
         match segment {
             PathSegment::Key(key) => {
-                let key_cost = json_len(&key) + 1;
-                left = left.saturating_sub(key_cost);
                 members.insert(key, shown);
             }
             PathSegment::Index(_) => items.push(shown),
@@ -316,30 +264,37 @@ pub fn read<V: ValueView + Copy>(
         }
     }
     let shown = items.len() + members.len();
-    let next = next.or_else(|| (offset + shown < size).then_some(offset + shown));
-    if value.kind() == ValueKind::Array {
+    let next = next
+        .or_else(|| Some(offset + shown))
+        .filter(|&next| next < size);
+    let array = value.kind() == ValueKind::Array;
+    if array {
         out.insert("items".to_owned(), Value::Array(items));
     } else {
         out.insert("members".to_owned(), Value::Object(members));
     }
     if let Some(next) = next {
         out.insert("next_offset".to_owned(), json!(next));
+        cuts.paged(&pointer, array, size, shown, next);
     }
-    Value::Object(out)
+    (Value::Object(out), cuts)
 }
 
 /// A page of `values` (the items of a query's results, the first of which is item
 /// `first`): from item `offset`, at most `limit` of them and about `max_bytes` of
-/// JSON. Gives the page and where the next one starts, if the page ended before
-/// `values` did.
+/// JSON. Gives the page, where the next one starts if the page ended before `values`
+/// did, and what the page leaves out of the items it gives: the first item, if it is
+/// too big for the page whole, is given as a snippet of it, and the page ends after
+/// it.
 pub fn page(
     values: &[Value],
     first: usize,
     offset: usize,
     limit: usize,
     max_bytes: usize,
-) -> (Vec<Value>, Option<usize>) {
+) -> (Vec<Value>, Option<usize>, Cuts) {
     let mut out = Vec::new();
+    let mut cuts = Cuts::default();
     let mut left = max_bytes;
     let start = offset.saturating_sub(first);
     for (n, value) in values.iter().skip(start).take(limit).enumerate() {
@@ -350,14 +305,18 @@ pub fn page(
                 out.push(all);
             }
             None if n == 0 => {
-                out.push(brief(&value, &format!("/{}", offset), max_bytes));
-                return (out, Some(offset + 1));
+                out.push(snip(&value, &format!("/{offset}"), max_bytes, &mut cuts));
+                let next = offset + 1;
+                return (out, (next < first + values.len()).then_some(next), cuts);
             }
-            None => return (out, Some(offset + n)),
+            None => {
+                cuts.ran_out();
+                return (out, Some(offset + n), cuts);
+            }
         }
     }
     let end = offset + out.len();
-    (out, (end < first + values.len()).then_some(end))
+    (out, (end < first + values.len()).then_some(end), cuts)
 }
 
 /// The shape of `value`: what kind it is, and for a container what is in it, `depth`
@@ -805,11 +764,18 @@ mod tests {
     fn read_gives_a_page_and_where_the_next_starts() {
         let doc = people();
         let (users, path) = resolve_pointer(&doc, "/users").unwrap();
-        let page = read(users, &path, 0, 2, 10_000);
+        let (page, cuts) = read(users, &path, 0, 2, 10_000);
         assert_eq!(page["size"], 3);
         assert_eq!(page["items"].as_array().unwrap().len(), 2);
         assert_eq!(page["next_offset"], 2);
-        let last = read(users, &path, 2, 2, 10_000);
+        // Paged by the limit, not the bytes: the array is what is left out, from 2.
+        assert!(!cuts.for_bytes());
+        assert_eq!(
+            cuts.read_on(&json!("document")).unwrap()["arguments"],
+            json!({"input": "document", "pointer": "/users", "offset": 2})
+        );
+        let (last, cuts) = read(users, &path, 2, 2, 10_000);
+        assert!(cuts.is_empty());
         assert_eq!(last["items"][0]["name"], "Cy");
         assert!(last.get("next_offset").is_none());
     }
@@ -820,13 +786,14 @@ mod tests {
             .map(|i| json!({"i": i, "text": "x".repeat(400)}))
             .collect();
         let doc = Value::Array(big);
-        let page = read(&doc, &Vec::new(), 0, 1000, 2_000);
+        let (page, cuts) = read(&doc, &Vec::new(), 0, 1000, 2_000);
         let items = page["items"].as_array().unwrap();
         assert!(items.len() >= 3 && items.len() < 6, "{}", items.len());
         assert_eq!(page["next_offset"], items.len());
+        assert!(cuts.for_bytes());
         // A first item bigger than the page: the parts that fit, and pointers to the rest.
         let doc = json!([{"small": 1, "huge": "y".repeat(5_000)}, 2]);
-        let page = read(&doc, &Vec::new(), 0, 10, 1_000);
+        let (page, _) = read(&doc, &Vec::new(), 0, 10, 1_000);
         assert_eq!(page["items"][0]["small"], 1);
         assert_eq!(page["items"][0]["huge"]["pointer"], "/0/huge");
         assert_eq!(page["items"][0]["huge"]["$omitted"], "long string");
@@ -836,10 +803,10 @@ mod tests {
     #[test]
     fn read_of_an_object_pages_its_members_in_order() {
         let doc = json!({"a": 1, "b": 2, "c": 3});
-        let page = read(&doc, &Vec::new(), 1, 1, 1_000);
+        let (page, _) = read(&doc, &Vec::new(), 1, 1, 1_000);
         assert_eq!(page["members"], json!({"b": 2}));
         assert_eq!(page["next_offset"], 2);
-        let scalar = read(&json!("hi"), &Vec::new(), 0, 1, 1_000);
+        let (scalar, _) = read(&json!("hi"), &Vec::new(), 0, 1, 1_000);
         assert_eq!(scalar["value"], "hi");
         assert_eq!(scalar["kind"], "string");
     }
@@ -847,16 +814,25 @@ mod tests {
     #[test]
     fn page_cuts_results_by_count_and_bytes() {
         let values: Vec<Value> = (0..100).map(|i| json!({"n": i})).collect();
-        let (items, next) = page(&values, 0, 10, 5, 10_000);
+        let (items, next, _) = page(&values, 0, 10, 5, 10_000);
         assert_eq!(items, values[10..15].to_vec());
         assert_eq!(next, Some(15));
-        let (items, next) = page(&values, 0, 95, 50, 10_000);
+        let (items, next, _) = page(&values, 0, 95, 50, 10_000);
         assert_eq!(items.len(), 5);
         assert_eq!(next, None);
-        let (items, next) = page(&values, 0, 0, 100, 500);
+        let (items, next, cuts) = page(&values, 0, 0, 100, 500);
         assert!(items.len() < 100 && next == Some(items.len()));
+        assert!(cuts.for_bytes() && cuts.is_empty());
+        // A last item too big for the page is given cut down, and nothing is said to follow.
+        let big = vec![json!(1), json!({"text": "z".repeat(3_000)})];
+        let (items, next, cuts) = page(&big, 0, 1, 10, 1_000);
+        assert_eq!(items[0]["text"]["$omitted"], "long string");
+        assert_eq!(next, None);
+        assert!(cuts.for_bytes() && !cuts.is_empty());
+        let (read_page, _) = read(&Value::Array(big), &Vec::new(), 1, 10, 1_000);
+        assert!(read_page.get("next_offset").is_none(), "{read_page}");
         // Results that start further on (the window of a run that began at an offset).
-        let (items, _) = page(&values[40..60], 40, 45, 2, 10_000);
+        let (items, _, _) = page(&values[40..60], 40, 45, 2, 10_000);
         assert_eq!(items, values[45..47].to_vec());
     }
 
@@ -983,7 +959,7 @@ mod tests {
         let (item, path) = resolve_pointer(root, "/1500/name").unwrap();
         assert_eq!(item.scalar_value(), Some(json!("n1500")));
         assert_eq!(pointer_of(&path), "/1500/name");
-        let page = read(root, &Vec::new(), 1990, 20, 10_000);
+        let (page, _) = read(root, &Vec::new(), 1990, 20, 10_000);
         assert_eq!(page["items"].as_array().unwrap().len(), 10);
         assert_eq!(page["items"][9]["id"], 1999);
         let shape = describe(root, 3, 50, 100_000);

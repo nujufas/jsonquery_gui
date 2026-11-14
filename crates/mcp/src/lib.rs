@@ -8,9 +8,10 @@
 //! What is here knows nothing of the window: it speaks the protocol (`protocol.rs`)
 //! over HTTP on the loopback address (`http.rs`), says which tools there are and
 //! reads what they are asked (`catalogue.rs`), and has the parts of their answers
-//! that need no app — the shape of a value, a page of it (`shape.rs`), the help on
-//! the query languages (`help.rs`). What a tool does in the app is the app's to do,
-//! through the one method of [`Host`].
+//! that need no app — the shape of a value, a page of it (`shape.rs`), a snippet of a
+//! value too big for a page and the notice that says so, the same in every answer
+//! (`snippet.rs`), the help on the query languages (`help.rs`). What a tool does in the
+//! app is the app's to do, through the one method of [`Host`].
 //!
 //! For an assistant that starts its servers itself and speaks to them over stdin and
 //! stdout, the program `jsonquery-mcp` (`bridge.rs`) takes their calls to the app.
@@ -21,13 +22,16 @@ mod help;
 mod http;
 mod protocol;
 pub mod shape;
+pub mod snippet;
 
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use serde_json::Value;
 
-pub use catalogue::{language_key, Call, Input, Language, SaveKind, Target, ToolPage, TOOL_NAMES};
+pub use catalogue::{
+    language_key, parse, Call, Input, Language, SaveKind, Target, ToolPage, TOOL_NAMES,
+};
 pub use http::{url_of, Config, Server};
 pub use protocol::{Activity, Status, PROTOCOL_VERSIONS};
 

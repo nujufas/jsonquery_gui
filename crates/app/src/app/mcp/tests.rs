@@ -17,6 +17,8 @@ use super::*;
 use crate::scratch_dir::ScratchDir;
 use crate::settings::Settings;
 
+mod snippets;
+
 const WAIT: Duration = Duration::from_secs(20);
 
 /// An app, and the host its server would have.

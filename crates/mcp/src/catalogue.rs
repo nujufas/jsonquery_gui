@@ -62,6 +62,19 @@ impl Input {
             _ => Access::Read,
         }
     }
+
+    /// How a call names it again, as its `input` (for the call an answer says reads
+    /// on): none for the JSON, or its text, given in the call.
+    pub fn argument(&self) -> Option<Value> {
+        Some(match self {
+            Input::Document => json!("document"),
+            Input::Results => json!("results"),
+            Input::Last => json!("last"),
+            Input::File(path) => json!({"file": path.display().to_string()}),
+            Input::Workspace(rel) => json!({ "workspace": rel }),
+            Input::Json(_) | Input::Text(_) => return None,
+        })
+    }
 }
 
 /// A page of the Tools, with how it is set, for `show_in_tool`.
@@ -530,8 +543,9 @@ fn definition(name: &str) -> Value {
             "read_value" => (
                 "Read a value",
                 "The value at a JSON Pointer, a page at a time: an array's items or an \
-                 object's members from `offset`, at most `limit`. A part too big for the page \
-                 is {\"$omitted\": what, \"pointer\": where}: read it by that pointer.",
+                 object's members from `offset`, at most `limit`. Of a value too big for a \
+                 page, a snippet, said in `snippet`: a part left out is {\"$omitted\": what, \
+                 \"pointer\": where}, read by that pointer.",
                 json!({
                     "input": input_schema(DOCUMENT),
                     "pointer": pointer_schema(),

@@ -11,11 +11,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use jsonquery_core::ValueView;
+use jsonquery_mcp::snippet::{self, Cuts, Of};
 use jsonquery_mcp::{shape, Input, ToolPage};
 use jsonquery_query::diff::ChangeKind;
 use jsonquery_query::{infer, merge, reformat};
 use serde_json::{json, Map, Value};
 
+use super::look::{json_size_upto, on_view, short_name, JsonBytes, Viewed, LOAD_TIME};
 use super::{full_path, AppHost, NO_DOCUMENT, POLL};
 use crate::tools::jobs::{self, Job, Outcome};
 use crate::tools::PageSetting;
@@ -36,26 +39,33 @@ fn pretty(value: &Value) -> String {
     serde_json::to_string_pretty(value).unwrap_or_default()
 }
 
-/// The first `max_bytes` of `text` (at a character's start), and whether that is all.
-fn cut(text: &str, max_bytes: usize) -> (&str, bool) {
-    if text.len() <= max_bytes {
-        return (text, true);
-    }
-    let mut end = max_bytes;
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    (&text[..end], false)
+/// How many pages bigger a value may be for format_json to format all of it, to see
+/// whether that fits in a page: past that, it formats a snippet of it, and no more.
+const FORMAT_ALL_PAGES: u64 = 8;
+
+/// What `text` takes in an answer, as a JSON string: its quotes and line ends are
+/// written escaped, which in formatted JSON is a quarter more.
+fn text_cost(text: &str) -> usize {
+    serde_json::to_string(text).map_or(usize::MAX, |s| s.len())
 }
 
-/// `value` whole if it fits in `max_bytes` of JSON; if not, its first level, a page
-/// of it, with what does not fit written as `$omitted`.
-fn fitted(value: &Value, max_bytes: usize) -> Value {
-    let text = value.to_string();
-    if text.len() <= max_bytes {
-        return value.clone();
+/// A snippet of `value` formatted with `options`, taking about `budget` bytes in an
+/// answer: the snippet is made smaller until its text fits.
+fn formatted_snippet<V: ValueView>(
+    value: &V,
+    options: &reformat::Options,
+    budget: usize,
+) -> (String, Cuts) {
+    let mut room = budget;
+    loop {
+        let (part, cuts) = snippet::cut_to(value, room);
+        let text = reformat::render(&part, options);
+        let cost = text_cost(&text);
+        if cost <= budget || room < 500 {
+            return (text, cuts);
+        }
+        room = (room as u128 * budget as u128 / cost as u128) as usize * 9 / 10;
     }
-    shape::read(value, &Vec::new(), 0, usize::MAX, max_bytes)
 }
 
 fn change_kind(kind: ChangeKind) -> &'static str {
@@ -143,13 +153,23 @@ impl AppHost {
         self.timed(cancel, timeout, |stop| jobs::run(job, stop, &limits))?
     }
 
-    /// The file of a JSON item of the workspace (a document, a schema, a patch).
+    /// The file of a JSON item of the workspace (a document, a schema, a patch), or of
+    /// an item's sample (by its path, as workspace_read gives it).
     pub(super) fn workspace_json(&self, rel: &str) -> Result<PathBuf, String> {
         self.with_app(|app| {
             let ws = app
                 .workspace_pane
                 .workspace()
                 .ok_or("the app has no workspace folder")?;
+            let sample_of = |rel: &str| {
+                ws.tree()
+                    .all_items()
+                    .into_iter()
+                    .any(|item| item.sample.as_ref().is_some_and(|s| s.path == rel))
+            };
+            if ws.item(rel).is_none() && sample_of(rel) {
+                return Ok(ws.abs(rel));
+            }
             let item = ws.item(rel).ok_or_else(|| {
                 format!("the workspace has no item \"{rel}\": workspace_list gives their paths")
             })?;
@@ -161,6 +181,28 @@ impl AppHost {
                 )),
             }
         })?
+    }
+
+    /// About how many bytes of JSON `input` takes, found without reading it (a file's
+    /// size), and counted no further than `cap` for what is held in memory.
+    fn input_bytes(&self, input: &Input, cap: usize) -> Result<u64, String> {
+        let counted = |value: &Value| json_size_upto(value, cap).map_or(u64::MAX, |n| n as u64);
+        let file_size = |path: &Path| {
+            std::fs::metadata(path)
+                .map(|meta| meta.len())
+                .map_err(|e| format!("{} could not be read: {e}", path.display()))
+        };
+        Ok(match input {
+            Input::Document => self
+                .with_app(|app| app.doc.as_ref().map(|doc| doc.byte_len))?
+                .ok_or(NO_DOCUMENT)?,
+            Input::Results => self.with_app(|app| counted(&app.results))?,
+            Input::Last => counted(&self.kept()?.0),
+            Input::Json(value) => counted(value),
+            Input::Text(text) => text.len() as u64,
+            Input::File(path) => file_size(&full_path(path)?)?,
+            Input::Workspace(rel) => file_size(&self.workspace_json(rel)?)?,
+        })
     }
 
     /// What `input` names, as the Tools' jobs take it, and what to call it.
@@ -284,6 +326,8 @@ impl AppHost {
         Ok(text)
     }
 
+    /// format_json: all of the value formatted, if that fits in a page; if not, a
+    /// snippet of it formatted, with the notice that says so.
     pub(super) fn format_json(
         &self,
         input: &Input,
@@ -291,31 +335,63 @@ impl AppHost {
         max_bytes: usize,
         cancel: &Arc<AtomicBool>,
     ) -> Result<Value, String> {
-        let (input, name) = self.job_input(input)?;
-        let Outcome::Format(formatted) =
-            self.run_job(Job::Format { input, options }, cancel, TOOL_TIME)?
-        else {
-            return Err("the Tools gave something else".to_owned());
-        };
-        if formatted.streamed.is_some() {
-            return Err(format!(
-                "{name} is kept on disk (it is too big to be held as text): save_file writes it \
-                 formatted"
-            ));
+        let may_fit = FORMAT_ALL_PAGES * max_bytes as u64;
+        if self.input_bytes(input, may_fit as usize)? <= may_fit {
+            let (job_input, name) = self.job_input(input)?;
+            let Outcome::Format(formatted) = self.run_job(
+                Job::Format {
+                    input: job_input,
+                    options,
+                },
+                cancel,
+                TOOL_TIME,
+            )?
+            else {
+                return Err("the Tools gave something else".to_owned());
+            };
+            if formatted.streamed.is_none() && text_cost(&formatted.text) <= max_bytes {
+                return Ok(json!({
+                    "of": name,
+                    "bytes": formatted.text.len(),
+                    "complete": true,
+                    "text": &*formatted.text,
+                }));
+            }
         }
-        let (shown, complete) = cut(&formatted.text, max_bytes);
-        let mut out = Map::new();
-        out.insert("of".to_owned(), json!(name));
-        out.insert("bytes".to_owned(), json!(formatted.text.len()));
-        out.insert("complete".to_owned(), json!(complete));
-        out.insert("text".to_owned(), json!(shown));
-        if !complete {
-            out.insert(
-                "note".to_owned(),
-                json!("the text is cut to a page: save_file writes all of it"),
+        let (viewed, name) = self.viewed(input, cancel, Instant::now() + LOAD_TIME)?;
+        let called = short_name(&name);
+        on_view!(&viewed, root => {
+            let bytes = match &viewed {
+                Viewed::Doc(doc) => doc.byte_len,
+                Viewed::Value(_) => root.json_bytes() as u64,
+            };
+            let (text, cuts) =
+                formatted_snippet(&root, &options, snippet::snippet_bytes(max_bytes));
+            let of = Of {
+                member: "text",
+                name: &called,
+                pointer: "",
+                is: shape::summary(&root),
+                bytes: Some(bytes),
+                at_least: false,
+            };
+            let next = input.argument().and_then(|arg| cuts.read_on(&arg));
+            let notice = self.notice(
+                &of,
+                &cuts,
+                next,
+                Some(
+                    "The text is the snippet formatted, with what it leaves out written in its \
+                     place: save_file writes all of it formatted (it needs Edit).",
+                ),
             );
-        }
-        Ok(Value::Object(out))
+            Ok(json!({
+                "of": name,
+                "complete": false,
+                "text": text,
+                "snippet": notice,
+            }))
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -354,7 +430,7 @@ impl AppHost {
             })
             .collect();
         let start = offset.min(changes.len());
-        let (page, next) = shape::page(&changes[start..], start, start, limit, max_bytes);
+        let (page, next, _) = shape::page(&changes[start..], start, start, limit, max_bytes);
         let mut out = Map::new();
         out.insert("left".to_owned(), json!(left_name));
         out.insert("right".to_owned(), json!(right_name));
@@ -384,8 +460,12 @@ impl AppHost {
                 .filter_map(|line| serde_json::from_str(line.trim().trim_end_matches(',')).ok())
                 .collect::<Vec<Value>>()
                 .into();
-            out.insert("patch".to_owned(), fitted(&patch, max_bytes));
+            let (shown, notice) = self.fitted(&patch, max_bytes, "patch", "the JSON Patch");
+            out.insert("patch".to_owned(), shown);
             out.insert("last".to_owned(), json!(KEPT));
+            if let Some(notice) = notice {
+                out.insert("snippet".to_owned(), notice);
+            }
             self.keep(
                 patch,
                 format!("the JSON Patch from {left_name} to {right_name}"),
@@ -421,16 +501,20 @@ impl AppHost {
             None => serde_json::from_str(&patched.text)
                 .map_err(|e| format!("the patched document is not JSON: {e}"))?,
         };
-        let result = fitted(&value, max_bytes);
+        let (result, notice) = self.fitted(&value, max_bytes, "result", "the patched document");
         self.keep(value, format!("{name} with {patch_name} applied"));
-        Ok(json!({
+        let mut answer = json!({
             "of": name,
             "patch": patch_name,
             "kind": if merge_patch { "JSON Merge Patch" } else { "JSON Patch" },
             "operations": patched.operations,
             "result": result,
             "last": KEPT,
-        }))
+        });
+        if let Some(notice) = notice {
+            answer["snippet"] = notice;
+        }
+        Ok(answer)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -455,14 +539,17 @@ impl AppHost {
                 merge::merge(values, &names, filter, stop)
             })?
             .map_err(|e| e.to_string())?;
-        let result = fitted(&merged.value, max_bytes);
-        let answer = json!({
+        let (result, notice) = self.fitted(&merged.value, max_bytes, "result", "the merge");
+        let mut answer = json!({
             "documents": names,
             "filter": filter,
             "outputs": merged.outputs,
             "result": result,
             "last": KEPT,
         });
+        if let Some(notice) = notice {
+            answer["snippet"] = notice;
+        }
         self.keep(merged.value, format!("the merge of {}", names.join(", ")));
         Ok(answer)
     }
@@ -508,7 +595,7 @@ impl AppHost {
                 out
             })
             .collect();
-        let (page, _) = shape::page(&problems, offset, offset, limit, max_bytes);
+        let (page, _, _) = shape::page(&problems, offset, offset, limit, max_bytes);
         let end = offset + page.len();
         let mut out = json!({
             "of": name,
@@ -544,13 +631,17 @@ impl AppHost {
         };
         let schema: Value = serde_json::from_str(&created.text)
             .map_err(|e| format!("the schema made is not JSON: {e}"))?;
-        let answer = json!({
+        let (shown, notice) = self.fitted(&schema, max_bytes, "schema", "the schema made");
+        let mut answer = json!({
             "of": name,
             "draft": options.draft.name(),
             "properties": created.properties,
-            "schema": fitted(&schema, max_bytes),
+            "schema": shown,
             "last": KEPT,
         });
+        if let Some(notice) = notice {
+            answer["snippet"] = notice;
+        }
         self.keep(schema, format!("the schema made of {name}"));
         Ok(answer)
     }

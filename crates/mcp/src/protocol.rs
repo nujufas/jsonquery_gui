@@ -37,6 +37,11 @@ before reading it, then read it with read_value, or query it with run_query.
 - Every answer is at most a page, of the size the user set (small for a model with a small \
 context): where there is more, next_offset says where the next page starts. Narrow the query \
 rather than read everything.
+- Never ask for all of a large document: it would not fit. A value too big for a page is given \
+as a snippet, and the answer says so in `snippet`: how big all of it is, the arrays in it (how \
+many items, how many given), and `next`, the call that reads on. In the snippet, a part left \
+out is {\"$omitted\": what, \"pointer\": where}, and the items after the last given \
+{\"$more\": how many, \"pointer\": where, \"offset\": from}.
 - The tools that only read work out of sight: the user sees nothing change. They take any \
 document as `input`: the JSON itself (or its text), \"document\" (open in the app), \"results\" \
 (the user's), a JSON file's full path, {\"workspace\": …}, or \"last\": what your last \
@@ -435,6 +440,17 @@ pub(crate) mod tests {
         assert_eq!(answer["result"]["protocolVersion"], "2025-06-18");
         assert_eq!(answer["result"]["serverInfo"]["name"], "jsonquery");
         assert!(answer["result"]["capabilities"]["tools"].is_object());
+        // What a model reads first says not to ask for all of a large document, and how an
+        // answer says it gives a snippet.
+        let instructions = answer["result"]["instructions"].as_str().unwrap();
+        assert!(
+            instructions.contains("Never ask for all of a large document: it would not fit."),
+            "{instructions}"
+        );
+        assert!(
+            instructions.contains("the answer says so in `snippet`"),
+            "{instructions}"
+        );
         assert_eq!(d.status().clients, vec!["claude-code 2.1".to_owned()]);
         let answer = ask(
             &d,

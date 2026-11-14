@@ -157,9 +157,61 @@ Every answer is at most a page, of the size the panel's **Answers** says: 24 KB 
 6,000 tokens of a model), 4 KB to 200 KB. A model that runs on your own computer has a small
 context: a smaller page keeps it from filling. Where there is more, the answer says `next_offset`,
 and the assistant asks again with `offset`; `limit` caps how many items a page has (20 by default).
-A part too big for the page is written as
-`{"$omitted": "array with 120000 items", "pointer": "/users"}`, to be read with that pointer.
 `describe` goes fewer levels down if more would not fit, and says so; the help comes in pages too.
+
+### A snippet, and the notice that says so
+
+A model that wants a document asks for all of it as often as not: `read_value` with no pointer,
+`run_query` with `.`, `format_json`, the results you see, an item of the workspace. A big one would
+not fit in its context, and often holds arrays of thousands of items. So a value too big for a page
+is given as a **snippet** of it, made the same way by every tool:
+
+- an array gives its first items (the first one cut down too, if it alone is too big);
+- an object gives its small members whole, and shares the room that is left among its big ones,
+  each cut down the same way;
+- a long string gives its start;
+- a part with no room left is `{"$omitted": "array with 120000 items", "pointer": "/users"}`, and
+  the items (or members) after the last one given are
+  `{"$more": "119782 more items", "pointer": "/users", "offset": 218}`.
+
+`format_json` formats the snippet, so its text is JSON too; `save_file` writes all of it.
+
+And the answer says so, in the same words in every tool, in its member `snippet`:
+
+```json
+"snippet": {
+  "note": "Large: people.json takes 11.6 MB as JSON, about 2.9M tokens: 485 pages of 24000 bytes. It holds arrays: the biggest, at \"/users\", has 120000 items, 218 of them given here. `members` holds a snippet of it, not all of it. Do not ask for all of it: it would not fit. `next` reads on from where the snippet stops; read_value reads any part by its pointer, a page at a time; run_query picks, filters or counts what you need; describe gives its shape.",
+  "in": "members",
+  "of": "people.json",
+  "is": "object with 2 members",
+  "bytes": 11626720,
+  "size": "11.6 MB",
+  "tokens_about": 2906680,
+  "arrays": [{"pointer": "/users", "items": 120000, "given": 218, "next_offset": 218}],
+  "objects": [{"pointer": "", "members": 2, "given": 1, "next_offset": 1}],
+  "next": {"tool": "read_value", "arguments": {"input": "document", "pointer": "", "offset": 1}}
+}
+```
+
+That is `read_value` with no pointer, of a file of 120,000 users and a little more, with the page
+of 24 KB: the answer gives the first 218 users and ends them with
+`{"$more": "119782 more items", "pointer": "/users", "offset": 218}`; it reads the document a
+member at a time, so `next` is its next member, and `arrays` says where the users go on.
+
+| Member | What it says |
+|---|---|
+| `note` | That it is large and how large, the biggest array (or object) not given whole, that this is a snippet and not all of it, and how to go on |
+| `in` | The member of the answer that holds the snippet: `items`, `members`, `value`, `result`, `schema`, `patch`, `text`, `content`, `sample` |
+| `of`, `pointer`, `is` | What it is a snippet of, where in it (none: all of it), and what it is |
+| `bytes`, `size`, `tokens_about` | How big all of it is, as JSON (`at_least`: no less than that) |
+| `arrays`, `objects` | The arrays (and objects) not given whole, the biggest first: how many items each has, how many are given, and the offset to read on from |
+| `strings_cut` | How many strings are given only by their start |
+| `next` | A call that reads on from where the snippet stops, ready to make: `read_value` on the same document, or on `"last"` for what a tool made or a query gave (kept there), or `run_query` again from the next result for results too many to keep; none where there is no such call (the JSON given in the call) |
+
+What fits in a page is given whole, and nothing is said. `workspace_read` with `sample` gives the
+sample's notice as `sample_snippet` (a sample is read on by its own path, `{"workspace": "…"}`).
+`get_state`, `open_document` and `document_info` say of a document too big for a page that it is
+`large`, in the same words, before anything is read.
 
 `document_info` and `describe` are how an assistant learns a large document before it reads it: the
 first counts what is in it (for up to 10 seconds; it says if it counted only a part) and says where
